@@ -1,5 +1,6 @@
 """Convert a PS1 VAB sound bank (e.g. the one in a door file, DOORnn.DO2) to
-the DS sound format (source/formats.h, SoundBankHeader).
+the DS sound format (source/formats.h, SoundBankHeader). Every bank is keyed
+by sound number (door: 0 = opens, 1 = closes; se_on / FUN_80057364).
 
 Every tone becomes 16-bit PCM at the rate the PS1 plays it for its key range:
 the SPU plays a sample at 44100 Hz when the key-on note equals the tone's
@@ -101,9 +102,9 @@ def main():
             return
         tone, ps, vags = parse_vab(d, offs["room_vab_header"], d[offs["room_vab_data"]:])
         picks = sound_table(struct.unpack_from("<48I", d, offs["room_sound"]))
-    else:                           # door bank: every tone, keyed by its note
+    else:                           # door bank: sound table in the first 16 bytes
         tone, ps, vags = parse_vab(d, base)
-        picks = None
+        picks = sound_table(struct.unpack_from("<4I", d, 0))
     entries, pcm = [], bytearray()
     if picks is None:
         items = [(None, tone(0, i)) for i in range(16) if tone(0, i)["vag"] > 0]

@@ -57,6 +57,10 @@ typedef struct {
 
 extern Aot aots[NUM_AOTS];
 
+// Instruction sizes in bytes (opcode included), 0 = unknown; shared with the
+// door program player (door.c)
+extern const uint8_t scd_op_size[256];
+
 // Engine hooks, implemented in main.c
 void game_show_message(const char *text);   // pauses play until closed
 int game_message_open(void);

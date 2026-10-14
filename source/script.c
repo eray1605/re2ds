@@ -11,7 +11,7 @@
 
 // Instruction sizes in bytes, opcode included (OpenBiohazard2 fileio/rdt_scd.go);
 // 0 = unknown opcode.
-static const uint8_t op_size[256] = {
+const uint8_t scd_op_size[256] = {
     [0] = 1, [1] = 1, [2] = 1, [3] = 4, [4] = 4, [5] = 2, [6] = 4, [7] = 4, [8] = 1, [9] = 4,
     [10] = 3, [11] = 1, [12] = 1, [13] = 6, [14] = 2, [15] = 4, [16] = 2, [17] = 4, [18] = 2,
     [19] = 4, [20] = 6, [21] = 2, [22] = 2, [23] = 6, [24] = 2, [25] = 2, [26] = 2, [29] = 4,
@@ -353,7 +353,7 @@ static void run_thread(Thread *t)
             return; // do loop iteration done
         const uint8_t *ins = t->code + t->pc;
         int op = ins[0];
-        int size = op_size[op];
+        int size = scd_op_size[op];
         if (size == 0) {
             script_unknown_ops++;
             t->active = 0;
@@ -443,7 +443,7 @@ static void run_thread(Thread *t)
                 Block *d = &t->blocks[t->nblocks - 1];
                 Block *c = push_block(t, B_DOCOND, t->pc, d->end);
                 if (c)
-                    c->loop = d->start + op_size[OP_DO];
+                    c->loop = d->start + scd_op_size[OP_DO];
             }
             break;
         case OP_SWITCH: {

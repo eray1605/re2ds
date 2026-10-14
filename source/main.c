@@ -17,6 +17,7 @@
 
 #include "assets.h"
 #include "script.h"
+#include "door.h"
 #include "sound.h"
 
 // Leon's first playable room and the camera the converter picked a spawn for
@@ -234,21 +235,21 @@ static void build_hierarchy(void)
 }
 
 // ---------------------------------------------------------------- rendering
-static void setup_projection(const RoomCamera *c)
+// Camera like the PS1: lookAt(from, to) with up = -Y, projection onto a
+// 320x240 screen at distance `screen`, same vertical field of view on 256x192.
+// gluLookAtf32 in float: the fixed-point version breaks down for cameras that
+// look almost straight down (room 102, camera 4).
+void setup_camera(const int32_t from[3], const int32_t to[3], int screen)
 {
-    // PS1 projects onto 320x240 with screen distance c->screen; same vertical
-    // field of view on 256x192.
-    float fovy = 2.0f * atanf(120.0f / (float)c->screen) * 180.0f / 3.14159265f;
+    float fovy = 2.0f * atanf(120.0f / (float)screen) * 180.0f / 3.14159265f;
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
     gluPerspective(fovy, 256.0f / 192.0f, 0.05f, 16.0f);
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
-    // gluLookAtf32 with up = -Y, but in float: the fixed-point version breaks
-    // down for cameras that look almost straight down (room 102, camera 4).
     float f[3], side[3], up[3], len;
     for (int k = 0; k < 3; k++)
-        f[k] = (float)(c->from[k] - c->to[k]);
+        f[k] = (float)(from[k] - to[k]);
     len = sqrtf(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
     for (int k = 0; k < 3; k++)
         f[k] /= len;
@@ -262,7 +263,7 @@ static void setup_projection(const RoomCamera *c)
     up[0] = f[1] * side[2] - f[2] * side[1];
     up[1] = f[2] * side[0] - f[0] * side[2];
     up[2] = f[0] * side[1] - f[1] * side[0];
-    float eye[3] = { (float)c->from[0], (float)c->from[1], (float)c->from[2] };
+    float eye[3] = { (float)from[0], (float)from[1], (float)from[2] };
     for (int k = 0; k < 3; k++) {
         MATRIX_MULT4x3 = floattof32(side[k]);
         MATRIX_MULT4x3 = floattof32(up[k]);
@@ -271,6 +272,11 @@ static void setup_projection(const RoomCamera *c)
     MATRIX_MULT4x3 = (int32_t)-(eye[0] * side[0] + eye[1] * side[1] + eye[2] * side[2]);
     MATRIX_MULT4x3 = (int32_t)-(eye[0] * up[0] + eye[1] * up[1] + eye[2] * up[2]);
     MATRIX_MULT4x3 = (int32_t)-(eye[0] * f[0] + eye[1] * f[1] + eye[2] * f[2]);
+}
+
+static void setup_projection(const RoomCamera *c)
+{
+    setup_camera(c->from, c->to, c->screen);
 }
 
 static void draw_bone(int bone, int frame)
@@ -630,28 +636,20 @@ static void use_door(const Aot *a)
         }
     }
 
-    // Door sequence. The PS1 plays the door program of DOORnn.DO2 (byte 12 of
-    // the door data, 0x800147e8) while it loads the room: model, camera and
-    // sounds. The animation is not ported yet; the sounds are: note 60 = the
-    // door opens, 61 = it closes. The bank stays loaded until the next door
-    // because the ARM7 may still be playing from it.
-    static void *door_bank;
-    char path[32];
-    if (door_bank)
-        sound_bank_free(door_bank);
-    snprintf(path, sizeof(path), "nitro:/sound/door%02d.bin", d[12]);
-    door_bank = sound_bank_load(path);
-    sound_play(door_bank, 60, 127, 64);
-    int open_frames = sound_frames(door_bank, 60);
-
+    // Door sequence (door.c): the PS1 loads the next room while the door
+    // program of DOORnn.DO2 (byte 12 of the door data) plays; here the room
+    // is loaded behind a black screen first, then the program runs.
     fade(1);
     enter_room(stage, id, cam);
     place_player(nx, ny, nz, ndir * 8, cam);
-    for (int f = FADE_STEPS; f < open_frames; f++)
-        swiWaitForVBlank();
-    sound_play(door_bank, 61, 127, 64);
-    for (int f = 0; f < sound_frames(door_bank, 61) / 2; f++)
-        swiWaitForVBlank();
+    if (door_begin(d[12], d[13])) {
+        bgHide(bg_id);
+        while (door_frame())
+            swiWaitForVBlank();
+        door_end();
+        setBrightness(1, -16);
+        bgShow(bg_id);
+    }
     fade(-1);
 }
 
