@@ -110,11 +110,15 @@ typedef struct {
     uint16_t w, d;         // size along x / z
     uint16_t shape;        // 0 = box, 1..10 = shapes (triangles, circle, ...),
                            // 11 = slope, 12 = stairs (see OpenBiohazard2 world/collision.go)
-    uint16_t flag;
+    uint16_t flag;         // bits 0..3 = shape; bits 10.. = who collides (AOT SAT bits
+                           // << 10): BOX_PLAYER; 0 = disabled (scripts toggle it
+                           // with sca_id_set)
     uint16_t type;         // floor height multiplier in bits 6..10 etc.
     uint16_t reserved;
     uint32_t floors;       // bit n = present on floor level n
 } RoomBox;                 // 20 bytes
+
+#define BOX_PLAYER 0x0400    // RoomBox.flag: blocks the player
 
 // Floor levels: y = level * FLOOR_HEIGHT (-Y is up).
 #define FLOOR_HEIGHT (-1800)

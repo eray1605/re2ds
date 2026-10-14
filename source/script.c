@@ -39,7 +39,7 @@ enum {
     OP_RETURN = 25, OP_BREAK = 26, OP_CK = 33, OP_SET = 34, OP_CMP = 35, OP_SAVE = 36,
     OP_COPY = 37, OP_CALC = 38, OP_CALC2 = 39, OP_CUT_CHG = 41, OP_CUT_OLD = 42,
     OP_MESSAGE_ON = 43, OP_AOT_SET = 44, OP_WORK_SET = 46, OP_POS_SET = 50, OP_DIR_SET = 51,
-    OP_DIR_CK = 57, OP_DOOR_AOT_SET = 59, OP_CUT_AUTO = 60, OP_MEMBER_CMP = 62,
+    OP_SCA_ID_SET = 55, OP_DIR_CK = 57, OP_DOOR_AOT_SET = 59, OP_CUT_AUTO = 60, OP_MEMBER_CMP = 62,
     OP_AOT_RESET = 70, OP_AOT_ON = 71, OP_CUT_REPLACE = 75, OP_ITEM_AOT_SET = 78,
     OP_SCE_TRG_CK = 80, OP_KEEP_ITEM_CK = 94, OP_AOT_SET_4P = 103, OP_DOOR_AOT_SET_4P = 104,
     OP_ITEM_AOT_SET_4P = 105,
@@ -559,6 +559,9 @@ static void run_thread(Thread *t)
         case OP_WORK_SET:
             t->work_type = ins[1];
             break;
+        case OP_SCA_ID_SET:
+            game_set_box_flag(ins[1], ru16(ins + 2));
+            break;
         case OP_POS_SET:
             if (t->work_type == 1)
                 game_set_player_pos(rd16(ins + 2), rd16(ins + 4), rd16(ins + 6));
@@ -588,7 +591,11 @@ void script_tick(void)
     }
 }
 
-void script_note_camera(int previous) { old_cam = previous; }
+void script_camera_changed(int previous, int cam)
+{
+    old_cam = previous;
+    vars[VAR_CUT] = cam;
+}
 
 void script_room_enter(const Room *room)
 {

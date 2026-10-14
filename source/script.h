@@ -33,6 +33,9 @@ enum {
     SCE_EVENT = 5,
 };
 
+// Script variables the engine keeps up to date
+#define VAR_CUT 0x1A           // current camera (room 102 waits for it to open the gate)
+
 // Flag arrays with a known meaning
 #define FLAGS_ITEM_PICKED 8    // bit n set = item AOT with picked index n taken
 
@@ -60,6 +63,7 @@ int game_message_open(void);
 void game_cut_change(int cam);             // force a camera
 void game_set_player_pos(int32_t x, int32_t y, int32_t z);
 void game_set_player_dir(int16_t dir_re2);
+void game_set_box_flag(int box, int flag);  // sca_id_set: collision box on/off
 
 void script_room_enter(const Room *room);   // resets AOTs/threads, runs init, starts main
 void script_tick(void);
@@ -69,7 +73,7 @@ int flag_get(int array, int bit);
 void flag_set(int array, int bit, int value);
 
 int cut_replace(int cam);                   // camera after cut_replace remapping
-void script_note_camera(int previous);      // for cut_old
+void script_camera_changed(int previous, int cam); // keeps cut_old and VAR_CUT current
 int cut_auto_enabled(void);
 
 // minimal inventory until the real one exists (phase 5)

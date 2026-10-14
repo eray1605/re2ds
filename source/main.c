@@ -38,7 +38,8 @@ enum { TURN_IDLE = 80, TURN_WALK = 40, TURN_RUN = 56 };
 
 #define PLAYER_RADIUS 400
 #define DOOR_REACH 600      // action button probe distance in front of Leon
-#define FADE_STEPS 8        // frames per fade (brightness 0 -> -16)
+#define FADE_STEPS 8
+#define MASK_SCALE 4        // see draw_masks        // frames per fade (brightness 0 -> -16)
 
 // The background bitmap is 256x256 at 8 bpp = 64 KB; VRAM A (128 KB) holds
 // two of them. Map base unit for bitmaps is 16 KB.
@@ -129,7 +130,7 @@ static int tex_size_enum(int n)
 static void set_camera(int cam)
 {
     char path[64];
-    script_note_camera(cur_cam);
+    script_camera_changed(cur_cam, cam);
     cur_cam = cam;
 
     // Background: unpack into the hidden buffer, then flip buffer and palette
@@ -225,9 +226,33 @@ static void setup_projection(const RoomCamera *c)
     gluPerspective(fovy, 256.0f / 192.0f, 0.05f, 16.0f);
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
-    gluLookAtf32(c->from[0], c->from[1], c->from[2],
-                 c->to[0], c->to[1], c->to[2],
-                 0, -inttof32(1), 0);
+    // gluLookAtf32 with up = -Y, but in float: the fixed-point version breaks
+    // down for cameras that look almost straight down (room 102, camera 4).
+    float f[3], side[3], up[3], len;
+    for (int k = 0; k < 3; k++)
+        f[k] = (float)(c->from[k] - c->to[k]);
+    len = sqrtf(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
+    for (int k = 0; k < 3; k++)
+        f[k] /= len;
+    // side = up x forward with up = (0, -1, 0)
+    side[0] = -f[2];
+    side[1] = 0.0f;
+    side[2] = f[0];
+    len = sqrtf(side[0] * side[0] + side[2] * side[2]);
+    side[0] /= len;
+    side[2] /= len;
+    up[0] = f[1] * side[2] - f[2] * side[1];
+    up[1] = f[2] * side[0] - f[0] * side[2];
+    up[2] = f[0] * side[1] - f[1] * side[0];
+    float eye[3] = { (float)c->from[0], (float)c->from[1], (float)c->from[2] };
+    for (int k = 0; k < 3; k++) {
+        MATRIX_MULT4x3 = floattof32(side[k]);
+        MATRIX_MULT4x3 = floattof32(up[k]);
+        MATRIX_MULT4x3 = floattof32(f[k]);
+    }
+    MATRIX_MULT4x3 = (int32_t)-(eye[0] * side[0] + eye[1] * side[1] + eye[2] * side[2]);
+    MATRIX_MULT4x3 = (int32_t)-(eye[0] * up[0] + eye[1] * up[1] + eye[2] * up[2]);
+    MATRIX_MULT4x3 = (int32_t)-(eye[0] * f[0] + eye[1] * f[1] + eye[2] * f[2]);
 }
 
 static void draw_bone(int bone, int frame)
@@ -277,8 +302,10 @@ static void draw_masks(void)
     const RoomCamera *c = &room.cameras[cur_cam];
     glBindTexture(0, mask_tex);
     glPushMatrix();
-    // vertices relative to the eye keep them within VTX_16 range
+    // Vertices relative to the eye, divided by MASK_SCALE: VTX_16 holds
+    // +-32767 and some masks lie up to ~44000 units from the eye.
     glTranslatef32(c->from[0], c->from[1], c->from[2]);
+    glScalef32(inttof32(MASK_SCALE), inttof32(MASK_SCALE), inttof32(MASK_SCALE));
     glBegin(GL_QUADS);
     for (int i = 0; i < masks.header->num_quads; i++) {
         const MaskQuad *q = &masks.quads[i];
@@ -286,8 +313,9 @@ static void draw_masks(void)
                          { q->u + q->w, q->v + q->h }, { q->u, q->v + q->h } };
         for (int k = 0; k < 4; k++) {
             glTexCoord2t16(inttot16(uv[k][0]), inttot16(uv[k][1]));
-            glVertex3v16(q->corner[k][0] - c->from[0], q->corner[k][1] - c->from[1],
-                         q->corner[k][2] - c->from[2]);
+            glVertex3v16((q->corner[k][0] - c->from[0]) / MASK_SCALE,
+                         (q->corner[k][1] - c->from[1]) / MASK_SCALE,
+                         (q->corner[k][2] - c->from[2]) / MASK_SCALE);
         }
     }
     glEnd();
@@ -368,7 +396,7 @@ static int blocked(int32_t from_x, int32_t from_z, int32_t x, int32_t z)
     uint32_t floor_bit = 1u << player_floor();
     for (int i = 0; i < room.header->num_boxes; i++) {
         const RoomBox *b = &room.boxes[i];
-        if (!(b->floors & floor_bit) || is_slope(b))
+        if (!(b->floors & floor_bit) || is_slope(b) || !(b->flag & BOX_PLAYER))
             continue;
         int32_t depth = penetration(b, x, z);
         if (depth > 0 && depth >= penetration(b, from_x, from_z))
@@ -407,6 +435,21 @@ static void update_height(void)
     player.slope = -1;
 }
 
+// Camera switching. Zones are given for the room's normal cameras; scripts
+// can show another picture for a camera with cut_replace (room 107 shows 6 and
+// 7 instead of 0 and 1 later in the story), so zones match on the replaced
+// number. About a third of all cameras have no zones at all: cutscene cameras
+// that only scripts switch to (cut_chg) and back.
+static int camera_has_zones(int cam)
+{
+    for (int i = 0; i < room.header->num_switches; i++) {
+        const RoomSwitch *s = &room.switches[i];
+        if (!(s->role & SWITCH_VIEW_AREA) && (s->cam0 == cam || s->cam1 == cam) && s->cam0 != s->cam1)
+            return 1;
+    }
+    return 0;
+}
+
 static void check_camera_switch(void)
 {
     if (!cut_auto_enabled())
@@ -414,7 +457,7 @@ static void check_camera_switch(void)
     int floor = player_floor();
     for (int i = 0; i < room.header->num_switches; i++) {
         const RoomSwitch *s = &room.switches[i];
-        if (s->cam0 != cur_cam || (s->role & SWITCH_VIEW_AREA) || s->cam1 == cur_cam)
+        if ((s->role & SWITCH_VIEW_AREA) || cut_replace(s->cam0) != cur_cam)
             continue;
         if (s->floor != 255 && s->floor != floor)
             continue;
@@ -425,6 +468,24 @@ static void check_camera_switch(void)
             return;
         }
     }
+
+    // Leon outside the view area of the shown camera (a cutscene camera the
+    // unfinished cutscene never switched back from): take a normal camera
+    // whose view area he stands in.
+    int in_view = 0, other = -1;
+    for (int i = 0; i < room.header->num_switches; i++) {
+        const RoomSwitch *s = &room.switches[i];
+        if (!(s->role & SWITCH_VIEW_AREA) || (s->floor != 255 && s->floor != floor))
+            continue;
+        if (!point_in_quad(player.x, player.z, s->x, s->z))
+            continue;
+        if (cut_replace(s->cam0) == cur_cam)
+            in_view = 1;
+        else if (other < 0 && camera_has_zones(s->cam0))
+            other = cut_replace(s->cam0);
+    }
+    if (!in_view && other >= 0 && other < room.header->num_cameras)
+        set_camera(other);
 }
 
 static void set_anim(int anim)
@@ -496,9 +557,17 @@ void game_set_player_pos(int32_t x, int32_t y, int32_t z)
 
 void game_set_player_dir(int16_t dir_re2) { player.dir = dir_re2 * 8; }
 
-static void enter_room(int stage, int id)
+void game_set_box_flag(int box, int flag)
+{
+    if (box >= 0 && box < room.header->num_boxes)
+        ((RoomBox *)room.boxes)[box].flag = flag; // room data lives in RAM
+}
+
+// The init script may test the arrival camera (VAR_CUT), e.g. room 107.
+static void enter_room(int stage, int id, int arrival_cam)
 {
     load_room(stage, id);
+    script_camera_changed(-1, arrival_cam);
     script_room_enter(&room);
 }
 
@@ -506,7 +575,7 @@ static void warp_to(int index)
 {
     const RoomRef *r = &room_index[index];
     fade(1);
-    enter_room(r->stage, r->room);
+    enter_room(r->stage, r->room, -1);
     const RoomHeader *h = room.header;
     place_player(h->spawn[0], h->spawn[1], h->spawn[2], h->spawn_dir, h->start_camera);
     fade(-1);
@@ -544,7 +613,7 @@ static void use_door(const Aot *a)
     }
 
     fade(1);
-    enter_room(stage, id);
+    enter_room(stage, id, cam);
     place_player(nx, ny, nz, ndir * 8, cam);
     fade(-1);
 }
@@ -772,7 +841,7 @@ int main(void)
     load_room_index();
 
     setBrightness(1, -16);
-    enter_room(START_STAGE, START_ROOM);
+    enter_room(START_STAGE, START_ROOM, -1);
     if (!room.data)
         fatal("room/room1000.bin missing");
     const RoomHeader *h = room.header;
