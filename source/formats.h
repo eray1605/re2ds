@@ -57,7 +57,7 @@ typedef struct {
 // room10a0 for Leon). room/index.bin lists the converted rooms: u16 count,
 // then count x (u8 stage, u8 room).
 #define ROOM_MAGIC 0x314D5252 // "RRM1"
-#define ROOM_VERSION 2
+#define ROOM_VERSION 3
 
 typedef struct {
     uint32_t magic;
@@ -73,9 +73,17 @@ typedef struct {
                            // with Ry = [[c,0,s],[0,1,0],[-s,0,c]] (PS1 RotMatrixY),
                            // so the facing vector is (cos dir, 0, -sin dir).
     uint16_t reserved2;
+    // Room scripts (raw SCD blocks from the RDT: u16 function offsets, then
+    // the bytecode) and texts. Offsets are from the start of the file.
+    uint32_t off_init, size_init;   // init script, runs once on entry
+    uint32_t off_exec, size_exec;   // main script, function 0 starts on entry
+    uint32_t off_msgs;              // u16 offsets[num_msgs] (from off_msgs), then
+    uint16_t num_msgs;              // NUL-terminated ASCII, "\n" = line break
+    uint16_t reserved3;
     // followed by RoomCamera[num_cameras], RoomSwitch[num_switches],
-    // RoomBox[num_boxes], RoomDoor[num_doors]
-} RoomHeader;
+    // RoomBox[num_boxes], RoomDoor[num_doors] (doors as found by the
+    // converter; the engine takes doors from the scripts instead)
+} RoomHeader;                       // 52 bytes
 
 typedef struct {
     int32_t from[3];       // eye

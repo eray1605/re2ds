@@ -13,7 +13,11 @@ typedef struct {
     const RoomSwitch *switches;
     const RoomBox *boxes;
     const RoomDoor *doors;
+    const uint8_t *init_script, *exec_script;   // NULL if empty
 } Room;
+
+// Text of message n of the room, or NULL.
+const char *room_message(const Room *room, int n);
 
 typedef struct {
     void *data;

@@ -57,7 +57,13 @@ Disc 2 (Claire) hat denselben Aufbau.
 - **Fertig, wenn:** Leon jeden Raum von Szenario A betreten kann, ohne Absturz und mit
   passenden Kameras und Masken.
 
-### Phase 2 – Skriptsystem (XL)
+### Phase 2 – Skriptsystem (XL) – begonnen
+
+Stand: Interpreter (`source/script.c`) mit Kontrollfluss, Flags, Variablen, Threads und
+AOTs (Türen inkl. Schlösser, Items, Texte, Events); Texte der englischen PAL-Disc;
+Host-Test `tests/script_host.c` über alle Räume. Offen: 12 Räume mit seltenen unbekannten
+Opcodes, Figuren-/Kamera-Befehle für Cutscenes (plc_*, sce_em_set, obj_model_set), Flag-Startwerte.
+
 - Interpreter für die Raumskripte (SCD-Bytecode). Vorlage: `script/` in OpenBiohazard2
   (Go, in diesem Ordner), fehlende Opcodes per REA aus der PS1-EXE.
 - Auslöser (AOT): Türen, verschlossene Türen, Items aufheben, Untersuchen, Ereignisse.

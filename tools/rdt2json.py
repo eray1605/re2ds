@@ -148,6 +148,65 @@ def script_instructions(data, offset):
                 break
 
 
+def script_block(data, offset):
+    """Raw bytes of an SCD block: function table plus all functions."""
+    first = struct.unpack_from("<H", data, offset)[0]
+    end = offset + first
+    for start in (struct.unpack_from("<H", data, offset + i)[0] for i in range(0, first, 2)):
+        pos = offset + start
+        for op, pos in script_instructions_from(data, pos):
+            pass
+        end = max(end, pos)
+    return data[offset:end]
+
+
+def script_instructions_from(data, pos):
+    """Walk one function from pos; yields (opcode, position after it)."""
+    while pos < len(data) and data[pos] in SCD_SIZES:
+        op = data[pos]
+        pos += SCD_SIZES[op]
+        yield op, pos
+        if op == OP_EVT_END:
+            break
+
+
+# Message text (RDT lang1). Characters below 0x60 index this table; the DS
+# engine gets plain ASCII with "\n" for line breaks.
+MSG_CHARS = (" .___()_____0123456789:_,\"!?_ABCDEFGHIJKLMNOPQRSTUVWXYZ[/]'-_abc"
+             "defghijklmnopqrstuvwxyz_________")
+MSG_NEWLINE, MSG_END = 0xFC, 0xFE
+MSG_ARG_CODES = set(range(0xEA, 0xFC)) - {0xF3} | {0xFD}   # control codes with one argument
+
+
+def read_messages(data, offset):
+    """Decoded lang1 messages, or [] if the table there is not a message table
+    (some rooms point the offset at unrelated data)."""
+    if not offset:
+        return []
+    first = struct.unpack_from("<H", data, offset)[0]
+    if first == 0 or first & 1 or first > 2048:
+        return []
+    offs = [struct.unpack_from("<H", data, offset + i)[0] for i in range(0, first, 2)]
+    if offs != sorted(offs) or offs[0] != first:
+        return []
+    out = []
+    for o in offs:
+        pos, text = offset + o, ""
+        while pos < len(data) and data[pos] != MSG_END and len(text) < 512:
+            c = data[pos]
+            pos += 1
+            if c < 0x60:
+                text += MSG_CHARS[c]
+            elif c == MSG_NEWLINE:
+                text += "\n"
+            elif c in MSG_ARG_CODES:
+                pos += 1
+        if pos >= len(data) or data[pos] != MSG_END:
+            return []
+        out.append(text.strip("\n").replace("_", ""))
+    return out
+
+
 def read_doors(data, offsets):
     """Door AOTs (DOOR_AOT_SET / DOOR_AOT_SET_4P) from the init and main scripts.
 
@@ -192,6 +251,9 @@ def main():
         "camera_switches": read_camera_switches(data, offsets["camera_switches"]),
         "collision": read_collision(data, offsets["collision"]),
         "doors": read_doors(data, offsets),
+        "messages": read_messages(data, offsets.get("lang1")),
+        "init_script_hex": script_block(data, offsets["init_script"]).hex() if offsets.get("init_script") else "",
+        "exec_script_hex": script_block(data, offsets["exec_script"]).hex() if offsets.get("exec_script") else "",
     }
     for cam in room["cameras"]:
         cam["masks"] = read_masks(data, cam["mask_offset"])
@@ -201,7 +263,8 @@ def main():
           f"{len(room['camera_switches'])} camera switches, "
           f"{len(room['collision']['boxes'])} collision boxes, "
           f"{sum(len(c['masks']) for c in room['cameras'])} mask rectangles, "
-          f"{len(room['doors'])} doors")
+          f"{len(room['doors'])} doors, {len(room['messages'])} messages, "
+          f"scripts {len(room['init_script_hex']) // 2}+{len(room['exec_script_hex']) // 2} bytes")
 
 
 if __name__ == "__main__":

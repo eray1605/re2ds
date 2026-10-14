@@ -13,7 +13,8 @@ import struct
 import sys
 
 ROOM_MAGIC = 0x314D5252  # "RRM1"
-ROOM_VERSION = 2
+ROOM_VERSION = 3
+HEADER_SIZE = 52
 SWITCH_VIEW_AREA = 0x01
 SPAWN_MARGIN = 450
 
@@ -92,9 +93,7 @@ def main():
     yaw = math.atan2(-(eye[2] - sz), eye[0] - sx)
     spawn_dir = int(round(yaw / (2 * math.pi) * 32768)) & 0x7FFF
 
-    out = bytearray(struct.pack("<IHBBHBB3ihH", ROOM_MAGIC, ROOM_VERSION, len(cams), len(switches),
-                                len(boxes), spawn_cam, len(doors), sx, 0, sz,
-                                spawn_dir if spawn_dir < 16384 else spawn_dir - 32768, 0))
+    out = bytearray(HEADER_SIZE)   # header written at the end, once the offsets are known
     for c in cams:
         out += struct.pack("<3i3iHH", *c["from"], *c["to"], c["screen_distance"], c["flag"])
     for sw, role in zip(switches, room["_roles"]):
@@ -112,6 +111,30 @@ def main():
                            d["next_stage"], d["next_room"], d["next_camera"], d["next_floor"],
                            d["sat"], d["floor"], d["door_type"], d["key_id"],
                            d["key_type"], d["aot"], 0, 0)
+
+    def section(blob):
+        while len(out) % 4:
+            out.append(0)
+        start = len(out)
+        out.extend(blob)
+        return start, len(blob)
+
+    init = bytes.fromhex(room.get("init_script_hex", ""))
+    exe = bytes.fromhex(room.get("exec_script_hex", ""))
+    off_init, size_init = section(init)
+    off_exec, size_exec = section(exe)
+    # messages: u16 offsets (relative to the section), then NUL-terminated ASCII
+    msgs = room.get("messages", [])
+    table = bytearray()
+    text = bytearray()
+    for m in msgs:
+        table += struct.pack("<H", 2 * len(msgs) + len(text))
+        text += m.encode("ascii", "replace") + b"\0"
+    off_msgs, _ = section(bytes(table + text))
+    struct.pack_into("<IHBBHBB3ihH5IHH", out, 0, ROOM_MAGIC, ROOM_VERSION, len(cams), len(switches),
+                     len(boxes), spawn_cam, len(doors), sx, 0, sz,
+                     spawn_dir if spawn_dir < 16384 else spawn_dir - 32768, 0,
+                     off_init, size_init, off_exec, size_exec, off_msgs, len(msgs), 0)
     with open(sys.argv[2], "wb") as f:
         f.write(out)
     views = sum(1 for r in room["_roles"] if r)

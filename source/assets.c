@@ -50,7 +50,18 @@ int room_load(Room *room, const char *path)
     room->boxes = (const RoomBox *)p;
     p += sizeof(RoomBox) * room->header->num_boxes;
     room->doors = (const RoomDoor *)p;
+    const uint8_t *base = room->data;
+    room->init_script = room->header->size_init ? base + room->header->off_init : NULL;
+    room->exec_script = room->header->size_exec ? base + room->header->off_exec : NULL;
     return 1;
+}
+
+const char *room_message(const Room *room, int n)
+{
+    if (n < 0 || n >= room->header->num_msgs)
+        return NULL;
+    const uint8_t *msgs = (const uint8_t *)room->data + room->header->off_msgs;
+    return (const char *)msgs + (msgs[2 * n] | msgs[2 * n + 1] << 8);
 }
 
 int model_load(Model *model, const char *path)

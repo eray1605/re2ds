@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include "assets.h"
+#include "script.h"
 
 // Leon's first playable room and the camera the converter picked a spawn for
 #define START_STAGE 1
@@ -66,14 +67,17 @@ static int8_t first_child[64], next_sibling[64];
 static const RoomRef *room_index;
 static int room_count;
 static int menu_open, menu_sel;
-static const RoomDoor *near_door;   // door the action button would open
+static const Aot *near_aot;         // trigger the action button would activate
+static uint32_t pending_keys;       // keys pressed since the last game tick
+static int game_tick_acc;           // accumulates GAME_HZ per DS frame
+static const char *message_text;    // open message, NULL = none
+static uint8_t lock_open[128];      // door locks opened (key id & 0x7F)
 
 static struct {
     int32_t x, y, z;
     int16_t dir;
     PlayerState state;
     int anim, key;
-    int tick;                 // accumulates GAME_HZ per DS frame, a game tick every DS_HZ
     int slope;                // RoomBox index of the slope/stairs Leon is on, -1 = none
     int32_t slope_base;       // height of that slope's bottom edge
 } player;
@@ -125,6 +129,7 @@ static int tex_size_enum(int n)
 static void set_camera(int cam)
 {
     char path[64];
+    script_note_camera(cur_cam);
     cur_cam = cam;
 
     // Background: unpack into the hidden buffer, then flip buffer and palette
@@ -182,7 +187,7 @@ static int load_room(int stage, int id)
     cur_room = id;
     snprintf(bg_prefix, sizeof(bg_prefix), "room%d%02x", stage, id);
     cur_cam = -1;
-    near_door = NULL;
+    near_aot = NULL;
     return 1;
 }
 
@@ -404,6 +409,8 @@ static void update_height(void)
 
 static void check_camera_switch(void)
 {
+    if (!cut_auto_enabled())
+        return;
     int floor = player_floor();
     for (int i = 0; i < room.header->num_switches; i++) {
         const RoomSwitch *s = &room.switches[i];
@@ -412,7 +419,9 @@ static void check_camera_switch(void)
         if (s->floor != 255 && s->floor != floor)
             continue;
         if (point_in_quad(player.x, player.z, s->x, s->z)) {
-            set_camera(s->cam1);
+            int cam = cut_replace(s->cam1);
+            if (cam != cur_cam && cam < room.header->num_cameras)
+                set_camera(cam);
             return;
         }
     }
@@ -423,7 +432,6 @@ static void set_anim(int anim)
     if (player.anim != anim) {
         player.anim = anim;
         player.key = 0;
-        player.tick = 0;
     }
 }
 
@@ -436,60 +444,176 @@ static void place_player(int32_t x, int32_t y, int32_t z, int16_t dir, int cam)
     player.slope = -1;
     player.anim = -1;
     set_anim(ANIM_IDLE);
+    cam = cut_replace(cam);
     set_camera(cam < room.header->num_cameras ? cam : 0);
 }
 
-// Locks are ignored for now: every door opens (needs the script interpreter).
-static void enter_door(const RoomDoor *d)
+// ---------------------------------------------------------------- script hooks
+void game_show_message(const char *text)
 {
-    RoomDoor door = *d; // the room data is freed by load_room
-    fade(1);
-    if (load_room(door.next_stage, door.next_room))
-        place_player(door.next[0], door.next[1], door.next[2], (int16_t)door.next_dir, door.next_camera);
-    fade(-1);
+    message_text = text;
+    consoleClear();
+    printf("\x1b[2;0H");
+    // word wrap at 32 columns
+    int col = 0;
+    for (const char *p = text; *p; p++) {
+        if (*p == '\n') {
+            printf("\n");
+            col = 0;
+            continue;
+        }
+        if (*p == ' ' && col > 0) {
+            int len = 0;
+            while (p[1 + len] && p[1 + len] != ' ' && p[1 + len] != '\n')
+                len++;
+            if (col + 1 + len > 31) {
+                printf("\n");
+                col = 0;
+                continue;
+            }
+        }
+        printf("%c", *p);
+        col++;
+    }
+    printf("\n\n\n                       [A]\n");
+}
+
+int game_message_open(void) { return message_text != NULL; }
+
+void game_cut_change(int cam)
+{
+    if (cam >= 0 && cam < room.header->num_cameras && cam != cur_cam)
+        set_camera(cam);
+}
+
+void game_set_player_pos(int32_t x, int32_t y, int32_t z)
+{
+    player.x = x;
+    player.y = y;
+    player.z = z;
+    player.slope = -1;
+}
+
+void game_set_player_dir(int16_t dir_re2) { player.dir = dir_re2 * 8; }
+
+static void enter_room(int stage, int id)
+{
+    load_room(stage, id);
+    script_room_enter(&room);
 }
 
 static void warp_to(int index)
 {
     const RoomRef *r = &room_index[index];
     fade(1);
-    if (load_room(r->stage, r->room)) {
-        const RoomHeader *h = room.header;
-        place_player(h->spawn[0], h->spawn[1], h->spawn[2], h->spawn_dir, h->start_camera);
-    }
+    enter_room(r->stage, r->room);
+    const RoomHeader *h = room.header;
+    place_player(h->spawn[0], h->spawn[1], h->spawn[2], h->spawn_dir, h->start_camera);
     fade(-1);
 }
 
-// Doors the player walks into open at once; doors with AOT_SAT_MANUAL need
-// the action button (A) while Leon stands in or faces the trigger area.
-static void check_doors(uint32_t pressed)
+// ---------------------------------------------------------------- triggers
+static void use_door(const Aot *a)
+{
+    const uint8_t *d = a->data;
+    int16_t nx = d[0] | d[1] << 8, ny = d[2] | d[3] << 8, nz = d[4] | d[5] << 8;
+    int16_t ndir = d[6] | d[7] << 8;
+    int stage = d[8] + 1, id = d[9], cam = d[10], key_id = d[15], key_type = d[16];
+
+    // key id = 0x80 | lock number (shared by both sides of the door), key type
+    // = item that opens it. 0xFE / 0xFF mark the two sides of a door that is
+    // opened from one side only (which side is which is still a guess).
+    if (key_id && !lock_open[key_id & 0x7F]) {
+        if (keysHeld() & KEY_R) {
+            lock_open[key_id & 0x7F] = 1; // debug: R + A opens every lock
+        } else if (key_type == 0xFE) {
+            lock_open[key_id & 0x7F] = 1;
+            game_show_message("You unlocked the door.");
+            return;
+        } else if (key_type == 0xFF) {
+            game_show_message("It's locked from the other side.");
+            return;
+        } else if (inventory_has(key_type)) {
+            lock_open[key_id & 0x7F] = 1;
+            game_show_message("You used the key.");
+            return;
+        } else {
+            game_show_message("It's locked.");
+            return;
+        }
+    }
+
+    fade(1);
+    enter_room(stage, id);
+    place_player(nx, ny, nz, ndir * 8, cam);
+    fade(-1);
+}
+
+static void trigger(Aot *a)
+{
+    static char text[64];
+    switch (a->type) {
+    case SCE_DOOR:
+        use_door(a);
+        break;
+    case SCE_ITEM: {
+        int item = a->data[0] | a->data[1] << 8, amount = a->data[2] | a->data[3] << 8;
+        int picked = a->data[4] | a->data[5] << 8;
+        inventory_add(item, amount);
+        flag_set(FLAGS_ITEM_PICKED, picked, 1);
+        a->active = 0;
+        snprintf(text, sizeof(text), "Item %d picked up (x%d).", item, amount);
+        game_show_message(text);
+        break;
+    }
+    case SCE_MESSAGE: {
+        const char *m = room_message(&room, a->data[0]);
+        if (m && *m)
+            game_show_message(m);
+        break;
+    }
+    case SCE_EVENT:
+        if (a->data[2] == 0x18) // gosub
+            script_start_event(a->data[3]);
+        break;
+    default:
+        break;
+    }
+}
+
+// Triggers without AOT_SAT_MANUAL fire when Leon walks into them; manual ones
+// need A while Leon stands in or faces the area.
+static void check_aots(uint32_t pressed)
 {
     int floor = player_floor();
     int32_t px = player.x + ((DOOR_REACH * cosLerp(player.dir)) >> 12);
     int32_t pz = player.z - ((DOOR_REACH * sinLerp(player.dir)) >> 12);
-    near_door = NULL;
-    for (int i = 0; i < room.header->num_doors; i++) {
-        const RoomDoor *d = &room.doors[i];
-        if (!(d->sat & AOT_SAT_PLAYER) || (d->floor != 255 && d->floor != floor))
+    near_aot = NULL;
+    for (int i = 0; i < NUM_AOTS; i++) {
+        Aot *a = &aots[i];
+        if (!a->active || !(a->sat & AOT_SAT_PLAYER) || (a->floor != 255 && a->floor != floor))
             continue;
-        int inside = point_in_quad(player.x, player.z, d->x, d->z);
-        if (!(d->sat & AOT_SAT_MANUAL)) {
-            if (inside) {
-                enter_door(d);
+        int inside = point_in_quad(player.x, player.z, a->x, a->z);
+        if (!(a->sat & AOT_SAT_MANUAL)) {
+            int entered = inside && !a->inside;
+            a->inside = inside;
+            if (entered) {
+                trigger(a);
                 return;
             }
             continue;
         }
-        if (inside || point_in_quad(px, pz, d->x, d->z)) {
-            near_door = d;
+        if (inside || point_in_quad(px, pz, a->x, a->z)) {
+            near_aot = a;
             if (pressed & KEY_A) {
-                enter_door(d);
+                trigger(a);
                 return;
             }
         }
     }
 }
 
+// ---------------------------------------------------------------- player
 static void move_forward(int32_t dist)
 {
     int32_t dx = (dist * cosLerp(player.dir)) >> 12;
@@ -501,7 +625,8 @@ static void move_forward(int32_t dist)
     update_height();
 }
 
-static void update_player(uint32_t held)
+// every DS frame: state, animation choice and turning
+static void update_player_frame(uint32_t held)
 {
     PlayerState st = ST_IDLE;
     if (held & KEY_UP)
@@ -517,12 +642,12 @@ static void update_player(uint32_t held)
         player.dir -= turn;
 
     set_anim(st == ST_RUN ? ANIM_RUN : (st == ST_IDLE ? ANIM_IDLE : ANIM_WALK));
+}
 
-    player.tick += GAME_HZ;
-    if (player.tick < DS_HZ)
-        return;
-    player.tick -= DS_HZ;
-
+// every game tick: next keyframe and its root motion
+static void update_player_tick(void)
+{
+    PlayerState st = player.state;
     const ModelAnim *a = &leon.anims[player.anim];
     int prev = player.key;
     if (st == ST_BACK)
@@ -545,16 +670,30 @@ static void update_player(uint32_t held)
 }
 
 // ---------------------------------------------------------------- debug screen
+static const char *aot_name(int type)
+{
+    switch (type) {
+    case SCE_DOOR: return "Tuer";
+    case SCE_ITEM: return "Item";
+    case SCE_MESSAGE: return "Text";
+    case SCE_EVENT: return "Event";
+    default: return "?";
+    }
+}
+
 static void print_status(void)
 {
     printf("\x1b[0;0HRE2 DS - room %X%02X  cam %d   \n", cur_stage, cur_room, cur_cam);
     printf("pos %6ld %6ld %6ld  \n", (long)player.x, (long)player.y, (long)player.z);
     printf("dir %5d floor %d slope %3d  \n", player.dir & 0x7FFF, player_floor(), player.slope);
-    if (near_door)
-        printf("A: Tuer -> %X%02X            \n", near_door->next_stage, near_door->next_room);
+    printf("skript: %d threads, %d unbek.  \n", script_threads_running, script_unknown_ops);
+    if (near_aot && near_aot->type == SCE_DOOR)
+        printf("A: Tuer -> %X%02X            \n", near_aot->data[8] + 1, near_aot->data[9]);
+    else if (near_aot)
+        printf("A: %s                 \n", aot_name(near_aot->type));
     else
         printf("                          \n");
-    printf("\nD-Pad gehen/drehen, B rennen\nA Tuer, SELECT Raum-Menue\n");
+    printf("\nD-Pad gehen/drehen, B rennen\nA benutzen, R+A Schloss oeffnen\nSELECT Raum-Menue\n");
 }
 
 static void update_menu(uint32_t down)
@@ -633,7 +772,8 @@ int main(void)
     load_room_index();
 
     setBrightness(1, -16);
-    if (!load_room(START_STAGE, START_ROOM))
+    enter_room(START_STAGE, START_ROOM);
+    if (!room.data)
         fatal("room/room1000.bin missing");
     const RoomHeader *h = room.header;
     place_player(h->spawn[0], h->spawn[1], h->spawn[2], h->spawn_dir, h->start_camera);
@@ -644,11 +784,28 @@ int main(void)
     while (pmMainLoop()) {
         scanKeys();
         uint32_t down = keysDown();
-        update_menu(down);
-        if (!menu_open) {
-            update_player(keysHeld());
-            check_doors(down);
-            print_status();
+        if (message_text) {
+            // play is paused while a message is shown; the closing press is
+            // not passed on (it would trigger the same AOT again)
+            if (down & (KEY_A | KEY_B)) {
+                message_text = NULL;
+                consoleClear();
+            }
+            down = 0;
+        } else {
+            update_menu(down);
+        }
+        if (!menu_open && !message_text) {
+            pending_keys |= down;
+            update_player_frame(keysHeld());
+            for (game_tick_acc += GAME_HZ; game_tick_acc >= DS_HZ && !message_text; game_tick_acc -= DS_HZ) {
+                update_player_tick();
+                check_aots(pending_keys);
+                pending_keys = 0;
+                script_tick();
+            }
+            if (!message_text)
+                print_status();
         }
         render_frame();
         swiWaitForVBlank();
