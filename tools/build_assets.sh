@@ -11,7 +11,7 @@ ROOMS="$*"
 [ -n "$ROOMS" ] || ROOMS=$(ls "$DISC/PL0/RDT" | sed -n 's/^\(ROOM....\)\.RDT$/\1/p')
 
 rm -rf build/ds
-mkdir -p build/bg build/room build/leon build/mask build/ds/bg build/ds/room build/ds/model build/ds/mask
+mkdir -p build/bg build/room build/leon build/mask build/ds/bg build/ds/room build/ds/model build/ds/mask build/ds/sound
 
 [ -x tools/bss2ppm ] || clang -O2 -o tools/bss2ppm tools/bss2ppm.c -I/opt/homebrew/include \
     -L/opt/homebrew/lib -lavcodec -lavutil -lswscale
@@ -19,6 +19,13 @@ mkdir -p build/bg build/room build/leon build/mask build/ds/bg build/ds/room bui
 
 python3 -I tools/pld2json.py "$DISC/PL0/PLD/PL00.PLD" build/leon/leon --plw "$DISC/PL0/PLD/PL00W00.PLW"
 python3 -I tools/model2ds.py build/leon/leon.json "$DISC/PL0/PLD/PL00.PLD" build/ds/model/leon
+
+# door sounds: sound/doorNN.bin from COMMON/DOOR/DOORNN.DO2
+mkdir -p build/ds/sound
+for f in "$DISC"/COMMON/DOOR/DOOR*.DO2; do
+    n=$(basename "$f" .DO2 | tr A-Z a-z)
+    python3 -I tools/vab2ds.py "$f" "build/ds/sound/$n.bin" > /dev/null
+done
 
 JOBS=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
 echo $ROOMS | tr ' ' '\n' | xargs -P "$JOBS" -I{} tools/convert_room.sh "$DISC" {}
@@ -35,5 +42,5 @@ PY
 
 rm -rf nitrofiles
 mkdir -p nitrofiles
-cp -R build/ds/bg build/ds/room build/ds/model build/ds/mask nitrofiles/
+cp -R build/ds/bg build/ds/room build/ds/model build/ds/mask build/ds/sound nitrofiles/
 du -sh nitrofiles nitrofiles/*

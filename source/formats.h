@@ -149,6 +149,26 @@ typedef struct {
 } RoomDoor;                // 36 bytes
 
 // ---------------------------------------------------------------------------
+// Sound bank: sound/doorNN.bin (tools/vab2ds.py), one per door file DOORNN.DO2
+//   SoundBankHeader, SoundEntry[count], then 16-bit PCM. Each entry covers a
+//   key range of the PS1 VAB; the door program keys on note 60 (open) and
+//   61 (close).
+#define SOUND_MAGIC 0x31534252 // "RBS1"
+
+typedef struct {
+    uint32_t magic;
+    uint16_t count;
+    uint16_t reserved;
+} SoundBankHeader;
+
+typedef struct {
+    uint8_t note_lo, note_hi;
+    uint16_t rate;          // Hz
+    uint32_t offset;        // from the start of the file, 4-byte aligned
+    uint32_t size;          // bytes of 16-bit PCM
+} SoundEntry;               // 12 bytes
+
+// ---------------------------------------------------------------------------
 // Model: model/<name>.bin
 #define MODEL_MAGIC 0x31444D52 // "RMD1"
 

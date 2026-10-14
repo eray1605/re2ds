@@ -17,6 +17,7 @@
 
 #include "assets.h"
 #include "script.h"
+#include "sound.h"
 
 // Leon's first playable room and the camera the converter picked a spawn for
 #define START_STAGE 1
@@ -612,9 +613,28 @@ static void use_door(const Aot *a)
         }
     }
 
+    // Door sequence. The PS1 plays the door program of DOORnn.DO2 (byte 12 of
+    // the door data, 0x800147e8) while it loads the room: model, camera and
+    // sounds. The animation is not ported yet; the sounds are: note 60 = the
+    // door opens, 61 = it closes. The bank stays loaded until the next door
+    // because the ARM7 may still be playing from it.
+    static void *door_bank;
+    char path[32];
+    if (door_bank)
+        sound_bank_free(door_bank);
+    snprintf(path, sizeof(path), "nitro:/sound/door%02d.bin", d[12]);
+    door_bank = sound_bank_load(path);
+    sound_play(door_bank, 60, 127, 64);
+    int open_frames = sound_frames(door_bank, 60);
+
     fade(1);
     enter_room(stage, id, cam);
     place_player(nx, ny, nz, ndir * 8, cam);
+    for (int f = FADE_STEPS; f < open_frames; f++)
+        swiWaitForVBlank();
+    sound_play(door_bank, 61, 127, 64);
+    for (int f = 0; f < sound_frames(door_bank, 61) / 2; f++)
+        swiWaitForVBlank();
     fade(-1);
 }
 
@@ -820,6 +840,7 @@ int main(void)
 
     if (!nitroFSInit(NULL))
         fatal("NitroFS init failed");
+    sound_init();
 
     bg_id = bgInit(3, BgType_Bmp8, BgSize_B8_256x256, BG_BASE_FRONT, 0);
     bgSetPriority(bg_id, 1);
