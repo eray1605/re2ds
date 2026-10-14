@@ -69,8 +69,7 @@ static int have_masks;
 static int leon_tex[3];
 static int mask_tex = -1;
 static int bg_id;
-static void *core_bank;             // COMMON/SOUND/CORE00: footsteps and other base sounds
-enum { SND_STEP = 4, SND_STEP_ALT = 7 };
+static void *room_bank;             // the room's sound bank (footsteps, room effects)
 static int bg_base = BG_BASE_FRONT;
 static int cur_cam = -1;
 static int8_t first_child[64], next_sibling[64];
@@ -200,6 +199,13 @@ static int load_room(int stage, int id)
     cur_room = id;
     snprintf(bg_prefix, sizeof(bg_prefix), "room%d%02x", stage, id);
     cur_cam = -1;
+    // room sound bank (the previous one may still play a short step: free it
+    // only after the new one is loaded)
+    void *old_bank = room_bank;
+    snprintf(path, sizeof(path), "nitro:/sound/room%d%02x0.bin", stage, id);
+    room_bank = sound_bank_load(path);
+    if (old_bank)
+        sound_bank_free(old_bank);
     near_aot = NULL;
     return 1;
 }
@@ -747,6 +753,20 @@ static void update_player_frame(uint32_t held)
 }
 
 // every game tick: next keyframe and its root motion
+// Floor sound under Leon (FUN_8004f078): last matching FLR area of his floor.
+static int floor_sound(void)
+{
+    int floor = player_floor();
+    for (int i = room.header->num_flr - 1; i >= 0; i--) {
+        const RoomFloorSound *f = &room.floor_sounds[i];
+        if ((f->floor & 0x80) || (f->floor & 0x7F) != floor)
+            continue;
+        if (player.x >= f->x && player.x <= f->x + f->w && player.z >= f->z && player.z <= f->z + f->d)
+            return f->sound;
+    }
+    return FLOOR_SOUND_DEFAULT;
+}
+
 static void step_forward(int32_t dist)
 {
     player.x += (dist * cosLerp(player.dir)) >> 12;
@@ -849,10 +869,11 @@ static void update_player_tick(void)
     else
         player.key = (player.key + 1) % a->count;
 
-    // footsteps (PS1: FUN_8005797c with sound 4, or 7 for the other foot)
+    // footsteps: keyframes flagged 0x4000 (0x2000 = other foot, only picks the
+    // PS1 voice); the sound depends on the floor (FUN_8005797c)
     uint16_t entry = leon.anim_pool[a->first + player.key];
     if (st != ST_IDLE && (entry & ANIM_FLAG_STEP))
-        sound_play(core_bank, (entry & ANIM_FLAG_STEP_ALT) ? SND_STEP_ALT : SND_STEP, 80, 64);
+        sound_play(room_bank, floor_sound() + (st == ST_RUN ? 1 : 0), 100, 64);
 
     if (st != ST_IDLE) {
         // root motion: cumulative distance along +X between the two keyframes
@@ -955,7 +976,6 @@ int main(void)
     if (!nitroFSInit(NULL))
         fatal("NitroFS init failed");
     sound_init();
-    core_bank = sound_bank_load("nitro:/sound/core00.bin");
 
     bg_id = bgInit(3, BgType_Bmp8, BgSize_B8_256x256, BG_BASE_FRONT, 0);
     bgSetPriority(bg_id, 1);

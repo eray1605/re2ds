@@ -27,10 +27,6 @@ for f in "$DISC"/COMMON/DOOR/DOOR*.DO2; do
     python3 -I tools/vab2ds.py "$f" "build/ds/sound/$n.bin" > /dev/null
 done
 
-# base sounds (footsteps etc.)
-python3 -I tools/vab2ds.py "$DISC/COMMON/SOUND/CORE00.EDH" build/ds/sound/core00.bin \
-    --vb "$DISC/COMMON/SOUND/CORE00.VB" > /dev/null
-
 JOBS=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
 echo $ROOMS | tr ' ' '\n' | xargs -P "$JOBS" -I{} tools/convert_room.sh "$DISC" {}
 

@@ -207,6 +207,20 @@ def read_messages(data, offset):
     return out
 
 
+def read_floor_sounds(data, offset):
+    """FLR: u16 count, then {x, z, w, d, sound, floor} (FUN_8004f078: floor
+    & 0x80 = disabled, & 0x7F = floor level; the last matching area wins,
+    default sound 29)."""
+    if not offset:
+        return []
+    n = struct.unpack_from("<H", data, offset)[0]
+    out = []
+    for i in range(n):
+        x, z, w, d, sound, floor = struct.unpack_from("<hhHHHH", data, offset + 2 + 12 * i)
+        out.append({"x": x, "z": z, "w": w, "d": d, "sound": sound & 0xFF, "floor": floor})
+    return out
+
+
 def read_doors(data, offsets):
     """Door AOTs (DOOR_AOT_SET / DOOR_AOT_SET_4P) from the init and main scripts.
 
@@ -252,6 +266,7 @@ def main():
         "collision": read_collision(data, offsets["collision"]),
         "doors": read_doors(data, offsets),
         "messages": read_messages(data, offsets.get("lang1")),
+        "floor_sounds": read_floor_sounds(data, offsets.get("floor_sound")),
         "init_script_hex": script_block(data, offsets["init_script"]).hex() if offsets.get("init_script") else "",
         "exec_script_hex": script_block(data, offsets["exec_script"]).hex() if offsets.get("exec_script") else "",
     }

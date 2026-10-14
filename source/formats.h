@@ -57,7 +57,7 @@ typedef struct {
 // room10a0 for Leon). room/index.bin lists the converted rooms: u16 count,
 // then count x (u8 stage, u8 room).
 #define ROOM_MAGIC 0x314D5252 // "RRM1"
-#define ROOM_VERSION 3
+#define ROOM_VERSION 4
 
 typedef struct {
     uint32_t magic;
@@ -80,10 +80,23 @@ typedef struct {
     uint32_t off_msgs;              // u16 offsets[num_msgs] (from off_msgs), then
     uint16_t num_msgs;              // NUL-terminated ASCII, "\n" = line break
     uint16_t reserved3;
+    uint32_t off_flr;               // RoomFloorSound[num_flr]
+    uint16_t num_flr;
+    uint16_t reserved4;
     // followed by RoomCamera[num_cameras], RoomSwitch[num_switches],
     // RoomBox[num_boxes], RoomDoor[num_doors] (doors as found by the
     // converter; the engine takes doors from the scripts instead)
-} RoomHeader;                       // 52 bytes
+} RoomHeader;                       // 60 bytes
+
+// Floor sound area (RDT FLR). Footsteps play entry sound + 0 (walk) or + 1
+// (run) of the room's sound bank, sound/<rdt>.bin (FUN_8004f078 / 8005797c).
+#define FLOOR_SOUND_DEFAULT 29
+typedef struct {
+    int16_t x, z;
+    uint16_t w, d;
+    uint16_t sound;
+    uint16_t floor;                 // & 0x7F = floor level, & 0x80 = disabled
+} RoomFloorSound;                   // 12 bytes
 
 typedef struct {
     int32_t from[3];       // eye

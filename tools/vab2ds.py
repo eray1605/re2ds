@@ -12,9 +12,15 @@ then the VAB header) plus xxx.VB (the samples). The sound table holds one u32
 per sound number; bits 20..23 are the tone. For these banks the output has one
 entry per sound number with note_lo = note_hi = that number.
 
+Room banks: the RDT holds a 48-entry sound table (u32: byte 1 & 0x7F =
+program, byte 2 >> 4 = tone), the VAB header and the samples; footsteps use
+entry <floor sound> + 0 (walk) / + 1 (run), see source/main.c.
+
 Usage: python3 -I vab2ds.py in.DO2 out.bin            (VAB at offset 16 in a DO2)
+       python3 -I vab2ds.py ROOM1000.RDT out.bin --rdt (room bank)
        python3 -I vab2ds.py in.EDH out.bin --vb in.VB  (core / weapon bank)
 """
+import os
 import struct
 import sys
 
@@ -44,15 +50,19 @@ def decode_vag(data):
 
 
 def parse_vab(d, base, vb_data=None):
+    """Returns (tone(prog, index) -> dict, vags). Tone attributes lie at
+    base + 0x820 + prog * 0x200 + index * 0x20 (16 slots per program), as the
+    PS1 reads them (FUN_8005797c)."""
     magic, _, _, _, _, ps, ts, vs = struct.unpack_from("<4sIIIHHHH", d, base)
     assert magic == b"pBAV", "not a VAB"
     tones_off = base + 32 + 128 * 16
-    tones = []
-    for t in range(ts):
-        o = tones_off + 32 * t
+
+    def tone(prog, index):
+        o = tones_off + prog * 512 + index * 32
         _, _, vol, pan, centre, fine, lo, hi = struct.unpack_from("<8B", d, o)
         vag = struct.unpack_from("<h", d, o + 22)[0]
-        tones.append({"centre": centre, "fine": fine, "lo": lo, "hi": hi, "vag": vag, "vol": vol})
+        return {"centre": centre, "fine": fine, "lo": lo, "hi": hi, "vag": vag, "vol": vol}
+
     sizes_off = tones_off + 16 * 32 * ps
     sizes = [struct.unpack_from("<H", d, sizes_off + 2 * i)[0] * 8 for i in range(vs + 1)]
     if vb_data is None:
@@ -63,30 +73,46 @@ def parse_vab(d, base, vb_data=None):
     for i in range(1, vs + 1):
         vags[i] = vb_data[pos:pos + sizes[i]]
         pos += sizes[i]
-    return tones, vags
+    return tone, ps, vags
+
+
+def sound_table(words):
+    """Sound number -> (program, tone) from a table of u32 entries
+    (byte 1 & 0x7F = program, byte 2 >> 4 = tone; 0xFFFFFFFF = unused)."""
+    return [(i, (w >> 8) & 0x7F, (w >> 20) & 0xF) for i, w in enumerate(words) if w != 0xFFFFFFFF]
 
 
 def main():
     src, dst = sys.argv[1], sys.argv[2]
     base = int(sys.argv[sys.argv.index("--offset") + 1]) if "--offset" in sys.argv else 16
     d = open(src, "rb").read()
-    sound_ids = None
-    if "--vb" in sys.argv:
+    if "--vb" in sys.argv:          # core / weapon bank: EDH + VB
         vb = open(sys.argv[sys.argv.index("--vb") + 1], "rb").read()
         base = d.find(b"pBAV")
-        table = struct.unpack_from(f"<{base // 4}I", d, 0)
-        tones, vags = parse_vab(d, base, vb)
-        sound_ids = [(i, (v >> 20) & 0xF) for i, v in enumerate(table) if v != 0xFFFFFFFF]
-    else:
-        tones, vags = parse_vab(d, base)
+        tone, ps, vags = parse_vab(d, base, vb)
+        picks = sound_table(struct.unpack_from(f"<{base // 4}I", d, 0))
+    elif "--rdt" in sys.argv:       # room bank: 48-entry table, VH and VB in the RDT
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from rdt2json import read_header
+        _, offs = read_header(d)
+        if not offs.get("room_vab_header") or not offs.get("room_sound"):
+            open(dst, "wb").write(struct.pack("<IHH", SOUND_MAGIC, 0, 0))
+            print(f"{dst}: no room sounds")
+            return
+        tone, ps, vags = parse_vab(d, offs["room_vab_header"], d[offs["room_vab_data"]:])
+        picks = sound_table(struct.unpack_from("<48I", d, offs["room_sound"]))
+    else:                           # door bank: every tone, keyed by its note
+        tone, ps, vags = parse_vab(d, base)
+        picks = None
     entries, pcm = [], bytearray()
-    picks = [(None, i) for i in range(len(tones))] if sound_ids is None else sound_ids
-    for sound_id, tone_index in picks:
-        if tone_index >= len(tones):
-            continue
-        t = dict(tones[tone_index])
+    if picks is None:
+        items = [(None, tone(0, i)) for i in range(16) if tone(0, i)["vag"] > 0]
+    else:
+        items = [(sid, tone(prog, ti)) for sid, prog, ti in picks if prog < ps]
+    for sound_id, t in items:
+        # the PS1 keys on the tone's lowest note (+ a random 0/1, ignored)
+        t = dict(t, note=t["lo"])
         if sound_id is not None:
-            t["note"] = t["lo"] if t["lo"] == t["hi"] else t["centre"]
             t["lo"] = t["hi"] = sound_id
         note = t.get("note", t["lo"] if t["lo"] == t["hi"] else t["centre"])
         rate = int(round(44100 * 2 ** ((note - t["centre"] - t["fine"] / 128) / 12)))

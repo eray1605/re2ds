@@ -14,6 +14,7 @@ typedef struct {
     const RoomBox *boxes;
     const RoomDoor *doors;
     const uint8_t *init_script, *exec_script;   // NULL if empty
+    const RoomFloorSound *floor_sounds;
 } Room;
 
 // Text of message n of the room, or NULL.

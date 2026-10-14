@@ -13,8 +13,8 @@ import struct
 import sys
 
 ROOM_MAGIC = 0x314D5252  # "RRM1"
-ROOM_VERSION = 3
-HEADER_SIZE = 52
+ROOM_VERSION = 4
+HEADER_SIZE = 60
 SWITCH_VIEW_AREA = 0x01
 SPAWN_MARGIN = 450
 
@@ -131,10 +131,14 @@ def main():
         table += struct.pack("<H", 2 * len(msgs) + len(text))
         text += m.encode("ascii", "replace") + b"\0"
     off_msgs, _ = section(bytes(table + text))
-    struct.pack_into("<IHBBHBB3ihH5IHH", out, 0, ROOM_MAGIC, ROOM_VERSION, len(cams), len(switches),
+    flr = room.get("floor_sounds", [])
+    off_flr, _ = section(b"".join(struct.pack("<hhHHHH", f["x"], f["z"], f["w"], f["d"], f["sound"], f["floor"])
+                                 for f in flr))
+    struct.pack_into("<IHBBHBB3ihH5IHHIHH", out, 0, ROOM_MAGIC, ROOM_VERSION, len(cams), len(switches),
                      len(boxes), spawn_cam, len(doors), sx, 0, sz,
                      spawn_dir if spawn_dir < 16384 else spawn_dir - 32768, 0,
-                     off_init, size_init, off_exec, size_exec, off_msgs, len(msgs), 0)
+                     off_init, size_init, off_exec, size_exec, off_msgs, len(msgs), 0,
+                     off_flr, len(flr), 0)
     with open(sys.argv[2], "wb") as f:
         f.write(out)
     views = sum(1 for r in room["_roles"] if r)

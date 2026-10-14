@@ -53,6 +53,7 @@ int room_load(Room *room, const char *path)
     const uint8_t *base = room->data;
     room->init_script = room->header->size_init ? base + room->header->off_init : NULL;
     room->exec_script = room->header->size_exec ? base + room->header->off_exec : NULL;
+    room->floor_sounds = (const RoomFloorSound *)(base + room->header->off_flr);
     return 1;
 }
 
