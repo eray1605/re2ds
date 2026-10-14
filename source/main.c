@@ -25,6 +25,13 @@
 
 // Animation numbers in leon.bin: 10 PLD animations, then the PL00W00 set.
 enum { ANIM_WALK = 10, ANIM_RUN = 11, ANIM_IDLE = 12 };
+// PLD animations of the special moves (player states 8 and 9, pl_move_08 /
+// pl_move_09 at 0x8003b6e4 / 0x8003ba78)
+enum { ANIM_CLIMB_UP = 6, ANIM_JUMP_DOWN = 7, ANIM_FALL = 8 };
+
+#define LEVEL_HEIGHT 1800   // one floor level (0x708): climb and jump height
+#define CLIMB_REACH 700     // probe distance in front of Leon for climb / jump boxes
+#define CLIMB_STEP 900      // how far Leon ends up on top of / beyond the box
 
 // Game logic rate. The PS1 game waits VSync(2) per gameplay frame (0x80013c94
 // sets the wait to 2), so it runs at 25 Hz on PAL (SLES-00972, our disc) and
@@ -47,7 +54,7 @@ enum { TURN_IDLE = 80, TURN_WALK = 40, TURN_RUN = 56 };
 #define BG_BASE_FRONT 0
 #define BG_BASE_BACK 4
 
-typedef enum { ST_IDLE, ST_WALK, ST_RUN, ST_BACK } PlayerState;
+typedef enum { ST_IDLE, ST_WALK, ST_RUN, ST_BACK, ST_CLIMB, ST_JUMP, ST_FALL, ST_LAND } PlayerState;
 
 typedef struct {
     uint8_t stage, room;
@@ -81,6 +88,8 @@ static struct {
     PlayerState state;
     int anim, key;
     int slope;                // RoomBox index of the slope/stairs Leon is on, -1 = none
+    int32_t fall_speed;       // jump down: rises by 1 per tick, y += speed * 30 (pl_move_09)
+    int32_t ground;           // jump down: height to land on
     int32_t slope_base;       // height of that slope's bottom edge
 } player;
 
@@ -717,6 +726,8 @@ static void move_forward(int32_t dist)
 // every DS frame: state, animation choice and turning
 static void update_player_frame(uint32_t held)
 {
+    if (player.state >= ST_CLIMB)
+        return; // special move in progress: no control
     PlayerState st = ST_IDLE;
     if (held & KEY_UP)
         st = (held & KEY_B) ? ST_RUN : ST_WALK;
@@ -734,9 +745,101 @@ static void update_player_frame(uint32_t held)
 }
 
 // every game tick: next keyframe and its root motion
+static void step_forward(int32_t dist)
+{
+    player.x += (dist * cosLerp(player.dir)) >> 12;
+    player.z -= (dist * sinLerp(player.dir)) >> 12;
+}
+
+// Special moves. Climbing (state 8): crouch and pull up, then Leon stands one
+// level higher on the box. Jumping down (state 9): jump animation, then a fall
+// whose speed rises by one every tick (y += speed * 30) until the floor below.
+static void special_move_tick(void)
+{
+    const ModelAnim *a = &leon.anims[player.anim];
+    int last = player.key + 1 >= a->count;
+    if (!last)
+        player.key++;
+    switch (player.state) {
+    case ST_CLIMB:
+        if (last) {
+            player.y -= LEVEL_HEIGHT;
+            step_forward(CLIMB_STEP);
+            player.state = ST_IDLE;
+            set_anim(ANIM_IDLE);
+            check_camera_switch();
+        }
+        break;
+    case ST_JUMP:
+        if (last) {
+            player.state = ST_FALL;
+            player.fall_speed = 5;
+            set_anim(ANIM_FALL);
+        }
+        break;
+    case ST_FALL:
+        player.key = 0;
+        step_forward(CLIMB_STEP / 8);
+        player.y += player.fall_speed * 30;
+        player.fall_speed++;
+        if (player.y >= player.ground) {
+            player.y = player.ground;
+            player.state = ST_LAND;
+        }
+        check_camera_switch();
+        break;
+    case ST_LAND:
+        if (last) {
+            player.state = ST_IDLE;
+            set_anim(ANIM_IDLE);
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+// Box of the given shape (9 = climb up, 10 = jump down) right in front of
+// Leon on his floor, or NULL.
+static const RoomBox *box_in_front(int shape)
+{
+    uint32_t floor_bit = 1u << player_floor();
+    int32_t px = player.x + ((CLIMB_REACH * cosLerp(player.dir)) >> 12);
+    int32_t pz = player.z - ((CLIMB_REACH * sinLerp(player.dir)) >> 12);
+    for (int i = 0; i < room.header->num_boxes; i++) {
+        const RoomBox *b = &room.boxes[i];
+        if (b->shape != shape || !(b->floors & floor_bit))
+            continue;
+        if (px >= b->x && px <= b->x + b->w && pz >= b->z && pz <= b->z + b->d)
+            return b;
+    }
+    return NULL;
+}
+
+// A pressed with no trigger in reach: climb up or jump down if possible.
+static void try_special_move(uint32_t pressed)
+{
+    if (!(pressed & KEY_A) || player.state >= ST_CLIMB)
+        return;
+    if (box_in_front(SHAPE_CLIMB_UP)) {
+        player.state = ST_CLIMB;
+        player.slope = -1;
+        set_anim(ANIM_CLIMB_UP);
+    } else if (box_in_front(SHAPE_JUMP_DOWN)) {
+        player.state = ST_JUMP;
+        player.slope = -1;
+        player.ground = player.y + LEVEL_HEIGHT;
+        set_anim(ANIM_JUMP_DOWN);
+    }
+}
+
 static void update_player_tick(void)
 {
     PlayerState st = player.state;
+    if (st >= ST_CLIMB) {
+        special_move_tick();
+        return;
+    }
     const ModelAnim *a = &leon.anims[player.anim];
     int prev = player.key;
     if (st == ST_BACK)
@@ -780,6 +883,10 @@ static void print_status(void)
         printf("A: Tuer -> %X%02X            \n", near_aot->data[8] + 1, near_aot->data[9]);
     else if (near_aot)
         printf("A: %s                 \n", aot_name(near_aot->type));
+    else if (player.state < ST_CLIMB && box_in_front(SHAPE_CLIMB_UP))
+        printf("A: hochklettern            \n");
+    else if (player.state < ST_CLIMB && box_in_front(SHAPE_JUMP_DOWN))
+        printf("A: runterspringen          \n");
     else
         printf("                          \n");
     printf("\nD-Pad gehen/drehen, B rennen\nA benutzen, R+A Schloss oeffnen\nSELECT Raum-Menue\n");
@@ -891,6 +998,8 @@ int main(void)
             for (game_tick_acc += GAME_HZ; game_tick_acc >= DS_HZ && !message_text; game_tick_acc -= DS_HZ) {
                 update_player_tick();
                 check_aots(pending_keys);
+                if (!near_aot && !message_text)
+                    try_special_move(pending_keys);
                 pending_keys = 0;
                 script_tick();
             }

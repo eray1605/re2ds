@@ -125,6 +125,9 @@ typedef struct {
 // RoomBox.shape values that are walkable and change the height
 #define SHAPE_SLOPE 11
 #define SHAPE_STAIRS 12
+// RoomBox.shape values for the special moves (press A in front of them)
+#define SHAPE_CLIMB_UP 9      // e.g. bins and crates: climb one level up
+#define SHAPE_JUMP_DOWN 10    // edge on the upper level: jump one level down
 
 // Door AOT from the room scripts (DOOR_AOT_SET / DOOR_AOT_SET_4P). Locks and
 // conditions are not evaluated yet (needs the script interpreter).
