@@ -99,10 +99,13 @@ def main():
         for rx, ry, rz in fr["rot"]:
             frames += struct.pack("<3h", rx * 8, ry * 8, rz * 8)
 
+    # pool entries: frame index (12 bits) | EDD frame flags bits 0..3 << 12
+    # (flag 4 = footstep, 2 = other foot; PS1 tests 0x4000 / 0x2000)
     anims, pool = bytearray(), []
-    for a in model["animations"]:
+    flags = model.get("animation_flags") or [[0] * len(a) for a in model["animations"]]
+    for a, fl in zip(model["animations"], flags):
         anims += struct.pack("<HH", len(pool), len(a))
-        pool += a
+        pool += [f | (g & 0xF) << 12 for f, g in zip(a, fl)]
     anims += struct.pack(f"<{len(pool)}H", *pool)
 
     header_size = 28  # sizeof(ModelHeader)

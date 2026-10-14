@@ -205,7 +205,11 @@ typedef struct {
 typedef struct {
     uint16_t first;         // index into the anim frame-index pool
     uint16_t count;         // keyframes in this animation
-} ModelAnim;                // pool of u16 frame indices follows the anim table
+} ModelAnim;                // pool of u16 entries follows the anim table:
+                            // frame index | flags << 12
+#define ANIM_FRAME(e) ((e) & 0x0FFF)
+#define ANIM_FLAG_STEP 0x4000      // footstep on this keyframe
+#define ANIM_FLAG_STEP_ALT 0x2000  // ... with the other foot
 
 // Display lists (one per bone and texture page) are packed GX FIFO command
 // lists for glCallList(): u32 word count, then the words. They contain

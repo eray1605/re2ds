@@ -7,7 +7,13 @@ centre note, so rate = 44100 * 2^((note - centre - fine/128) / 12). The door
 program keys on note 60 (door opens) and 61 (door closes); each tone of the
 door banks covers exactly one note (min == max), which gives the note.
 
-Usage: python3 -I vab2ds.py in.DO2 out.bin [--offset N]   (VAB at offset 16 in a DO2)
+Core and weapon banks come as COMMON/SOUND/xxx.EDH (a 64-byte sound table,
+then the VAB header) plus xxx.VB (the samples). The sound table holds one u32
+per sound number; bits 20..23 are the tone. For these banks the output has one
+entry per sound number with note_lo = note_hi = that number.
+
+Usage: python3 -I vab2ds.py in.DO2 out.bin            (VAB at offset 16 in a DO2)
+       python3 -I vab2ds.py in.EDH out.bin --vb in.VB  (core / weapon bank)
 """
 import struct
 import sys
@@ -37,7 +43,7 @@ def decode_vag(data):
     return out
 
 
-def parse_vab(d, base):
+def parse_vab(d, base, vb_data=None):
     magic, _, _, _, _, ps, ts, vs = struct.unpack_from("<4sIIIHHHH", d, base)
     assert magic == b"pBAV", "not a VAB"
     tones_off = base + 32 + 128 * 16
@@ -49,10 +55,13 @@ def parse_vab(d, base):
         tones.append({"centre": centre, "fine": fine, "lo": lo, "hi": hi, "vag": vag, "vol": vol})
     sizes_off = tones_off + 16 * 32 * ps
     sizes = [struct.unpack_from("<H", d, sizes_off + 2 * i)[0] * 8 for i in range(vs + 1)]
-    vb = sizes_off + 512 + 8  # u16 sizes[256], then an 8-byte block header (DO2)
-    vags, pos = {}, vb
+    if vb_data is None:
+        vb_data, pos = d, sizes_off + 512 + 8  # u16 sizes[256], then an 8-byte block header (DO2)
+    else:
+        pos = 0
+    vags = {}
     for i in range(1, vs + 1):
-        vags[i] = d[pos:pos + sizes[i]]
+        vags[i] = vb_data[pos:pos + sizes[i]]
         pos += sizes[i]
     return tones, vags
 
@@ -61,10 +70,25 @@ def main():
     src, dst = sys.argv[1], sys.argv[2]
     base = int(sys.argv[sys.argv.index("--offset") + 1]) if "--offset" in sys.argv else 16
     d = open(src, "rb").read()
-    tones, vags = parse_vab(d, base)
+    sound_ids = None
+    if "--vb" in sys.argv:
+        vb = open(sys.argv[sys.argv.index("--vb") + 1], "rb").read()
+        base = d.find(b"pBAV")
+        table = struct.unpack_from(f"<{base // 4}I", d, 0)
+        tones, vags = parse_vab(d, base, vb)
+        sound_ids = [(i, (v >> 20) & 0xF) for i, v in enumerate(table) if v != 0xFFFFFFFF]
+    else:
+        tones, vags = parse_vab(d, base)
     entries, pcm = [], bytearray()
-    for t in tones:
-        note = t["lo"] if t["lo"] == t["hi"] else t["centre"]
+    picks = [(None, i) for i in range(len(tones))] if sound_ids is None else sound_ids
+    for sound_id, tone_index in picks:
+        if tone_index >= len(tones):
+            continue
+        t = dict(tones[tone_index])
+        if sound_id is not None:
+            t["note"] = t["lo"] if t["lo"] == t["hi"] else t["centre"]
+            t["lo"] = t["hi"] = sound_id
+        note = t.get("note", t["lo"] if t["lo"] == t["hi"] else t["centre"])
         rate = int(round(44100 * 2 ** ((note - t["centre"] - t["fine"] / 128) / 12)))
         samples = decode_vag(vags.get(t["vag"], b""))
         while len(samples) % 2:

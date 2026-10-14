@@ -69,6 +69,8 @@ static int have_masks;
 static int leon_tex[3];
 static int mask_tex = -1;
 static int bg_id;
+static void *core_bank;             // COMMON/SOUND/CORE00: footsteps and other base sounds
+enum { SND_STEP = 4, SND_STEP_ALT = 7 };
 static int bg_base = BG_BASE_FRONT;
 static int cur_cam = -1;
 static int8_t first_child[64], next_sibling[64];
@@ -295,7 +297,7 @@ static void draw_bone(int bone, int frame)
 static void draw_player(void)
 {
     const ModelAnim *a = &leon.anims[player.anim];
-    int frame = leon.anim_pool[a->first + player.key];
+    int frame = ANIM_FRAME(leon.anim_pool[a->first + player.key]);
     glPushMatrix();
     glTranslatef32(player.x, player.y, player.z);
     glRotateYi(player.dir);
@@ -847,12 +849,17 @@ static void update_player_tick(void)
     else
         player.key = (player.key + 1) % a->count;
 
+    // footsteps (PS1: FUN_8005797c with sound 4, or 7 for the other foot)
+    uint16_t entry = leon.anim_pool[a->first + player.key];
+    if (st != ST_IDLE && (entry & ANIM_FLAG_STEP))
+        sound_play(core_bank, (entry & ANIM_FLAG_STEP_ALT) ? SND_STEP_ALT : SND_STEP, 80, 64);
+
     if (st != ST_IDLE) {
         // root motion: cumulative distance along +X between the two keyframes
         int k0 = st == ST_BACK ? player.key : prev;
         int k1 = st == ST_BACK ? prev : player.key;
-        int32_t s0 = k1 == 0 ? 0 : model_frame(&leon, leon.anim_pool[a->first + k0])->speed[0];
-        int32_t s1 = model_frame(&leon, leon.anim_pool[a->first + k1])->speed[0];
+        int32_t s0 = k1 == 0 ? 0 : model_frame(&leon, ANIM_FRAME(leon.anim_pool[a->first + k0]))->speed[0];
+        int32_t s1 = model_frame(&leon, ANIM_FRAME(leon.anim_pool[a->first + k1]))->speed[0];
         int32_t step = s1 - s0;
         if (step < 0)
             step = s1;
@@ -948,6 +955,7 @@ int main(void)
     if (!nitroFSInit(NULL))
         fatal("NitroFS init failed");
     sound_init();
+    core_bank = sound_bank_load("nitro:/sound/core00.bin");
 
     bg_id = bgInit(3, BgType_Bmp8, BgSize_B8_256x256, BG_BASE_FRONT, 0);
     bgSetPriority(bg_id, 1);
