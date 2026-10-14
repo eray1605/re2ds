@@ -1,0 +1,9 @@
+build/
+build_nds/
+nitrofiles/
+*.o
+*.nds
+*.elf
+*.map
+tools/bss2ppm
+__pycache__/
