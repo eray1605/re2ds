@@ -7,3 +7,4 @@ nitrofiles/
 *.map
 tools/bss2ppm
 __pycache__/
+tools/lz77
