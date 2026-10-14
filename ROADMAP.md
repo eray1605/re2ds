@@ -49,7 +49,7 @@ Disc 2 (Claire) hat denselben Aufbau.
 
 ## Phasen
 
-### Phase 1 – Alle Räume begehbar (L)
+### Phase 1 – Alle Räume begehbar (L) – erledigt bis auf Türanimation und genaue Kollisionsformen
 - Batch-Konverter für alle 125 Räume; Hintergründe 8 Bit + LZ, beim Kamerawechsel laden.
 - Räume wechseln über Türen inkl. Türanimation (DO2) und Ladezeit dahinter verstecken.
 - Bodenhöhen, Treppen und Rampen (RDT-Höhendaten), Speicherverwaltung für Raumwechsel.

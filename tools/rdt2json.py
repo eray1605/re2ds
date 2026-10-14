@@ -20,6 +20,23 @@ OFFSET_NAMES = [
 
 FLOOR_HEIGHT_UNIT = -1800
 
+# SCD instruction sizes in bytes (opcode included), from OpenBiohazard2
+# fileio/rdt_scd.go. Used to walk the room scripts linearly.
+SCD_SIZES = {
+    0: 1, 1: 1, 2: 1, 3: 4, 4: 4, 5: 2, 6: 4, 7: 4, 8: 1, 9: 4, 10: 3, 11: 1, 12: 1,
+    13: 6, 14: 2, 15: 4, 16: 2, 17: 4, 18: 2, 19: 4, 20: 6, 21: 2, 22: 2, 23: 6, 24: 2,
+    25: 2, 26: 2, 29: 4, 32: 1, 33: 4, 34: 4, 35: 6, 36: 4, 37: 3, 38: 6, 39: 4, 40: 1,
+    41: 2, 42: 1, 43: 6, 44: 20, 45: 38, 46: 3, 47: 4, 48: 1, 49: 1, 50: 8, 51: 8, 52: 4,
+    53: 3, 54: 12, 55: 4, 57: 8, 58: 16, 59: 32, 60: 2, 61: 3, 62: 6, 63: 4, 64: 8, 65: 10,
+    66: 1, 67: 4, 68: 22, 70: 10, 71: 2, 72: 16, 75: 3, 76: 5, 77: 22, 78: 22, 80: 4,
+    81: 6, 82: 6, 83: 6, 84: 22, 87: 8, 88: 4, 89: 4, 90: 2, 91: 2, 92: 3, 93: 2, 94: 2,
+    95: 2, 96: 14, 97: 4, 98: 2, 99: 1, 100: 16, 101: 2, 102: 1, 103: 28, 104: 40,
+    105: 30, 106: 6, 107: 4, 108: 1, 109: 4, 110: 6, 111: 2, 122: 16, 123: 16,
+}
+OP_EVT_END, OP_DOOR_AOT_SET, OP_DOOR_AOT_SET_4P = 1, 59, 104
+DOOR_TAIL = "<4h3B7B"   # next x/y/z/dir, stage, room, camera, next floor, texture,
+                        # door type, knock type, key id, key type, free
+
 
 def read_header(data):
     names = ["sprites", "cameras", "models", "items", "doors", "rooms", "reverb", "sprite_max"]
@@ -109,6 +126,62 @@ def read_collision(data, offset):
     return {"ceiling": {"x": cx, "z": cz, "y": cy, "w": cw, "d": cd}, "boxes": boxes}
 
 
+def script_instructions(data, offset):
+    """Yield (opcode, position) for every instruction of an SCD block.
+
+    The block starts with a table of u16 function offsets (the first one is
+    also the table size). Functions end at EVT_END; unknown opcodes stop the
+    walk of that function.
+    """
+    first = struct.unpack_from("<H", data, offset)[0]
+    funcs = [struct.unpack_from("<H", data, offset + i)[0] for i in range(0, first, 2)]
+    for start in funcs:
+        pos = offset + start
+        while pos < len(data):
+            op = data[pos]
+            size = SCD_SIZES.get(op)
+            if size is None:
+                break
+            yield op, pos
+            pos += size
+            if op == OP_EVT_END:
+                break
+
+
+def read_doors(data, offsets):
+    """Door AOTs (DOOR_AOT_SET / DOOR_AOT_SET_4P) from the init and main scripts.
+
+    A door set several times (e.g. in both branches of an IF) keeps its
+    first definition; flags and locks are the script interpreter's job later.
+    """
+    doors = {}
+    for key in ("init_script", "exec_script"):
+        if not offsets.get(key):
+            continue
+        for op, pos in script_instructions(data, offsets[key]):
+            if op == OP_DOOR_AOT_SET:
+                aot, sce, sat, floor, sup, x, z, w, d = struct.unpack_from("<5B4h", data, pos + 1)
+                quad = [[x, z], [x + w, z], [x + w, z + d], [x, z + d]]
+                tail = struct.unpack_from(DOOR_TAIL, data, pos + 14)
+            elif op == OP_DOOR_AOT_SET_4P:
+                aot, sce, sat, floor, sup = struct.unpack_from("<5B", data, pos + 1)
+                pts = struct.unpack_from("<8h", data, pos + 6)
+                quad = [[pts[2 * k], pts[2 * k + 1]] for k in range(4)]
+                tail = struct.unpack_from(DOOR_TAIL, data, pos + 22)
+            else:
+                continue
+            if aot in doors:
+                continue
+            nx, ny, nz, ndir, stage, room, cam, nfloor, tex, dtype, knock, key_id, key_type, _ = tail
+            doors[aot] = {
+                "aot": aot, "sce": sce, "sat": sat, "floor": floor, "quad_xz": quad,
+                "next_pos": [nx, ny, nz], "next_dir": ndir, "next_stage": stage + 1,
+                "next_room": room, "next_camera": cam, "next_floor": nfloor,
+                "door_type": dtype, "knock": knock, "key_id": key_id, "key_type": key_type,
+            }
+    return [doors[k] for k in sorted(doors)]
+
+
 def main():
     data = open(sys.argv[1], "rb").read()
     header, offsets = read_header(data)
@@ -118,6 +191,7 @@ def main():
         "cameras": read_cameras(data, offsets["camera_position"], header["cameras"]),
         "camera_switches": read_camera_switches(data, offsets["camera_switches"]),
         "collision": read_collision(data, offsets["collision"]),
+        "doors": read_doors(data, offsets),
     }
     for cam in room["cameras"]:
         cam["masks"] = read_masks(data, cam["mask_offset"])
@@ -126,7 +200,8 @@ def main():
     print(f"{sys.argv[1]}: {header['cameras']} cameras, "
           f"{len(room['camera_switches'])} camera switches, "
           f"{len(room['collision']['boxes'])} collision boxes, "
-          f"{sum(len(c['masks']) for c in room['cameras'])} mask rectangles")
+          f"{sum(len(c['masks']) for c in room['cameras'])} mask rectangles, "
+          f"{len(room['doors'])} doors")
 
 
 if __name__ == "__main__":

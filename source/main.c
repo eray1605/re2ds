@@ -1,8 +1,9 @@
-// re2ds - Resident Evil 2 room prototype for the Nintendo DS.
+// re2ds - Resident Evil 2 for the Nintendo DS (work in progress).
 //
-// Main screen: pre-rendered background on BG3 (16-bit bitmap) with the 3D layer
-// (BG0) on top: Leon plus the foreground masks as depth-tested quads.
-// Sub screen: debug text.
+// Main screen: pre-rendered background on BG3 (8 bpp bitmap, double-buffered
+// in VRAM A) with the 3D layer (BG0) on top: Leon plus the foreground masks
+// as depth-tested quads.
+// Sub screen: debug text and the room menu (SELECT).
 //
 // Conventions (verified with tools/ds_preview.py, see formats.h):
 //   world units = RE2 game units = DS 20.12 fixed point, -Y is up,
@@ -16,37 +17,68 @@
 
 #include "assets.h"
 
-#define ROOM_NAME "room100"
-#define RDT_NAME "room1000"
+// Leon's first playable room and the camera the converter picked a spawn for
+#define START_STAGE 1
+#define START_ROOM 0x00
 
 // Animation numbers in leon.bin: 10 PLD animations, then the PL00W00 set.
 enum { ANIM_WALK = 10, ANIM_RUN = 11, ANIM_IDLE = 12 };
 
-// Turn speeds per 60 Hz frame in DS angle units (RE2 values per 30 Hz frame in
-// 4096 units, see re2ds-notes/player-control.md: x8 for 32768 units, /2 for 60 Hz).
-enum { TURN_IDLE = 320, TURN_WALK = 160, TURN_RUN = 224 };
+// Game logic rate. The PS1 game waits VSync(2) per gameplay frame (0x80013c94
+// sets the wait to 2), so it runs at 25 Hz on PAL (SLES-00972, our disc) and
+// 30 Hz on NTSC. One animation keyframe and one root-motion step per tick.
+#define GAME_HZ 25
+#define DS_HZ 60
+
+// Turn speeds per game tick in RE2 units (4096 = 360 degrees), Fine state
+// (re2ds-notes/player-control.md). Applied per DS frame scaled to DS units.
+enum { TURN_IDLE = 80, TURN_WALK = 40, TURN_RUN = 56 };
+#define TURN_PER_FRAME(t) ((t) * 8 * GAME_HZ / DS_HZ)
 
 #define PLAYER_RADIUS 400
+#define DOOR_REACH 600      // action button probe distance in front of Leon
+#define FADE_STEPS 8        // frames per fade (brightness 0 -> -16)
+
+// The background bitmap is 256x256 at 8 bpp = 64 KB; VRAM A (128 KB) holds
+// two of them. Map base unit for bitmaps is 16 KB.
+#define BG_BASE_FRONT 0
+#define BG_BASE_BACK 4
 
 typedef enum { ST_IDLE, ST_WALK, ST_RUN, ST_BACK } PlayerState;
 
+typedef struct {
+    uint8_t stage, room;
+} RoomRef;
+
 static Room room;
+static int cur_stage, cur_room;
+static char bg_prefix[16];    // e.g. "room10a"
 static Model leon;
 static Masks masks;
 static int have_masks;
 static int leon_tex[3];
 static int mask_tex = -1;
 static int bg_id;
+static int bg_base = BG_BASE_FRONT;
 static int cur_cam = -1;
-static int tex_ok, mask_ok;   // glTexImage2D results, shown on the debug screen
 static int8_t first_child[64], next_sibling[64];
+
+static const RoomRef *room_index;
+static int room_count;
+static int menu_open, menu_sel;
+static const RoomDoor *near_door;   // door the action button would open
 
 static struct {
     int32_t x, y, z;
     int16_t dir;
     PlayerState state;
-    int anim, key, tick;
+    int anim, key;
+    int tick;                 // accumulates GAME_HZ per DS frame, a game tick every DS_HZ
+    int slope;                // RoomBox index of the slope/stairs Leon is on, -1 = none
+    int32_t slope_base;       // height of that slope's bottom edge
 } player;
+
+static void render_frame(void);
 
 // ---------------------------------------------------------------- loading
 static void fatal(const char *msg)
@@ -70,8 +102,7 @@ static void upload_leon_textures(void)
     for (int p = 0; p < pages; p++) {
         const uint8_t *page = tex + p * (512 + TEX_PAGE_WIDTH * TEX_PAGE_HEIGHT);
         glBindTexture(0, leon_tex[p]);
-        tex_ok += glTexImage2D(0, 0, GL_RGB256, TEXTURE_SIZE_128, TEXTURE_SIZE_256, 0,
-                               TEXGEN_TEXCOORD, page + 512);
+        glTexImage2D(0, 0, GL_RGB256, TEXTURE_SIZE_128, TEXTURE_SIZE_256, 0, TEXGEN_TEXCOORD, page + 512);
         glColorTableEXT(0, 0, 256, 0, 0, (const uint16_t *)page);
     }
     asset_free(tex);
@@ -96,13 +127,24 @@ static void set_camera(int cam)
     char path[64];
     cur_cam = cam;
 
-    // background bitmap straight into BG3
-    snprintf(path, sizeof(path), "nitro:/bg/" ROOM_NAME "_cam%02d.bin", cam);
-    uint16_t *bg = asset_load(path, NULL);
-    if (!bg)
+    // Background: unpack into the hidden buffer, then flip buffer and palette
+    // together in vblank so the cut is clean.
+    snprintf(path, sizeof(path), "nitro:/bg/%s_cam%02d.bin", bg_prefix, cam);
+    BgHeader *bg = asset_load(path, NULL);
+    if (!bg) {
+        // a few rooms (e.g. 30C) repeat one camera and store a single image
+        snprintf(path, sizeof(path), "nitro:/bg/%s_cam00.bin", bg_prefix);
+        bg = asset_load(path, NULL);
+    }
+    if (!bg || bg->magic != BG_MAGIC)
         fatal(path);
-    DC_FlushRange(bg, BG_WIDTH * BG_HEIGHT * 2);
-    dmaCopy(bg, bgGetGfxPtr(bg_id), BG_WIDTH * BG_HEIGHT * 2);
+    int back = bg_base == BG_BASE_FRONT ? BG_BASE_BACK : BG_BASE_FRONT;
+    decompress(bg + 1, (u16 *)BG_GFX + 0x2000 * back, LZ77Vram);
+    swiWaitForVBlank();
+    bgSetMapBase(bg_id, back);
+    for (int i = 1; i < 256; i++)
+        BG_PALETTE[i] = bg->palette[i];
+    bg_base = back;
     asset_free(bg);
 
     // masks for this camera (optional)
@@ -112,17 +154,45 @@ static void set_camera(int cam)
         glDeleteTextures(1, &mask_tex);
         mask_tex = -1;
     }
-    snprintf(path, sizeof(path), "nitro:/mask/" ROOM_NAME "_cam%02d.bin", cam);
+    snprintf(path, sizeof(path), "nitro:/mask/%s_cam%02d.bin", bg_prefix, cam);
     have_masks = masks_load(&masks, path);
-    mask_ok = 0;
     if (have_masks) {
         DC_FlushRange(masks.data, 512 + sizeof(MaskHeader) + 256 * masks.header->tex_height);
         glGenTextures(1, &mask_tex);
         glBindTexture(0, mask_tex);
-        mask_ok = glTexImage2D(0, 0, GL_RGB256, TEXTURE_SIZE_256, tex_size_enum(masks.header->tex_height), 0,
-                               TEXGEN_TEXCOORD | GL_TEXTURE_COLOR0_TRANSPARENT, masks.pixels);
+        glTexImage2D(0, 0, GL_RGB256, TEXTURE_SIZE_256, tex_size_enum(masks.header->tex_height), 0,
+                     TEXGEN_TEXCOORD | GL_TEXTURE_COLOR0_TRANSPARENT, masks.pixels);
         glColorTableEXT(0, 0, 256, 0, 0, masks.palette);
     }
+}
+
+// Replaces the current room; returns 0 (and keeps the old one) if the file is
+// missing. The caller places the player and calls set_camera().
+static int load_room(int stage, int id)
+{
+    char path[48];
+    snprintf(path, sizeof(path), "nitro:/room/room%d%02x0.bin", stage, id);
+    Room next;
+    if (!room_load(&next, path))
+        return 0;
+    if (room.data)
+        asset_free(room.data);
+    room = next;
+    cur_stage = stage;
+    cur_room = id;
+    snprintf(bg_prefix, sizeof(bg_prefix), "room%d%02x", stage, id);
+    cur_cam = -1;
+    near_door = NULL;
+    return 1;
+}
+
+static void load_room_index(void)
+{
+    uint8_t *data = asset_load("nitro:/room/index.bin", NULL);
+    if (!data)
+        fatal("room/index.bin missing");
+    room_count = data[0] | data[1] << 8;
+    room_index = (const RoomRef *)(data + 2);
 }
 
 static void build_hierarchy(void)
@@ -219,12 +289,36 @@ static void draw_masks(void)
     glPopMatrix(1);
 }
 
+static void render_frame(void)
+{
+    setup_projection(&room.cameras[cur_cam]);
+    // Textures are modulated with the vertex colour: keep it white.
+    glColor3b(255, 255, 255);
+    glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(1));
+    draw_player();
+    glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(2));
+    draw_masks();
+    glFlush(0);
+}
+
+// Fades the main screen to black (dir = 1) or back (dir = -1), rendering
+// every frame so the 3D layer stays valid.
+static void fade(int dir)
+{
+    for (int i = 1; i <= FADE_STEPS; i++) {
+        int level = 16 * i / FADE_STEPS;
+        setBrightness(1, dir > 0 ? -level : level - 16);
+        render_frame();
+        swiWaitForVBlank();
+    }
+}
+
 // ---------------------------------------------------------------- game logic
-static int point_in_quad(int32_t x, int32_t z, const RoomSwitch *s)
+static int point_in_quad(int32_t x, int32_t z, const int16_t *qx, const int16_t *qz)
 {
     int sign = 0;
     for (int k = 0; k < 4; k++) {
-        int64_t x0 = s->x[k], z0 = s->z[k], x1 = s->x[(k + 1) & 3], z1 = s->z[(k + 1) & 3];
+        int64_t x0 = qx[k], z0 = qz[k], x1 = qx[(k + 1) & 3], z1 = qz[(k + 1) & 3];
         int64_t c = (x1 - x0) * (z - z0) - (z1 - z0) * (x - x0);
         if (c != 0) {
             if (sign == 0)
@@ -236,28 +330,88 @@ static int point_in_quad(int32_t x, int32_t z, const RoomSwitch *s)
     return 1;
 }
 
-static int blocked(int32_t x, int32_t z)
+static int player_floor(void)
 {
+    int f = (-player.y - FLOOR_HEIGHT / 2) / -FLOOR_HEIGHT;
+    return f < 0 ? 0 : f > 31 ? 31 : f;
+}
+
+static int is_slope(const RoomBox *b)
+{
+    return b->shape == SHAPE_SLOPE || b->shape == SHAPE_STAIRS;
+}
+
+// How far a circle of PLAYER_RADIUS at (x, z) reaches into box b (0 = free).
+static int32_t penetration(const RoomBox *b, int32_t x, int32_t z)
+{
+    int32_t in_x = x - (b->x - PLAYER_RADIUS), out_x = b->x + b->w + PLAYER_RADIUS - x;
+    int32_t in_z = z - (b->z - PLAYER_RADIUS), out_z = b->z + b->d + PLAYER_RADIUS - z;
+    if (in_x <= 0 || out_x <= 0 || in_z <= 0 || out_z <= 0)
+        return 0;
+    int32_t d = in_x < out_x ? in_x : out_x;
+    if (in_z < d)
+        d = in_z;
+    if (out_z < d)
+        d = out_z;
+    return d;
+}
+
+// A step is blocked only if it pushes Leon deeper into an obstacle, so he
+// can always walk out of one he starts in (door exits lie close to walls).
+static int blocked(int32_t from_x, int32_t from_z, int32_t x, int32_t z)
+{
+    uint32_t floor_bit = 1u << player_floor();
     for (int i = 0; i < room.header->num_boxes; i++) {
         const RoomBox *b = &room.boxes[i];
-        if (!(b->floors & 1))
+        if (!(b->floors & floor_bit) || is_slope(b))
             continue;
-        if (x > b->x - PLAYER_RADIUS && x < b->x + b->w + PLAYER_RADIUS &&
-            z > b->z - PLAYER_RADIUS && z < b->z + b->d + PLAYER_RADIUS)
+        int32_t depth = penetration(b, x, z);
+        if (depth > 0 && depth >= penetration(b, from_x, from_z))
             return 1;
     }
     return 0;
 }
 
+// Height on slopes and stairs (OpenBiohazard2 game/player.go): the box rises
+// by ((type >> 6) & 31) floor heights from its bottom edge, which
+// (type >> 4) & 3 selects (0: x min, 1: x max, 2: z min, 3: z max). The bottom
+// height is taken when Leon steps onto the box.
+static void update_height(void)
+{
+    for (int i = 0; i < room.header->num_boxes; i++) {
+        const RoomBox *b = &room.boxes[i];
+        if (!is_slope(b) || b->w == 0 || b->d == 0)
+            continue;
+        if (player.x < b->x || player.x > b->x + b->w || player.z < b->z || player.z > b->z + b->d)
+            continue;
+        int32_t frac;   // 0..4096 from the bottom edge
+        switch ((b->type >> 4) & 3) {
+        case 0: frac = ((player.x - b->x) << 12) / b->w; break;
+        case 1: frac = ((b->x + b->w - player.x) << 12) / b->w; break;
+        case 2: frac = ((player.z - b->z) << 12) / b->d; break;
+        default: frac = ((b->z + b->d - player.z) << 12) / b->d; break;
+        }
+        int32_t rise = ((b->type >> 6) & 31) * FLOOR_HEIGHT;
+        if (player.slope != i) {
+            player.slope = i;
+            player.slope_base = player.y - ((rise * frac) >> 12);
+        }
+        player.y = player.slope_base + ((rise * frac) >> 12);
+        return;
+    }
+    player.slope = -1;
+}
+
 static void check_camera_switch(void)
 {
+    int floor = player_floor();
     for (int i = 0; i < room.header->num_switches; i++) {
         const RoomSwitch *s = &room.switches[i];
         if (s->cam0 != cur_cam || (s->role & SWITCH_VIEW_AREA) || s->cam1 == cur_cam)
             continue;
-        if (s->floor != 255 && s->floor != 0)
+        if (s->floor != 255 && s->floor != floor)
             continue;
-        if (point_in_quad(player.x, player.z, s)) {
+        if (point_in_quad(player.x, player.z, s->x, s->z)) {
             set_camera(s->cam1);
             return;
         }
@@ -273,19 +427,82 @@ static void set_anim(int anim)
     }
 }
 
+static void place_player(int32_t x, int32_t y, int32_t z, int16_t dir, int cam)
+{
+    player.x = x;
+    player.y = y;
+    player.z = z;
+    player.dir = dir;
+    player.slope = -1;
+    player.anim = -1;
+    set_anim(ANIM_IDLE);
+    set_camera(cam < room.header->num_cameras ? cam : 0);
+}
+
+// Locks are ignored for now: every door opens (needs the script interpreter).
+static void enter_door(const RoomDoor *d)
+{
+    RoomDoor door = *d; // the room data is freed by load_room
+    fade(1);
+    if (load_room(door.next_stage, door.next_room))
+        place_player(door.next[0], door.next[1], door.next[2], (int16_t)door.next_dir, door.next_camera);
+    fade(-1);
+}
+
+static void warp_to(int index)
+{
+    const RoomRef *r = &room_index[index];
+    fade(1);
+    if (load_room(r->stage, r->room)) {
+        const RoomHeader *h = room.header;
+        place_player(h->spawn[0], h->spawn[1], h->spawn[2], h->spawn_dir, h->start_camera);
+    }
+    fade(-1);
+}
+
+// Doors the player walks into open at once; doors with AOT_SAT_MANUAL need
+// the action button (A) while Leon stands in or faces the trigger area.
+static void check_doors(uint32_t pressed)
+{
+    int floor = player_floor();
+    int32_t px = player.x + ((DOOR_REACH * cosLerp(player.dir)) >> 12);
+    int32_t pz = player.z - ((DOOR_REACH * sinLerp(player.dir)) >> 12);
+    near_door = NULL;
+    for (int i = 0; i < room.header->num_doors; i++) {
+        const RoomDoor *d = &room.doors[i];
+        if (!(d->sat & AOT_SAT_PLAYER) || (d->floor != 255 && d->floor != floor))
+            continue;
+        int inside = point_in_quad(player.x, player.z, d->x, d->z);
+        if (!(d->sat & AOT_SAT_MANUAL)) {
+            if (inside) {
+                enter_door(d);
+                return;
+            }
+            continue;
+        }
+        if (inside || point_in_quad(px, pz, d->x, d->z)) {
+            near_door = d;
+            if (pressed & KEY_A) {
+                enter_door(d);
+                return;
+            }
+        }
+    }
+}
+
 static void move_forward(int32_t dist)
 {
     int32_t dx = (dist * cosLerp(player.dir)) >> 12;
     int32_t dz = -((dist * sinLerp(player.dir)) >> 12);
-    if (!blocked(player.x + dx, player.z))
+    if (!blocked(player.x, player.z, player.x + dx, player.z))
         player.x += dx;
-    if (!blocked(player.x, player.z + dz))
+    if (!blocked(player.x, player.z, player.x, player.z + dz))
         player.z += dz;
+    update_height();
 }
 
-static void update_player(void)
+static void update_player(uint32_t held)
 {
-    uint32_t held = keysHeld();
     PlayerState st = ST_IDLE;
     if (held & KEY_UP)
         st = (held & KEY_B) ? ST_RUN : ST_WALK;
@@ -293,7 +510,7 @@ static void update_player(void)
         st = ST_BACK;
     player.state = st;
 
-    int turn = st == ST_IDLE ? TURN_IDLE : st == ST_RUN ? TURN_RUN : TURN_WALK;
+    int turn = TURN_PER_FRAME(st == ST_IDLE ? TURN_IDLE : st == ST_RUN ? TURN_RUN : TURN_WALK);
     if (held & KEY_RIGHT)
         player.dir += turn;
     if (held & KEY_LEFT)
@@ -301,10 +518,10 @@ static void update_player(void)
 
     set_anim(st == ST_RUN ? ANIM_RUN : (st == ST_IDLE ? ANIM_IDLE : ANIM_WALK));
 
-    // RE2 animates at 30 Hz: one keyframe every second DS frame.
-    if (++player.tick < 2)
+    player.tick += GAME_HZ;
+    if (player.tick < DS_HZ)
         return;
-    player.tick = 0;
+    player.tick -= DS_HZ;
 
     const ModelAnim *a = &leon.anims[player.anim];
     int prev = player.key;
@@ -327,6 +544,60 @@ static void update_player(void)
     }
 }
 
+// ---------------------------------------------------------------- debug screen
+static void print_status(void)
+{
+    printf("\x1b[0;0HRE2 DS - room %X%02X  cam %d   \n", cur_stage, cur_room, cur_cam);
+    printf("pos %6ld %6ld %6ld  \n", (long)player.x, (long)player.y, (long)player.z);
+    printf("dir %5d floor %d slope %3d  \n", player.dir & 0x7FFF, player_floor(), player.slope);
+    if (near_door)
+        printf("A: Tuer -> %X%02X            \n", near_door->next_stage, near_door->next_room);
+    else
+        printf("                          \n");
+    printf("\nD-Pad gehen/drehen, B rennen\nA Tuer, SELECT Raum-Menue\n");
+}
+
+static void update_menu(uint32_t down)
+{
+    if (down & KEY_SELECT) {
+        menu_open = !menu_open;
+        consoleClear();
+        if (menu_open) {
+            for (int i = 0; i < room_count; i++)
+                if (room_index[i].stage == cur_stage && room_index[i].room == cur_room)
+                    menu_sel = i;
+        }
+    }
+    if (!menu_open)
+        return;
+    if (down & KEY_UP)
+        menu_sel--;
+    if (down & KEY_DOWN)
+        menu_sel++;
+    if (down & (KEY_LEFT | KEY_L))
+        menu_sel -= 10;
+    if (down & (KEY_RIGHT | KEY_R))
+        menu_sel += 10;
+    menu_sel = (menu_sel % room_count + room_count) % room_count;
+    if (down & (KEY_A | KEY_B)) {
+        menu_open = 0;
+        consoleClear();
+        if (down & KEY_A)
+            warp_to(menu_sel);
+        return;
+    }
+
+    printf("\x1b[0;0HRaum waehlen (%d Raeume)\n", room_count);
+    printf("hoch/runter, L/R +-10\nA springen, B zurueck\n\n");
+    int first = menu_sel - 7;
+    if (first < 0)
+        first = 0;
+    if (first > room_count - 16)
+        first = room_count - 16 < 0 ? 0 : room_count - 16;
+    for (int i = first; i < first + 16 && i < room_count; i++)
+        printf("%c Raum %X%02X   \n", i == menu_sel ? '>' : ' ', room_index[i].stage, room_index[i].room);
+}
+
 // ---------------------------------------------------------------- main
 int main(void)
 {
@@ -342,9 +613,10 @@ int main(void)
     if (!nitroFSInit(NULL))
         fatal("NitroFS init failed");
 
-    bg_id = bgInit(3, BgType_Bmp16, BgSize_B16_256x256, 0, 0);
+    bg_id = bgInit(3, BgType_Bmp8, BgSize_B8_256x256, BG_BASE_FRONT, 0);
     bgSetPriority(bg_id, 1);
     bgSetPriority(0, 0);
+    BG_PALETTE[0] = 0;
 
     glInit();
     glEnable(GL_TEXTURE_2D);
@@ -354,44 +626,31 @@ int main(void)
     glClearDepth(GL_MAX_DEPTH);
     glViewport(0, 0, 255, 191);
 
-    if (!room_load(&room, "nitro:/room/" RDT_NAME ".bin"))
-        fatal("room/" RDT_NAME ".bin missing");
     if (!model_load(&leon, "nitro:/model/leon.bin"))
         fatal("model/leon.bin missing");
     build_hierarchy();
     upload_leon_textures();
+    load_room_index();
 
-    player.x = room.header->spawn[0];
-    player.y = room.header->spawn[1];
-    player.z = room.header->spawn[2];
-    player.dir = room.header->spawn_dir;
-    player.anim = -1;
-    set_anim(ANIM_IDLE);
-    set_camera(room.header->start_camera);
-
-    printf("\x1b[1;1HRE2 DS prototype - room 100\n");
-    printf("D-Pad: walk/turn, B: run\n");
+    setBrightness(1, -16);
+    if (!load_room(START_STAGE, START_ROOM))
+        fatal("room/room1000.bin missing");
+    const RoomHeader *h = room.header;
+    place_player(h->spawn[0], h->spawn[1], h->spawn[2], h->spawn_dir, h->start_camera);
+    fade(-1);
 
     // pmMainLoop() services calico's power management (lid, reset, ARM7 messages);
     // the devkitPro examples call it every frame before reading input.
     while (pmMainLoop()) {
         scanKeys();
-        update_player();
-
-        setup_projection(&room.cameras[cur_cam]);
-        // Textures are modulated with the vertex colour: keep it white.
-        glColor3b(255, 255, 255);
-        glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(1));
-        draw_player();
-        glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(2));
-        draw_masks();
-        glFlush(0);
-
-        printf("\x1b[4;1Hcam %d  pos %6ld %6ld   \n", cur_cam, (long)player.x, (long)player.z);
-        printf("dir %5d  anim %2d key %3d   \n", player.dir & 0x7FFF, player.anim, player.key);
-        printf("keys %04lx  raw %03x   \n", (unsigned long)keysHeld(), (~REG_KEYINPUT) & 0x3FF);
-        printf("tex %d/%d  masks %d (%d quads, tex %d)   \n", tex_ok, leon.header->num_pages,
-               have_masks, have_masks ? masks.header->num_quads : 0, mask_ok);
+        uint32_t down = keysDown();
+        update_menu(down);
+        if (!menu_open) {
+            update_player(keysHeld());
+            check_doors(down);
+            print_status();
+        }
+        render_frame();
         swiWaitForVBlank();
     }
     return 0;

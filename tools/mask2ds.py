@@ -5,6 +5,9 @@ bssmask.py. Each mask rectangle becomes a world-space quad at its PS1 depth;
 the atlas becomes a 256 x 2^n 8 bpp texture whose index 0 is transparent
 (PS1: colour 0x0000 is transparent).
 
+The whole file is LZ77-compressed (DS BIOS format); the engine unpacks it
+into RAM before use.
+
 Usage: python3 -I mask2ds.py room.json mask_prefix out_dir/<room>
        (reads mask_prefix_camNN_mask.tim, writes out_dir/<room>_camNN.bin)
 """
@@ -15,6 +18,7 @@ import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import bg2ds  # noqa: E402
 import tim2png  # noqa: E402
 
 MASK_MAGIC = 0x314B4D52  # "RMK1"
@@ -66,8 +70,11 @@ def main():
             continue
         tim_path = f"{mask_prefix}_cam{cam_id:02d}_mask.tim"
         tim = tim2png.parse_tim(open(tim_path, "rb").read(), 0)
-        assert tim["bpp"] == 8 and tim["width"] == 256
+        tw = tim["width"]
+        assert tim["bpp"] == 8 and tw <= 256, (tim_path, tim["bpp"], tw)
         palette, indices = remap_transparent(tim["palettes"][0], tim2png.tim_indices(tim))
+        # narrower atlases: pad every row to the 256-texel texture width
+        indices = b"".join(indices[y * tw:(y + 1) * tw] + bytes(256 - tw) for y in range(tim["height"]))
         tex_h = 1 << (tim["height"] - 1).bit_length()
         pixels = indices + bytes(256 * (tex_h - tim["height"]))
 
@@ -85,7 +92,7 @@ def main():
         blob += struct.pack("<256H", *palette) + pixels + quads
         path = f"{out}_cam{cam_id:02d}.bin"
         with open(path, "wb") as f:
-            f.write(blob)
+            f.write(bg2ds.lz77(bytes(blob)))
         print(f"{path}: {len(cam['masks'])} quads, texture 256x{tex_h} (used {tim['height']}), {len(blob)} bytes")
 
 

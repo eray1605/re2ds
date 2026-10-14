@@ -8,14 +8,25 @@
 #include <stdint.h>
 
 // ---------------------------------------------------------------------------
-// Backgrounds: bg/<room>_camNN.bin
-//   256 x 192 pixels, u16 each, BGR555 with bit 15 set (direct-colour bitmap
-//   for a 16-bit bitmap background). 98304 bytes, no header.
+// Backgrounds: bg/<room>_camNN.bin (<room> = "room" + stage + room in hex,
+// e.g. room10a)
+//   BgHeader, then the 256 x 192 8 bpp image (row-major, rows of 256 bytes)
+//   LZ77-compressed in the DS BIOS format (decompress(..., LZ77Vram)).
+//   Index 0 is unused: it is transparent on an 8 bpp bitmap background.
 #define BG_WIDTH 256
 #define BG_HEIGHT 192
+#define BG_MAGIC 0x31474252 // "RBG1"
+
+typedef struct {
+    uint32_t magic;
+    uint16_t palette[256];  // BGR555
+    // LZ77 stream follows
+} BgHeader;
 
 // ---------------------------------------------------------------------------
 // Foreground masks: mask/<room>_camNN.bin (only for cameras that have masks)
+//   The file is LZ77-compressed (DS BIOS format); unpacked it holds the
+//   layout below.
 //   Each mask rectangle is a textured quad placed in the world at its PS1
 //   depth (distance along the view direction = depth * 32). Drawn with the
 //   room camera after the models, the hardware depth test hides whatever is
@@ -42,25 +53,28 @@ typedef struct {
 } MaskQuad;                 // 56 bytes
 
 // ---------------------------------------------------------------------------
-// Room: room/<room>.bin
+// Room: room/<rdt>.bin (<rdt> = "room" + stage + room in hex + player, e.g.
+// room10a0 for Leon). room/index.bin lists the converted rooms: u16 count,
+// then count x (u8 stage, u8 room).
 #define ROOM_MAGIC 0x314D5252 // "RRM1"
+#define ROOM_VERSION 2
 
 typedef struct {
     uint32_t magic;
-    uint16_t version;      // 1
+    uint16_t version;      // ROOM_VERSION
     uint8_t num_cameras;
     uint8_t num_switches;
     uint16_t num_boxes;
     uint8_t start_camera;  // camera whose view area contains the spawn point
-    uint8_t reserved;
-    int32_t spawn[3];      // x, y, z (y = floor height)
+    uint8_t num_doors;
+    int32_t spawn[3];      // debug spawn point x, y, z (y = floor height)
     int16_t spawn_dir;     // facing, DS angle units (32768 = 360 degrees).
                            // Models face +X; the model matrix is T(pos) * Ry(dir)
                            // with Ry = [[c,0,s],[0,1,0],[-s,0,c]] (PS1 RotMatrixY),
                            // so the facing vector is (cos dir, 0, -sin dir).
     uint16_t reserved2;
     // followed by RoomCamera[num_cameras], RoomSwitch[num_switches],
-    // RoomBox[num_boxes]
+    // RoomBox[num_boxes], RoomDoor[num_doors]
 } RoomHeader;
 
 typedef struct {
@@ -93,6 +107,34 @@ typedef struct {
     uint16_t reserved;
     uint32_t floors;       // bit n = present on floor level n
 } RoomBox;                 // 20 bytes
+
+// Floor levels: y = level * FLOOR_HEIGHT (-Y is up).
+#define FLOOR_HEIGHT (-1800)
+// RoomBox.shape values that are walkable and change the height
+#define SHAPE_SLOPE 11
+#define SHAPE_STAIRS 12
+
+// Door AOT from the room scripts (DOOR_AOT_SET / DOOR_AOT_SET_4P). Locks and
+// conditions are not evaluated yet (needs the script interpreter).
+#define AOT_SAT_PLAYER 0x01   // triggered by the player
+#define AOT_SAT_MANUAL 0x10   // needs the action button (else: walk into it)
+#define AOT_SAT_FRONT  0x20   // player must face it
+typedef struct {
+    int16_t x[4], z[4];    // trigger quad
+    int16_t next[3];       // position in the target room
+    uint16_t next_dir;     // facing in the target room, DS units
+    uint8_t next_stage;    // 1..7
+    uint8_t next_room;
+    uint8_t next_camera;
+    uint8_t next_floor;
+    uint8_t sat;           // AOT_SAT_* bits
+    uint8_t floor;         // floor level of the trigger
+    uint8_t door_type;     // door animation (DO2), not used yet
+    uint8_t key_id;        // 0 = not locked
+    uint8_t key_type;
+    uint8_t aot;           // AOT slot in the room
+    uint8_t reserved[2];
+} RoomDoor;                // 36 bytes
 
 // ---------------------------------------------------------------------------
 // Model: model/<name>.bin

@@ -1,7 +1,8 @@
 # re2ds – Resident Evil 2 auf dem Nintendo DS (Prototyp)
 
-Ziel des ersten Meilensteins: **ein Raum** (Stage 1, Raum 00 – die Straße am Anfang) mit
-vorgerendertem Hintergrund, Leon als 3D-Modell und Tank-Steuerung.
+Stand: **alle 125 Räume von Disc 1 (Leon) begehbar** – vorgerenderte Hintergründe, Masken,
+Leon als 3D-Modell mit Tank-Steuerung, Türen und Raumwechsel. Plan bis zum kompletten Spiel:
+[ROADMAP.md](ROADMAP.md).
 
 Die Spieldaten kommen aus der eigenen PS1-Disc und werden **nicht** mitgeliefert. Alles unter
 `build/` ist aus der Disc erzeugt und wird nicht eingecheckt.
@@ -13,15 +14,16 @@ Analyse-Notizen zur Original-Engine: [../re2ds-notes](../re2ds-notes).
 | Werkzeug | Eingabe | Ausgabe | Status |
 |----------|---------|---------|--------|
 | `tools/bss2ppm` (C, nutzt FFmpegs MDEC-Decoder) | `COMMON/BSS/ROOMsrr.BSS` | 320×240-Hintergrund pro Kamera | ✔ funktioniert, Raum 100: 9 Kameras |
-| `tools/rdt2json.py` | `PL0/RDT/ROOMsrrp.RDT` | Kameras, Kamerawechsel, Kollision als JSON | ✔ Raum 100: 9 Kameras, 25 Wechselzonen, 21 Kollisionsboxen |
+| `tools/rdt2json.py` | `PL0/RDT/ROOMsrrp.RDT` | Kameras, Kamerawechsel, Kollision, Türen (aus den Raumskripten) als JSON | ✔ alle 125 Räume, 267 Türen, alle Ziele vorhanden |
 | `tools/check_projection.py` | JSON + Hintergründe | Kollisionsboxen in die Hintergründe projiziert | ✔ Kamera-Konvention bestätigt |
 | `tools/pld2json.py` | `PL0/PLD/PL00.PLD` (+ `--plw PL00W00.PLW`) | Mesh, Skelett, Animationen als JSON, Textur als PNG | ✔ Leon: 15 Knochen, 187 Dreiecke + 267 Vierecke, 10 + 17 Animationen |
 | `tools/preview_model.py`, `tools/preview_anims.py` | JSON + Textur | Vorschau (vorn/seitlich), Animations-Übersicht | ✔ |
-| `tools/bg2ds.py` | `bss2ppm`-Ausgabe | `build/ds/bg/<raum>_camNN.bin`: 256×192 BGR555 (96 KB) | ✔ |
-| `tools/room2ds.py` | `rdt2json`-Ausgabe | `build/ds/room/<raum>.bin`: Kameras, Zonen (mit Sichtbereich-Flag), Kollision, Startpunkt | ✔ Raum 100: 1200 Byte |
+| `tools/bg2ds.py` | `bss2ppm`-Ausgabe | `build/ds/bg/<raum>_camNN.bin`: 256×192, 8 Bit + eigene Palette, LZ77 (~46 KB) | ✔ optisch wie 16 Bit |
+| `tools/lz77.c` | beliebige Datei | LZ77 im DS-BIOS-Format (VRAM-sicher) | ✔ |
+| `tools/room2ds.py` | `rdt2json`-Ausgabe | `build/ds/room/<raum>.bin`: Kameras, Zonen (mit Sichtbereich-Flag), Kollision, Türen, Debug-Startpunkt | ✔ |
 | `tools/model2ds.py` | `pld2json`-Ausgabe + PLD | `build/ds/model/leon.bin` (Display Lists, Skelett, Keyframes, Animationen), `leon_tex.bin` (3 × 128×256, 8 Bit) | ✔ 88 KB + 97 KB |
 | `tools/bssmask.py` | `COMMON/BSS/ROOMsrr.BSS` | Masken-Atlas pro Kamera (TIM + PNG) | ✔ Raum 100: 7 von 9 Kameras, Größen stimmen exakt |
-| `tools/mask2ds.py` | `rdt2json`-Ausgabe + Masken-TIMs | `build/ds/mask/<raum>_camNN.bin`: Atlas (256×2ⁿ, 8 Bit, Index 0 transparent) + Welt-Vierecke | ✔ 238 Rechtecke |
+| `tools/mask2ds.py` | `rdt2json`-Ausgabe + Masken-TIMs | `build/ds/mask/<raum>_camNN.bin`: Atlas (256×2ⁿ, 8 Bit, Index 0 transparent) + Welt-Vierecke, LZ77 | ✔ auch schmale Atlanten |
 | `tools/tim2png.py` | beliebige Datei | TIM-Bilder als PNG | ✔ |
 | `tools/ds_preview.py` | **nur** `build/ds/` | DS-Bild 256×192 mit Hintergrund, Leon und Masken | ✔ prüft die Formate |
 
@@ -115,34 +117,35 @@ python3 -I tools/ds_preview.py build/ds room1000 room100 leon build/ds/preview/f
 
 `<disc>` ist das mit `../re2ds-notes/tools/extract_psx_iso.py` entpackte Disc-Dateisystem.
 
-## DS-Engine (erster Stand, noch nicht kompiliert)
+## DS-Engine
 
 `source/main.c` + `source/assets.c`, Makefile nach devkitPro-Vorlage (libnds, NitroFS):
 
-- **Bildschirm oben:** BG3 = 16-Bit-Hintergrund der aktuellen Kamera, BG0 = 3D-Ebene mit
+- **Bildschirm oben:** BG3 = 8-Bit-Hintergrund der aktuellen Kamera, doppelt gepuffert in VRAM A
+  (Bild entpacken, dann Puffer und Palette im VBlank umschalten). BG0 = 3D-Ebene mit
   transparentem Hintergrund (Leon + Masken-Vierecke, Tiefentest durch die Hardware).
-- **VRAM:** A = Haupt-BG, B + D = Texturen (Leon 96 KB, Masken ≤ 64 KB), E = Textur-Paletten,
-  C = Textkonsole unten. Texturbänke nur in ihren Standard-Slots (B = 1, D = 3): libnds
-  berechnet die Texturadresse aus der Bank-Nummer, andere Zuordnungen ergeben schwarze bzw.
-  unsichtbare Texturen.
+- **VRAM:** A = Haupt-BG (2 × 64 KB), B + D = Texturen (Leon 96 KB, Masken ≤ 64 KB),
+  E = Textur-Paletten, C = Textkonsole unten. Texturbänke nur in ihren Standard-Slots
+  (B = 1, D = 3): libnds berechnet die Texturadresse aus der Bank-Nummer, andere Zuordnungen
+  ergeben schwarze bzw. unsichtbare Texturen.
 - Texturdaten vor `glTexImage2D`/`glColorTableEXT` mit `DC_FlushRange` aus dem Cache schreiben
   (die Uploads laufen per DMA).
-- **Steuerung:** Steuerkreuz hoch/runter = gehen/rückwärts, links/rechts = drehen, B = rennen.
-  Drehgeschwindigkeiten aus `player-control.md`, Fortbewegung aus der Root-Motion der Animation.
-- **Kollision:** Kreis (Radius 400) gegen die Boxen des Raums, getrennt nach X und Z (Gleiten).
+- **Spieltakt 25 Hz** wie die PAL-Disc (`VSync(2)` bei 50 Hz, siehe `player-control.md`):
+  ein Keyframe und ein Root-Motion-Schritt pro Takt, Drehen pro DS-Bild hochgerechnet.
+- **Steuerung:** Steuerkreuz hoch/runter = gehen/rückwärts, links/rechts = drehen, B = rennen,
+  A = Tür, SELECT = Raum-Menü (in jeden Raum springen).
+- **Kollision:** Kreis (Radius 400) gegen die Boxen des aktuellen Stockwerks, getrennt nach
+  X und Z (Gleiten). Ein Schritt ist nur blockiert, wenn er tiefer ins Hindernis führt –
+  Tür-Ausgänge liegen oft knapp an Wänden. Rampen und Treppen sind begehbar und heben Leon an.
+- **Türen:** AOTs aus den Raumskripten; automatisch beim Hineinlaufen oder mit A
+  (`AOT_SAT_MANUAL`). Überblendung über Schwarz, Leon steht danach an der Zielposition.
+  Schlösser werden noch ignoriert (brauchen den Skript-Interpreter).
 - **Kamerawechsel:** Zonen der aktuellen Kamera ohne Sichtbereich-Flag; beim Wechsel werden
   Hintergrund und Masken neu geladen.
 
 ```bash
-tools/build_assets.sh <disc> 1 00 2   # füllt nitrofiles/ (Raum 100, Start in Kamera 2)
-make                                  # braucht devkitPro (DEVKITARM gesetzt) → re2ds.nds
+tools/build_assets.sh <disc>   # alle Räume parallel nach nitrofiles/ (~80 s, ~71 MB)
+./start.command                # baut re2ds.nds bei Bedarf (devkitPro) und startet melonDS
 ```
 
-## Nächste Schritte
-
-1. ~~PLD-Konverter für Leon~~ ✔. Offen: Waffen-Meshes aus der PLW (ersetzen Hand/Arm).
-2. ~~DS-Formate erzeugen~~ ✔, inklusive Masken: Auf dem DS werden sie als texturierte
-   Vierecke in der richtigen Tiefe gezeichnet, der Z-Puffer erledigt die Verdeckung.
-3. DS-Toolchain (devkitPro) und Emulator (melonDS) einrichten.
-4. DS-Engine: Hintergrund als Bitmap-BG, Leon auf der 3D-Ebene, Steuerung nach
-   `../re2ds-notes/player-control.md`, Kollision und Kamerawechsel.
+`start.command` lässt sich auch im Finder per Doppelklick starten.

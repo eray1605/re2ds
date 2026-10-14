@@ -12,6 +12,7 @@ typedef struct {
     const RoomCamera *cameras;
     const RoomSwitch *switches;
     const RoomBox *boxes;
+    const RoomDoor *doors;
 } Room;
 
 typedef struct {
@@ -32,7 +33,7 @@ typedef struct {
     const MaskQuad *quads;
 } Masks;
 
-int room_load(Room *room, const char *path);
+int room_load(Room *room, const char *path);   // frees room->data on error
 int model_load(Model *model, const char *path);
 int masks_load(Masks *masks, const char *path);   // 0 if the file is missing
 void asset_free(void *data);

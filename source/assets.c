@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include <nds/arm9/decompress.h>
+
 #include "assets.h"
 
 void *asset_load(const char *path, uint32_t *size_out)
@@ -35,14 +37,19 @@ int room_load(Room *room, const char *path)
         return 0;
     const uint8_t *p = room->data;
     room->header = (const RoomHeader *)p;
-    if (room->header->magic != ROOM_MAGIC)
+    if (room->header->magic != ROOM_MAGIC || room->header->version != ROOM_VERSION) {
+        free(room->data);
+        room->data = NULL;
         return 0;
+    }
     p += sizeof(RoomHeader);
     room->cameras = (const RoomCamera *)p;
     p += sizeof(RoomCamera) * room->header->num_cameras;
     room->switches = (const RoomSwitch *)p;
     p += sizeof(RoomSwitch) * room->header->num_switches;
     room->boxes = (const RoomBox *)p;
+    p += sizeof(RoomBox) * room->header->num_boxes;
+    room->doors = (const RoomDoor *)p;
     return 1;
 }
 
@@ -65,13 +72,24 @@ int model_load(Model *model, const char *path)
 
 int masks_load(Masks *masks, const char *path)
 {
-    masks->data = asset_load(path, NULL);
-    if (!masks->data)
+    uint8_t *packed = asset_load(path, NULL);
+    if (!packed)
         return 0;
+    // BIOS LZ77 header: type 0x10, unpacked size in the upper 24 bits
+    uint32_t size = (packed[1] | packed[2] << 8 | packed[3] << 16);
+    masks->data = aligned_alloc(32, (size + 31) & ~31);
+    if (!masks->data) {
+        free(packed);
+        return 0;
+    }
+    decompress(packed, masks->data, LZ77);
+    free(packed);
     const uint8_t *p = masks->data;
     masks->header = (const MaskHeader *)p;
-    if (masks->header->magic != MASK_MAGIC)
+    if (masks->header->magic != MASK_MAGIC) {
+        free(masks->data);
         return 0;
+    }
     p += sizeof(MaskHeader);
     masks->palette = (const uint16_t *)p;
     p += 512;
