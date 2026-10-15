@@ -150,8 +150,8 @@ static void set_camera(int cam)
     script_camera_changed(cur_cam, cam);
     cur_cam = cam;
 
-    // Background: unpack into the hidden buffer, then flip buffer and palette
-    // together in vblank so the cut is clean.
+    // Background: unpack into the hidden buffer; it is shown at the end,
+    // together with the first 3D frame of the new camera.
     snprintf(path, sizeof(path), "nitro:/bg/%s_cam%02d.bin", bg_prefix, cam);
     BgHeader *bg = asset_load(path, NULL);
     if (!bg) {
@@ -163,12 +163,6 @@ static void set_camera(int cam)
         fatal(path);
     int back = bg_base == BG_BASE_FRONT ? BG_BASE_BACK : BG_BASE_FRONT;
     decompress(bg + 1, (u16 *)BG_GFX + 0x2000 * back, LZ77Vram);
-    swiWaitForVBlank();
-    bgSetMapBase(bg_id, back);
-    for (int i = 1; i < 256; i++)
-        BG_PALETTE[i] = bg->palette[i];
-    bg_base = back;
-    asset_free(bg);
 
     // masks for this camera (optional)
     if (have_masks)
@@ -187,6 +181,18 @@ static void set_camera(int cam)
                      TEXGEN_TEXCOORD | GL_TEXTURE_COLOR0_TRANSPARENT, masks.pixels);
         glColorTableEXT(0, 0, 256, 0, 0, masks.palette);
     }
+
+    // The 3D layer shows what was flushed before the last vblank. Render the
+    // new view now and flip the background in the same vblank, otherwise
+    // Leon and the enemies stand at their old screen positions on the new
+    // background until the next frame (or while the masks above load).
+    render_frame();
+    swiWaitForVBlank();
+    bgSetMapBase(bg_id, back);
+    for (int i = 1; i < 256; i++)
+        BG_PALETTE[i] = bg->palette[i];
+    bg_base = back;
+    asset_free(bg);
 }
 
 // Replaces the current room; returns 0 (and keeps the old one) if the file is
