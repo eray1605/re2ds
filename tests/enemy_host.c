@@ -21,15 +21,39 @@ static FILE *host_fopen(const char *path, const char *mode)
 #define fopen host_fopen
 #include "../source/assets.c"
 #undef fopen
-int game_blocked(int32_t a, int32_t b, int32_t c, int32_t d, int32_t y) { (void)a; (void)b; (void)c; (void)d; (void)y; return 0; }
+// walls as in main.c (blocked / penetration), with the room's boxes
+static Room host_room;
+static int32_t pen(const RoomBox *b, int32_t x, int32_t z)
+{
+    const int32_t r = 400;
+    int32_t ix = x - (b->x - r), ox = b->x + b->w + r - x, iz = z - (b->z - r), oz = b->z + b->d + r - z;
+    if (ix <= 0 || ox <= 0 || iz <= 0 || oz <= 0) return 0;
+    int32_t d = ix < ox ? ix : ox;
+    if (iz < d) d = iz;
+    if (oz < d) d = oz;
+    return d;
+}
+int game_blocked(int32_t fx, int32_t fz, int32_t x, int32_t z, int32_t y)
+{
+    (void)y;
+    if (!host_room.data || !getenv("WALLS")) return 0;
+    for (int i = 0; i < host_room.header->num_boxes; i++) {
+        const RoomBox *b = &host_room.boxes[i];
+        if (!(b->floors & 1) || b->shape == 11 || b->shape == 12 || !(b->flag & 0x0400)) continue;
+        int32_t d = pen(b, x, z);
+        if (d > 0 && d >= pen(b, fx, fz)) return 1;
+    }
+    return 0;
+}
 int camera_sees(int32_t x, int32_t y, int32_t z, int32_t m) { (void)x; (void)y; (void)z; (void)m; return 1; }
+int camera_occluded(int32_t x, int32_t y, int32_t z) { (void)x; (void)y; (void)z; return 0; }
 int cull_models = 0; // POLY_CULL_NONE in the stubs
 void game_show_message(const char *t) { (void)t; }
 int game_message_open(void) { return 0; }
 void game_cut_change(int c) { (void)c; }
 void game_set_player_pos(int32_t x, int32_t y, int32_t z) { (void)x; (void)y; (void)z; }
 void game_set_player_dir(int16_t d) { (void)d; }
-void game_set_box_flag(int b, int f) { (void)b; (void)f; }
+void game_set_box_flag(int b, int f) { if (host_room.data && b >= 0 && b < host_room.header->num_boxes) ((RoomBox *)host_room.boxes)[b].flag = f; printf("  box %d flag %04x\n", b, f & 0xFFFF); }
 void game_bgm_control(int i, int o, int t, int l, int r) { (void)i; (void)o; (void)t; (void)l; (void)r; }
 void game_play_sound(int bank, int sound) { (void)bank; (void)sound; }
 void game_spawn_enemy(int s, int t, int v, int voice, int x, int y, int z, int d)
@@ -54,14 +78,17 @@ int main(int argc, char **argv)
 {
     Room room;
     if (!room_load(&room, argc > 1 ? argv[1] : "nitro:/room/room1000.bin")) { printf("room load failed\n"); return 1; }
+    host_room = room;
     enemy_room_reset();
+    if (getenv("ZONES")) // e.g. nitrofiles/room/room1020_blk.bin
+        enemy_set_zones(asset_load(getenv("ZONES"), NULL));
     script_room_enter(&room);
     int ticks = getenv("TICKS") ? atoi(getenv("TICKS")) : 100;
     for (int t = 0; t < ticks; t++) {
         int before = enemy_spawn_calls;
         script_tick();
         EnemyTarget p = { .x = host_held ? host_px : (getenv("PX") ? atoi(getenv("PX")) : 5899),
-                          .z = host_held ? host_pz : 0, .can_grab = !host_held && !host_dead,
+                          .z = host_held ? host_pz : (getenv("PZ") ? atoi(getenv("PZ")) : 0), .can_grab = !host_held && !host_dead,
                           .pressed = getenv("MASH") && (t & 1), .dead = host_dead };
         enemy_tick(&p);
         if (getenv("SHOOT") && t % 15 == 0 && !host_held) { // Leon shoots the nearest zombie

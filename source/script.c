@@ -608,12 +608,18 @@ static void run_thread(Thread *t)
             game_set_box_flag(ins[1], ru16(ins + 2));
             break;
         case OP_POS_SET:
-            if (t->work_type == 1)
+            if (t->work_type == 1) {
                 game_set_player_pos(rd16(ins + 2), rd16(ins + 4), rd16(ins + 6));
+            } else if (t->work_type == 3) { // members 0x0B-0x0D
+                for (int k = 0; k < 3; k++)
+                    game_enemy_member_set(t->work_index, 0x0B + k, rd16(ins + 2 + 2 * k));
+            }
             break;
         case OP_DIR_SET:
             if (t->work_type == 1)
                 game_set_player_dir(rd16(ins + 4));
+            else if (t->work_type == 3)
+                game_enemy_member_set(t->work_index, 0x0F, rd16(ins + 4));
             break;
         default:
             break; // not implemented yet: skipped

@@ -10,6 +10,8 @@
 #define MAX_ENEMIES 8
 
 void enemy_room_reset(void);   // frees all enemy models (room change)
+// the room's path zones (tools/blk2ds.py, kept by the caller), NULL if none
+void enemy_set_zones(const void *data);
 // sce_em_set: slot, type (0x10.. ), flags (bytes 4..5: variant | status << 8),
 // position, facing (RE2 units)
 // voice: kind of voice (byte 7), see enemy_sound_set

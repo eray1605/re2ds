@@ -31,6 +31,8 @@
 // Room scripts read and write it as member 7.
 #define EF_VARIANT 0x003F       // 0/3 lurk, 1/6 chase, 2/4 lying, 5/7 lying as dead, 8 eat
 #define EF_HOLD 0x4000          // lying: stay down until the room script clears it
+#define EF_OFF 0x8000           // not processed nor drawn until the room script clears it
+                                // (often parked outside the room, e.g. 1020, 1060, 11D0)
 
 // Animations: set 0 holds the gaits, set 1 everything else (emXX_sets.bin)
 #define SET_GAIT 0
@@ -138,6 +140,12 @@ typedef struct {
     uint8_t stagger_out;        // reached 0 once (obj+0x222)
     uint8_t flinch;             // frames of the hit recoil left
     uint8_t fall_back;          // death / knockdown: falls backward
+    uint8_t routine;            // obj+4: 1 = own AI, 8 = room script's zombie modes
+    uint8_t mode;               // obj+5 in routine 8 (state in routine 1)
+    int16_t dest_x, dest_z;     // obj+0x1c4 / 0x1c6 (members 0x14 / 0x15)
+    int8_t target;              // obj+0x1da (member 0x1a): object index, 2 + slot
+    uint8_t has_goal;
+    int16_t goal_x, goal_z;     // where it heads for Leon (obj+0x1c4 / 0x1c6 in routine 1)
 } Enemy;
 
 // The grab: one zombie at a time (PS1 flag 0x80 in 0x800c79c7). Zombie and
@@ -372,14 +380,15 @@ void enemy_spawn(int slot, int type, int flags, int voice, int32_t x, int32_t y,
     e->hp = hp_table[(rnd() >> (rnd() & 3)) & 15] + 15;
     e->stagger = (rnd() & 0xF) + 0x10;
     e->sight_timer = slot & 7;
+    e->routine = 1;
 
     // start state by spawn variant (zombie init 0x80100674)
     int state = ST_LURK;
     switch (flags & EF_VARIANT) {
     case 2: e->lie_alt = 1; state = ST_LYING; break;
     case 4: state = ST_LYING; break;
-    case 5: e->lie_alt = 1; e->flags = EF_HOLD | 2; state = ST_LYING; break; // lies as if dead
-    case 7: e->flags = EF_HOLD | 4; state = ST_LYING; break;
+    case 5: e->lie_alt = 1; e->flags |= EF_HOLD; state = ST_LYING; break; // lies as if dead
+    case 7: e->flags |= EF_HOLD; state = ST_LYING; break;
     case 1: state = ST_LUNGE; break;
     case 6: state = ST_CHASE; break;
     case 8: state = ST_EAT; break;
@@ -426,24 +435,57 @@ static void moan(Enemy *e, int sound)
 // Members the room scripts read (FUN_8005202c lists all): 0 = object flags,
 // bit 0 set while the enemy exists (rooms 20F0, 4070, 6160, 7000 test it);
 // 7 = flags (obj+0x10e).
+// 2 / 3 = routine and state (obj+4 / 5), 0x0B-0x0D position, 0x0F facing,
+// 0x14 / 0x15 destination, 0x1A target object (routine 8).
 int enemy_member_get(int slot, int member, int *value)
 {
     if (slot < 0 || slot >= MAX_ENEMIES)
         return 0;
+    const Enemy *e = &enemies[slot];
     if (member == 0) {
-        *value = enemies[slot].active;
+        *value = e->active;
         return 1;
     }
-    if (member != 7 || !enemies[slot].active)
+    if (!e->active)
         return 0;
-    *value = enemies[slot].flags;
-    return 1;
+    switch (member) {
+    case 2: *value = e->routine; return 1;
+    case 3: *value = e->routine == 1 ? e->state : e->mode; return 1;
+    case 7: *value = e->flags; return 1;
+    case 0x0B: *value = e->x; return 1;
+    case 0x0C: *value = e->y; return 1;
+    case 0x0D: *value = e->z; return 1;
+    case 0x0F: *value = e->dir / 8; return 1;
+    }
+    return 0;
 }
+
+static void start_script_mode(Enemy *e);
 
 void enemy_member_set(int slot, int member, int value)
 {
-    if (slot >= 0 && slot < MAX_ENEMIES && enemies[slot].active && member == 7)
-        enemies[slot].flags = value;
+    if (slot < 0 || slot >= MAX_ENEMIES || !enemies[slot].active)
+        return;
+    Enemy *e = &enemies[slot];
+    switch (member) {
+    case 2: e->routine = value; break;
+    case 3: // the state / mode starts once both are written (scripts set 2 first)
+        if (e->routine == 8) {
+            e->mode = value;
+            start_script_mode(e);
+        } else if (e->routine == 1 && value != e->state) {
+            enter_state(e, value);
+        }
+        break;
+    case 7: e->flags = value; break;
+    case 0x0B: e->x = (int16_t)value; break;
+    case 0x0C: e->y = (int16_t)value; break;
+    case 0x0D: e->z = (int16_t)value; break;
+    case 0x0F: e->dir = ((int16_t)value * 8) & 32767; break;
+    case 0x14: e->dest_x = value; break;
+    case 0x15: e->dest_z = value; break;
+    case 0x1A: e->target = value; break;
+    }
 }
 
 int enemy_count(void)
@@ -454,13 +496,16 @@ int enemy_count(void)
     return n;
 }
 
+// exists and takes part (EF_OFF: parked by the room script)
+static int present(const Enemy *e) { return e->active && !(e->flags & EF_OFF); }
+
 // Would moving enemy i to (x, z) push it deeper into another enemy?
 static int crowded(int i, int32_t x, int32_t z)
 {
     const Enemy *e = &enemies[i];
     for (int j = 0; j < MAX_ENEMIES; j++) {
         const Enemy *o = &enemies[j];
-        if (j == i || !o->active || o->state >= ST_DYING)
+        if (j == i || !present(o) || o->state >= ST_DYING)
             continue;
         int64_t ox = o->x - x, oz = o->z - z, cx = o->x - e->x, cz = o->z - e->z;
         int64_t now = ox * ox + oz * oz, before = cx * cx + cz * cz;
@@ -476,7 +521,7 @@ int enemy_blocks_player(int32_t from_x, int32_t from_z, int32_t x, int32_t z)
 {
     for (int i = 0; i < MAX_ENEMIES; i++) {
         const Enemy *e = &enemies[i];
-        if (!e->active || e->state >= ST_DYING || e->state == ST_DOWN)
+        if (!present(e) || e->state >= ST_DYING || e->state == ST_DOWN)
             continue;
         int64_t nx = e->x - x, nz = e->z - z, ox = e->x - from_x, oz = e->z - from_z;
         int64_t now = nx * nx + nz * nz, before = ox * ox + oz * oz;
@@ -576,7 +621,7 @@ static void lurk(Enemy *e, int i, int32_t px, int32_t pz, uint32_t d, int noise)
         e->timer = rnd() + 150;
     }
     if (e->sub == 3) {
-        turn_toward(e, px, pz, 16);
+        turn_toward(e, e->has_goal ? e->goal_x : px, e->has_goal ? e->goal_z : pz, 16);
         anim_step(e, &fwd);
         walk(e, i, fwd);
         if (e->timer-- == 1)
@@ -792,6 +837,7 @@ static void grab_zombie(Enemy *e, int i, int pressed)
 static void chase(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
 {
     int32_t px = p->x, pz = p->z;
+    int32_t gx = e->has_goal ? e->goal_x : px, gz = e->has_goal ? e->goal_z : pz; // path
     // decision (0x8010167c): grab, or eat Leon's body
     if (can_grab(e, p, d)) {
         start_grab(e, i, p);
@@ -810,17 +856,17 @@ static void chase(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
     int rate = 8;
     if (d > 5000 && (wander[e->wander_idx] & 0x8000))
         rate = -8;
-    turn_toward(e, px, pz, rate);
+    turn_toward(e, gx, gz, rate);
     if (e->turn_timer-- == 0) {
         e->turn_timer = (rnd() & 0xF) + 30;
-        turn_toward(e, px, pz, 16);
+        turn_toward(e, gx, gz, 16);
         if (!(rnd() & 0x1F))
             moan(e, SND_MOAN);
         else if (!(rnd() & 0x1F))
             moan(e, SND_MOAN + 1);
     }
     if (d < 3000)
-        turn_toward(e, px, pz, 16);
+        turn_toward(e, gx, gz, 16);
 
     // touching Leon while another zombie holds him: stand instead of
     // walking on the spot
@@ -865,7 +911,7 @@ static void lunge(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
         start_grab(e, i, p);
         return;
     }
-    turn_toward(e, p->x, p->z, 16);
+    turn_toward(e, e->has_goal ? e->goal_x : p->x, e->has_goal ? e->goal_z : p->z, 16);
     if (d >= CONTACT_DISTANCE) {
         int32_t fwd;
         anim_step(e, &fwd);
@@ -897,11 +943,222 @@ static void lying(Enemy *e)
 
 static void fallen(Enemy *e, int i);
 
+// Routine 8 (zombie 0x80109c3c, modes from table 0x8010cd3c): the room
+// script drives the zombie. 0 stands, 1 shuffles toward the destination
+// (turn 0x24, gait from set 0), 2 lunges at the target object and holds it,
+// 3 eats the target.
+#define A_SCRIPT_LUNGE 0x0A
+#define A_SCRIPT_HOLD 0x18
+#define A_SCRIPT_EAT 0x15
+#define LUNGE_HOLD_KEY 0x11
+static void start_script_mode(Enemy *e)
+{
+    e->sub = 1;
+    e->flinch = 0;
+    switch (e->mode) {
+    case 0: set_anim(e, SET_MAIN, A_STAND, 0); break;
+    case 1: set_anim(e, SET_GAIT, e->gait, 0); break;
+    case 2: set_anim(e, SET_MAIN, A_SCRIPT_LUNGE, 0); break;
+    case 3: set_anim(e, SET_MAIN, A_SCRIPT_EAT, rnd() & 7); break;
+    }
+}
+
+static void script_mode(Enemy *e, int i)
+{
+    int32_t step;
+    const Enemy *t = e->target >= 2 && e->target - 2 < MAX_ENEMIES ? &enemies[e->target - 2] : NULL;
+    switch (e->mode) {
+    case 1:
+        turn_toward(e, e->dest_x, e->dest_z, 0x24);
+        anim_step(e, &step);
+        walk(e, i, step);
+        break;
+    case 2:
+        if (t)
+            turn_toward(e, t->x, t->z, 0x400);
+        anim_step(e, NULL);
+        if (e->sub == 1 && e->key == LUNGE_HOLD_KEY) {
+            e->sub = 2;
+            set_anim(e, SET_MAIN, A_SCRIPT_HOLD, 0);
+        }
+        break;
+    case 3:
+        if (t)
+            turn_toward(e, t->x, t->z, 0x10);
+        anim_step(e, NULL);
+        break;
+    default:
+        anim_step(e, NULL);
+        break;
+    }
+}
+
+// ---------------------------------------------------------------- path zones
+// The room's zones (tools/blk2ds.py): rectangles with a neighbour mask.
+typedef struct {
+    int16_t x0, z0, x1, z1;
+    uint16_t unknown, next;
+} Zone;
+static const Zone *zones;
+static int zone_count;
+
+void enemy_set_zones(const void *data)
+{
+    zones = data ? (const Zone *)((const uint8_t *)data + 4) : NULL;
+    zone_count = data ? *(const uint16_t *)data : 0;
+}
+
+// FUN_80047260: the last zone holding (x, z), -1 if none
+static int zone_at(int32_t x, int32_t z)
+{
+    for (int n = zone_count - 1; n >= 0; n--) {
+        const Zone *b = &zones[n];
+        if ((uint16_t)(x - b->x0) < (uint16_t)(b->x1 - b->x0) &&
+            (uint16_t)(z - b->z0) < (uint16_t)(b->z1 - b->z0))
+            return n;
+    }
+    return -1;
+}
+
+// The middle of the edge zones a and b share, and its ends. across = 1 when
+// the edge runs along z (it is crossed in x).
+typedef struct {
+    int32_t x, z, x1, z1, x2, z2;
+    int across;
+} Portal;
+
+static Portal portal(int a, int b)
+{
+    const Zone *p = &zones[a], *q = &zones[b];
+    Portal r;
+    if (p->z0 == q->z1 || p->z1 == q->z0) {
+        r.z = r.z1 = r.z2 = p->z1 == q->z0 ? p->z1 : p->z0;
+        r.x1 = p->x0 > q->x0 ? p->x0 : q->x0;
+        r.x2 = p->x1 < q->x1 ? p->x1 : q->x1;
+        r.x = (r.x1 + r.x2) / 2;
+        r.across = 0;
+    } else {
+        r.x = r.x1 = r.x2 = p->x1 == q->x0 ? q->x0 : p->x0;
+        r.z1 = p->z0 > q->z0 ? p->z0 : q->z0;
+        r.z2 = p->z1 < q->z1 ? p->z1 : q->z1;
+        r.z = (r.z1 + r.z2) / 2;
+        r.across = 1;
+    }
+    return r;
+}
+
+static int32_t idist8(int32_t dx, int32_t dz) // sqrt of (dx/8)^2 + (dz/8)^2
+{
+    dx >>= 3;
+    dz >>= 3;
+    return (int32_t)sqrtf((float)dx * dx + (float)dz * dz);
+}
+
+// FUN_80047308: depth-first over the zone graph from zone a to zone b, every
+// simple path; cost = city-block lengths between the edge middles, the last
+// two legs as straight lines / 8 (as the PS1 adds them). Heads for the first
+// edge of the cheapest path, or straight for the point after it when the
+// line to that passes through the edge (its ends pulled in by 800).
+static void path_goal(Enemy *e, int a, int b, int32_t tx, int32_t tz)
+{
+    struct { int zone; uint16_t left; int32_t x, z, cost; Portal first; } st[16];
+    int depth = 0, best_cost = 0x7FFFFFFF, found = 0;
+    Portal best_first = { 0 };
+    int32_t best_next_x = tx, best_next_z = tz;
+    st[0].zone = a;
+    st[0].left = zones[a].next & ~(1u << a);
+    st[0].x = e->x;
+    st[0].z = e->z;
+    st[0].cost = 0;
+    uint16_t visited = 1u << a;
+    while (depth >= 0) {
+        if (!st[depth].left) {
+            visited &= ~(1u << st[depth].zone);
+            depth--;
+            continue;
+        }
+        int n = __builtin_ctz(st[depth].left);
+        st[depth].left &= ~(1u << n);
+        if (n >= zone_count || (visited & (1u << n)))
+            continue;
+        Portal pt = portal(st[depth].zone, n);
+        if (n == b) {
+            int32_t cost = st[depth].cost + idist8(st[depth].x - pt.x, st[depth].z - pt.z) +
+                           idist8(tx - pt.x, tz - pt.z);
+            if (cost < best_cost) {
+                best_cost = cost;
+                found = 1;
+                best_first = depth ? st[1].first : pt;
+                best_next_x = depth == 0 ? tx : depth == 1 ? pt.x : st[2].x;
+                best_next_z = depth == 0 ? tz : depth == 1 ? pt.z : st[2].z;
+            }
+            continue;
+        }
+        if (depth + 1 >= 16)
+            continue;
+        depth++;
+        st[depth].zone = n;
+        st[depth].left = zones[n].next & ~visited;
+        st[depth].x = pt.x;
+        st[depth].z = pt.z;
+        st[depth].first = depth == 1 ? pt : st[depth - 1].first;
+        st[depth].cost = st[depth - 1].cost + abs(st[depth - 1].x - pt.x) + abs(st[depth - 1].z - pt.z);
+        visited |= 1u << n;
+    }
+    if (!found)
+        return;
+    // approaching an edge at a flat angle: first a point 800 short of it
+    Portal f = best_first;
+    int32_t gx = f.x, gz = f.z, sx = 0, sz = 0;
+    if (!f.across) {
+        int32_t dz = gz - e->z;
+        if (dz == 0 || abs((gx - e->x) * 4096 / dz) > 10000)
+            gz += dz < 0 ? 800 : -800;
+        sx = 800;
+    } else {
+        int32_t dx = gx - e->x;
+        if (dx == 0 || abs((gz - e->z) * 4096 / dx) > 10000)
+            gx += dx < 0 ? 800 : -800;
+        sz = 800;
+    }
+    // the line to the point after the edge passes between its ends: go there
+    int32_t vx = best_next_x - e->x, vz = best_next_z - e->z;
+    int64_t c1 = (int64_t)(f.z1 - e->z + sz) * vx - (int64_t)(f.x1 - e->x + sx) * vz;
+    int64_t c2 = (int64_t)(f.z2 - e->z - sz) * vx - (int64_t)(f.x2 - e->x - sx) * vz;
+    if ((c1 < 0) != (c2 < 0)) {
+        gx = best_next_x;
+        gz = best_next_z;
+    }
+    e->goal_x = gx;
+    e->goal_z = gz;
+    e->has_goal = 1;
+}
+
+// FUN_80046fb0 (every 8 frames): Leon himself if the zombie may go straight
+// (status 0x1000, no zones, same zone), else the next edge on the way.
+static void update_goal(Enemy *e, const EnemyTarget *p)
+{
+    if ((e->flags & 0x1000) || !zone_count) {
+        e->has_goal = 0;
+        return;
+    }
+    if (e->flags & EF_HOLD)
+        return;
+    int a = zone_at(e->x, e->z), b = zone_at(p->x, p->z);
+    if (a < 0 || b < 0)
+        return; // keeps the last goal
+    if (a == b) {
+        e->has_goal = 0;
+        return;
+    }
+    path_goal(e, a, b, p->x, p->z);
+}
+
 void enemy_tick(const EnemyTarget *p)
 {
     for (int i = 0; i < MAX_ENEMIES; i++) {
         Enemy *e = &enemies[i];
-        if (!e->active || !types[e->type].model.anims[e->anim].count)
+        if (!present(e) || !types[e->type].model.anims[e->anim].count)
             continue;
         float fdx = (float)(p->x - e->x), fdz = (float)(p->z - e->z);
         uint32_t d = (uint32_t)sqrtf(fdx * fdx + fdz * fdz);
@@ -910,9 +1167,14 @@ void enemy_tick(const EnemyTarget *p)
         if (e->sight_timer-- == 0) {
             e->sight_timer = 7;
             e->sees = !game_sight_blocked(e->x, e->y + EYE_ENEMY, e->z, p->x, p->y + EYE_PLAYER, p->z);
+            update_goal(e, p);
         }
         if (e->state == ST_DEAD)
             continue;
+        if (e->routine == 8) {
+            script_mode(e, i);
+            continue;
+        }
         if (e->flinch) { // hit recoil: holds still a moment
             e->flinch--;
             anim_step(e, NULL);
@@ -935,7 +1197,7 @@ void enemy_tick(const EnemyTarget *p)
 
 int enemy_grabbing(void) { return grab.enemy >= 0; }
 
-static int alive(const Enemy *e) { return e->active && e->state < ST_DYING; }
+static int alive(const Enemy *e) { return present(e) && e->state < ST_DYING; }
 
 // Nearest living enemy Leon can see within range (0 = any), for the
 // auto-aim when he raises a weapon (FUN_8003ed74). -1 if none.
@@ -967,6 +1229,7 @@ int enemy_aim_target(int32_t x, int32_t y, int32_t z, int range, int32_t *tx, in
 static void fall(Enemy *e, int dying)
 {
     e->fall_back = rnd() & 1;
+    e->routine = 1; // shot down: leaves the room script's control
     e->state = dying ? ST_DYING : ST_DOWN;
     e->sub = 1;
     e->standing = 0;
@@ -1094,6 +1357,8 @@ static void draw_bone(const EnemyType *t, int bone, int frame)
 
 // Is the point roughly inside the current view? (camera from main.c)
 int camera_sees(int32_t x, int32_t y, int32_t z, int32_t margin);
+// main.c: seen by the camera only through a wall (room boxes, not masks)
+int camera_occluded(int32_t x, int32_t y, int32_t z);
 extern int cull_models;  // main.c: POLY_CULL_* that drops faces turned away
 
 void enemy_draw(int reserve_vertices, int reserve_polygons)
@@ -1103,9 +1368,11 @@ void enemy_draw(int reserve_vertices, int reserve_polygons)
     int32_t dist[MAX_ENEMIES];
     for (int i = 0; i < MAX_ENEMIES; i++) {
         const Enemy *e = &enemies[i];
-        if (!e->active || !types[e->type].drawable || !types[e->type].model.anims[e->anim].count)
+        if (!present(e) || !types[e->type].drawable || !types[e->type].model.anims[e->anim].count)
             continue;
         int32_t d = camera_sees(e->x, e->y - 900, e->z, 1200);
+        if (d >= 0 && camera_occluded(e->x, e->y, e->z))
+            d = -1;
         if (d < 0) {
             enemies[i].drawn = 0;
             enemies[i].was_visible = 0;

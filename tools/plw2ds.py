@@ -3,7 +3,8 @@
 A PLW holds the 17 moves of that weapon (walk / run / stand for Fine,
 Caution and Danger, raise, aim and fire straight / up / down, ...) and the
 right hand holding it (mesh 0; mesh 1 is the muzzle flash). The hand
-replaces bone 14 of the PLD and uses Leon's texture page 1.
+replaces bone 11 of the PLD (the right hand: its shape matches bone 11, and
+only there does the barrel point along the aim) and uses Leon's texture page 1.
 
 The PLW's own TIM (section 3, 8 bpp 56x32) is the weapon's texture: the
 game copies it over the bottom right corner of page 1 (u 72, v 224, left
@@ -26,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pld2json  # noqa: E402
 import tim2png  # noqa: E402
 
-HAND_BONE = 14
+HAND_BONE = 11
 PATCH_PAGE, PATCH_FIRST_COLOR, PATCH_COLORS = 1, 240, 16
 PAGE_W, PAGE_H = 128, 256
 

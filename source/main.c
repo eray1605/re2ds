@@ -91,6 +91,7 @@ static Room room;
 static int cur_stage, cur_room;
 static char bg_prefix[16];    // e.g. "room10a"
 static Model leon;
+static void *room_zones;             // the room's path zones (may be absent)
 static Model rbj;                   // the room's special-move animations (may be absent)
 static Masks masks;
 static int have_masks;
@@ -140,8 +141,51 @@ static uint8_t *enemy_pairs;        // voice kind pairs per set (enemse2ds.py)
 static int game_over;               // Leon's death animation is over
 
 static void render_frame(void);
+static void update_occlusion(void);
 
 // ---------------------------------------------------------------- loading
+// Writes into texture VRAM (banks B-D), which the CPU can only reach while
+// they are mapped as LCDC, 16 bits at a time. dst and bytes even.
+static void texture_write(void *dst, const uint8_t *src, int bytes)
+{
+    if (!dst)
+        return;
+    uint8_t cr_b = VRAM_B_CR, cr_c = VRAM_C_CR, cr_d = VRAM_D_CR;
+    VRAM_B_CR = VRAM_ENABLE | VRAM_B_LCD;
+    VRAM_C_CR = VRAM_ENABLE | VRAM_C_LCD;
+    VRAM_D_CR = VRAM_ENABLE | VRAM_D_LCD;
+    volatile uint16_t *d = dst;
+    for (int i = 0; i < bytes / 2; i++)
+        d[i] = src[2 * i] | src[2 * i + 1] << 8;
+    VRAM_B_CR = cr_b;
+    VRAM_C_CR = cr_c;
+    VRAM_D_CR = cr_d;
+}
+
+// One 256x256 texture for the camera masks, reserved before the enemy and
+// effect textures: allocating it anew per camera (up to 64 KB) failed once
+// texture memory got fragmented and left the masks white (room 102).
+#define MASK_TEX_HEIGHT 256
+static void reserve_mask_texture(void)
+{
+    uint8_t *zero = calloc(1, 256 * MASK_TEX_HEIGHT);
+    static const uint16_t black[256];
+    if (!zero)
+        return;
+    DC_FlushRange(zero, 256 * MASK_TEX_HEIGHT);
+    glGenTextures(1, &mask_tex);
+    glBindTexture(0, mask_tex);
+    if (!glTexImage2D(0, 0, GL_RGB256, TEXTURE_SIZE_256, TEXTURE_SIZE_256, 0,
+                      TEXGEN_TEXCOORD | GL_TEXTURE_COLOR0_TRANSPARENT, zero)) {
+        glDeleteTextures(1, &mask_tex);
+        mask_tex = -1;
+    } else {
+        DC_FlushRange(black, sizeof(black));
+        glColorTableEXT(0, 0, 256, 0, 0, black);
+    }
+    free(zero);
+}
+
 static void fatal(const char *msg)
 {
     consoleDemoInit();
@@ -169,20 +213,6 @@ static void upload_leon_textures(void)
     asset_free(tex);
 }
 
-static int tex_size_enum(int n)
-{
-    switch (n) {
-    case 8: return TEXTURE_SIZE_8;
-    case 16: return TEXTURE_SIZE_16;
-    case 32: return TEXTURE_SIZE_32;
-    case 64: return TEXTURE_SIZE_64;
-    case 128: return TEXTURE_SIZE_128;
-    case 256: return TEXTURE_SIZE_256;
-    case 512: return TEXTURE_SIZE_512;
-    default: return TEXTURE_SIZE_1024;
-    }
-}
-
 static void set_camera(int cam)
 {
     char path[64];
@@ -203,22 +233,20 @@ static void set_camera(int cam)
     int back = bg_base == BG_BASE_FRONT ? BG_BASE_BACK : BG_BASE_FRONT;
     decompress(bg + 1, (u16 *)BG_GFX + 0x2000 * back, LZ77Vram);
 
-    // masks for this camera (optional)
+    // masks for this camera (optional), into the texture reserved at start
     if (have_masks)
         asset_free(masks.data);
-    if (mask_tex >= 0) {
-        glDeleteTextures(1, &mask_tex);
-        mask_tex = -1;
-    }
     snprintf(path, sizeof(path), "nitro:/mask/%s_cam%02d.bin", bg_prefix, cam);
-    have_masks = masks_load(&masks, path);
+    have_masks = mask_tex >= 0 && masks_load(&masks, path);
+    if (have_masks && masks.header->tex_height > MASK_TEX_HEIGHT) {
+        asset_free(masks.data);
+        have_masks = 0;
+    }
     if (have_masks) {
         DC_FlushRange(masks.data, 512 + sizeof(MaskHeader) + 256 * masks.header->tex_height);
-        glGenTextures(1, &mask_tex);
         glBindTexture(0, mask_tex);
-        glTexImage2D(0, 0, GL_RGB256, TEXTURE_SIZE_256, tex_size_enum(masks.header->tex_height), 0,
-                     TEXGEN_TEXCOORD | GL_TEXTURE_COLOR0_TRANSPARENT, masks.pixels);
-        glColorTableEXT(0, 0, 256, 0, 0, masks.palette);
+        glColorSubTableEXT(0, 0, 256, 0, 0, masks.palette);
+        texture_write(glGetTexturePointer(mask_tex), masks.pixels, 256 * masks.header->tex_height);
     }
 
     // The 3D layer shows what was flushed before the last vblank. Render the
@@ -265,6 +293,13 @@ static int load_room(int stage, int id)
         asset_free(rbj.data);
         rbj.data = NULL;
     }
+    // path zones for the enemies (tools/blk2ds.py)
+    enemy_set_zones(NULL);
+    if (room_zones)
+        asset_free(room_zones);
+    snprintf(path, sizeof(path), "nitro:/room/room%d%02x0_blk.bin", stage, id);
+    room_zones = asset_load(path, NULL);
+    enemy_set_zones(room_zones);
     if (old_bank)
         sound_bank_free(old_bank);
     near_aot = NULL;
@@ -527,6 +562,7 @@ static void render_frame(void)
     glColor3b(255, 255, 255);
     glPolyFmt(POLY_ALPHA(31) | cull_models | POLY_ID(1));
     draw_player();
+    update_occlusion();
     enemy_draw((have_masks ? 4 * masks.header->num_quads : 0) + 4 * effect_count(),
                (have_masks ? masks.header->num_quads : 0) + effect_count());
     effect_draw(room.cameras[cur_cam].from, room.cameras[cur_cam].to);
@@ -819,6 +855,12 @@ void game_bgm_control(int id, int op, int type, int left, int right)
     music_control(id, op, type, left, right);
 }
 
+// status screen sounds (menu.c): CORE00, as the PS1's bank 4
+void game_menu_sound(int sound)
+{
+    sound_play(voice_bank, sound, 127, 64);
+}
+
 void game_blood(int kind, int32_t x, int32_t y, int32_t z, int16_t dir, int speed, int32_t floor_y)
 {
     effect_blood(kind, x, y, z, dir, speed, floor_y);
@@ -865,24 +907,76 @@ static int segment_hits_box(const float p0[3], const float p1[3], const float lo
 // it, except shapes 1-5 and 13 (table 0x8009f480); the others count as their
 // rectangle. A box reaches from its lowest floor up to the height in its type
 // field, so low ones like cars do not hide Leon from a zombie's eyes.
-int game_sight_blocked(int32_t x0, int32_t y0, int32_t z0, int32_t x1, int32_t y1, int32_t z1)
+// Does box i (with all bits of need in its flag) block the line p0-p1?
+static int sight_box_hit_flags(int i, const float p0[3], const float p1[3], uint16_t need)
 {
     static const uint8_t skip_shape[16] = { 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0 };
+    const RoomBox *b = &room.boxes[i];
+    if (!(b->flag & 0x2000) || (b->flag & need) != need || skip_shape[b->flag & 15] || !b->floors)
+        return 0;
+    int32_t top = -((b->type >> 11) * 100 + ((b->type >> 6) & 31) * 1800);
+    int32_t bottom = 0;
+    for (uint32_t f = b->floors; !(f & 1); f >>= 1)
+        bottom += FLOOR_HEIGHT;
+    const float lo[3] = { (float)b->x, (float)top, (float)b->z };
+    const float hi[3] = { (float)(b->x + b->w), (float)bottom, (float)(b->z + b->d) };
+    return segment_hits_box(p0, p1, lo, hi);
+}
+
+static int sight_box_hit(int i, const float p0[3], const float p1[3])
+{
+    return sight_box_hit_flags(i, p0, p1, 0);
+}
+
+int game_sight_blocked(int32_t x0, int32_t y0, int32_t z0, int32_t x1, int32_t y1, int32_t z1)
+{
     const float p0[3] = { (float)x0, (float)y0, (float)z0 }, p1[3] = { (float)x1, (float)y1, (float)z1 };
-    for (int i = 0; i < room.header->num_boxes; i++) {
-        const RoomBox *b = &room.boxes[i];
-        if (!(b->flag & 0x2000) || skip_shape[b->flag & 15] || !b->floors)
-            continue;
-        int32_t top = -((b->type >> 11) * 100 + ((b->type >> 6) & 31) * 1800);
-        int32_t bottom = 0;
-        for (uint32_t f = b->floors; !(f & 1); f >>= 1)
-            bottom += FLOOR_HEIGHT;
-        const float lo[3] = { (float)b->x, (float)top, (float)b->z };
-        const float hi[3] = { (float)(b->x + b->w), (float)bottom, (float)(b->z + b->d) };
-        if (segment_hits_box(p0, p1, lo, hi))
+    for (int i = 0; i < room.header->num_boxes; i++)
+        if (sight_box_hit(i, p0, p1))
             return 1;
-    }
     return 0;
+}
+
+// Enemies behind walls. The backgrounds' masks only cover what the PS1
+// artists expected in front, and zombies pressing against a wall from the
+// other side can stand nearer than a wall's mask (room 102, camera 1: the
+// courtyard zombies at the gate, masks at depth 9920, zombies at ~9000).
+// Hidden: an enemy the camera would see only through a sight-blocking wall
+// that does not also stand between the camera and Leon (many cameras look
+// through the room's outer walls; those walls then count for nobody). Only
+// solid walls count, that collide with everything (flag 0xFC00): a gate
+// that only some objects collide with (room 102 box 0: 0xF400, a chain-link
+// fence) is see-through.
+#define MAX_SIGHT_BOXES 64
+#define SOLID_WALL 0xFC00
+static uint64_t walls_before_leon;  // set per frame by update_occlusion()
+
+static void update_occlusion(void)
+{
+    const RoomCamera *c = &room.cameras[cur_cam];
+    const float eye[3] = { (float)c->from[0], (float)c->from[1], (float)c->from[2] };
+    walls_before_leon = 0;
+    for (int h = 0; h < 2; h++) {
+        const float leon[3] = { (float)player.x, (float)(player.y - (h ? 1700 : 300)), (float)player.z };
+        for (int i = 0; i < room.header->num_boxes && i < MAX_SIGHT_BOXES; i++)
+            if (sight_box_hit_flags(i, eye, leon, SOLID_WALL))
+                walls_before_leon |= 1ull << i;
+    }
+}
+
+int camera_occluded(int32_t x, int32_t y, int32_t z)
+{
+    const RoomCamera *c = &room.cameras[cur_cam];
+    const float eye[3] = { (float)c->from[0], (float)c->from[1], (float)c->from[2] };
+    for (int h = 0; h < 2; h++) { // hidden only if feet and head (2000 up: above 1800-high boxes) are
+        const float p[3] = { (float)x, (float)(y - (h ? 2000 : 100)), (float)z };
+        int hit = 0;
+        for (int i = 0; i < room.header->num_boxes && i < MAX_SIGHT_BOXES && !hit; i++)
+            hit = !(walls_before_leon >> i & 1) && sight_box_hit_flags(i, eye, p, SOLID_WALL);
+        if (!hit)
+            return 0;
+    }
+    return 1;
 }
 
 // room collision for enemies (same rule as the player, on the floor of y)
@@ -1153,20 +1247,8 @@ static void apply_weapon_texture(int item)
         DC_FlushRange(t, size);
         glBindTexture(0, leon_tex[page]);
         glColorSubTableEXT(0, first, n, 0, 0, colors);
-        // texture banks are CPU-writable only while mapped as LCDC, 16 bits at a time
-        uint8_t cr_b = VRAM_B_CR, cr_c = VRAM_C_CR, cr_d = VRAM_D_CR;
-        VRAM_B_CR = VRAM_ENABLE | VRAM_B_LCD;
-        VRAM_C_CR = VRAM_ENABLE | VRAM_C_LCD;
-        VRAM_D_CR = VRAM_ENABLE | VRAM_D_LCD;
-        for (int r = 0; r < h; r++) {
-            volatile uint16_t *row = (volatile uint16_t *)(tex + (y + r) * TEX_PAGE_WIDTH + x);
-            const uint8_t *src = pix + r * w;
-            for (int i = 0; i < w / 2; i++)
-                row[i] = src[2 * i] | src[2 * i + 1] << 8;
-        }
-        VRAM_B_CR = cr_b;
-        VRAM_C_CR = cr_c;
-        VRAM_D_CR = cr_d;
+        for (int r = 0; r < h; r++)
+            texture_write(tex + (y + r) * TEX_PAGE_WIDTH + x, pix + r * w, w);
     }
     asset_free(t);
 }
@@ -1583,6 +1665,7 @@ int main(void)
         fatal("model/leon.bin missing");
     build_hierarchy();
     upload_leon_textures();
+    reserve_mask_texture();
     calibrate_culling();
     load_room_index();
 

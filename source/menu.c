@@ -23,6 +23,7 @@ extern const u8 default_font_bin[];
 
 static uint8_t fb[256 * 192];
 static int dirty, bg = -1, debug_mode;
+static uint32_t last_inv;
 static uint8_t *data;
 static const uint8_t *ui;              // ui colour indices
 static const uint8_t *icons;
@@ -38,6 +39,13 @@ static int cmd_sel;
 static const char *message;
 static char info[96];                  // text box when no message is open
 static int ecg_phase;
+static int combine_from = -1;          // COMBINE picked on this slot: choosing the other
+
+// Menu sounds from CORE00 (PS1 bank 4; the status screen plays 0x404..0x40A):
+// by length 4 is the short cursor blip, 5 / 6 select and back, 7 the "no"
+// blip, 8 the long reload click (assignment by ear, not traced to the calls).
+enum { SND_CURSOR = 4, SND_SELECT = 5, SND_BACK = 6, SND_NO = 7, SND_RELOAD = 8 };
+void game_menu_sound(int sound);
 
 static int col(int c) { return ui ? ui[c] : (c == C_WHITE ? 255 : 0); }
 
@@ -125,13 +133,14 @@ static void draw_slot(int i)
 {
     int x, y;
     slot_pos(i, &x, &y);
-    int c = focus && row == 0 && sel == i ? C_YELLOW : i == inventory_equipped ? C_GREEN : C_DARK;
+    int c = focus && row == 0 && sel == i ? C_YELLOW : i == combine_from ? C_RED
+          : i == inventory_equipped ? C_GREEN : C_DARK;
     fill(x, y, 48, 36, C_BLACK);
     frame(x, y, 48, 36, c);
     if (inventory[i].item) {
         icon(x + 4, y + 3, inventory[i].item);
         int item = inventory[i].item;
-        if (item >= 0x02) { // the knife has no count
+        if (item >= 0x02 && item <= 0x1E) { // guns, ammunition, ink ribbons (not the knife, herbs)
             char n[8];
             snprintf(n, sizeof(n), "%d", inventory[i].count);
             text(x + 46 - 8 * (int)strlen(n), y + 27, n, C_WHITE);
@@ -375,11 +384,75 @@ static void set_info(int slot)
         info[0] = 0;
 }
 
+// ---------------------------------------------------------------- combine
+// Weapon + its ammunition loads it up to the magazine size; herbs mix.
+#define ITEM_GREEN 0x26
+#define ITEM_RED 0x27
+#define ITEM_BLUE 0x28
+static const struct { uint8_t weapon, ammo, capacity; } loads[] = {
+    { 0x02, 0x14, 18 }, { 0x03, 0x14, 13 }, { 0x04, 0x14, 18 },   // hand guns
+    { 0x05, 0x16, 8 }, { 0x06, 0x16, 8 },                         // magnums
+    { 0x07, 0x15, 5 }, { 0x08, 0x15, 7 },                         // shotguns
+    { 0x09, 0x18, 6 }, { 0x0A, 0x19, 6 }, { 0x0B, 0x1A, 6 },      // grenade launcher
+    { 0x0C, 0x1D, 18 }, { 0x0E, 0x1C, 100 }, { 0x0F, 0x1B, 100 }, { 0x10, 0x17, 100 },
+};
+// mixed herbs 0x29.. : G+G, G+R, G+B, G+G+G, G+G+B, G+R+B
+static const uint8_t mixes[][3] = {
+    { ITEM_GREEN, ITEM_GREEN, 0x29 }, { ITEM_GREEN, ITEM_RED, 0x2A }, { ITEM_GREEN, ITEM_BLUE, 0x2B },
+    { 0x29, ITEM_GREEN, 0x2C }, { 0x29, ITEM_BLUE, 0x2D }, { 0x2B, ITEM_GREEN, 0x2D },
+    { 0x2A, ITEM_BLUE, 0x2E }, { 0x2B, ITEM_RED, 0x2E },
+};
+
+static int combine(int a, int b)
+{
+    InvSlot *x = &inventory[a], *y = &inventory[b];
+    if (a == b || !x->item || !y->item)
+        return 0;
+    for (unsigned i = 0; i < sizeof(loads) / sizeof(loads[0]); i++) {
+        InvSlot *w = x->item == loads[i].weapon ? x : y->item == loads[i].weapon ? y : NULL;
+        InvSlot *m = w == x ? y : x;
+        if (!w || m->item != loads[i].ammo)
+            continue;
+        int take = loads[i].capacity - w->count;
+        if (take <= 0) {
+            snprintf(info, sizeof(info), "%s is fully loaded.", item_name(w->item));
+            return 0;
+        }
+        if (take > m->count)
+            take = m->count;
+        w->count += take;
+        m->count -= take;
+        if (!m->count)
+            m->item = 0;
+        snprintf(info, sizeof(info), "%s loaded.", item_name(w->item));
+        game_menu_sound(SND_RELOAD);
+        return 1;
+    }
+    for (unsigned i = 0; i < sizeof(mixes) / sizeof(mixes[0]); i++) {
+        if (!((x->item == mixes[i][0] && y->item == mixes[i][1]) ||
+              (y->item == mixes[i][0] && x->item == mixes[i][1])))
+            continue;
+        x->item = mixes[i][2];
+        x->count = 0;
+        y->item = 0;
+        y->count = 0;
+        if (inventory_equipped == b)
+            inventory_equipped = -1;
+        snprintf(info, sizeof(info), "Mixed the herbs.");
+        game_menu_sound(SND_SELECT);
+        return 1;
+    }
+    snprintf(info, sizeof(info), "You cannot combine these.");
+    return 0;
+}
+
 static void command(int k)
 {
     InvSlot *s = &inventory[sel];
-    if (!s->item)
+    if (!s->item) {
+        game_menu_sound(SND_NO);
         return;
+    }
     switch (k) {
     case CMD_EQUIP:
         if (is_weapon(s->item)) {
@@ -388,6 +461,8 @@ static void command(int k)
                      item_name(s->item));
         } else {
             snprintf(info, sizeof(info), "You cannot equip that.");
+            game_menu_sound(SND_NO);
+            return;
         }
         break;
     case CMD_USE:
@@ -397,9 +472,19 @@ static void command(int k)
         snprintf(info, sizeof(info), "%s.", item_name(s->item));
         break;
     case CMD_COMBINE:
-        snprintf(info, sizeof(info), "Combining comes later.");
+        combine_from = sel;
+        snprintf(info, sizeof(info), "Combine %s with what?", item_name(s->item));
         break;
     }
+    game_menu_sound(SND_SELECT);
+}
+
+// second item of a COMBINE chosen
+static void combine_with(int slot)
+{
+    if (!combine(combine_from, slot))
+        game_menu_sound(SND_NO);
+    combine_from = -1;
 }
 
 static int touched_slot(int tx, int ty)
@@ -432,22 +517,35 @@ int menu_frame(uint32_t down, int hp)
                 focus = 1;
             row = 0;
             sel = s;
-            set_info(sel);
+            if (combine_from >= 0) {
+                combine_with(s);
+            } else {
+                set_info(sel);
+                game_menu_sound(SND_CURSOR);
+            }
         } else if (t.py >= 134 && t.py < 146 && focus) {
             cmd_sel = (t.px - 6) / 62;
             if (cmd_sel >= 0 && cmd_sel < NUM_CMDS)
                 command(cmd_sel);
         } else if (t.py < 54) {
             focus = !focus; // tap the top to leave (or enter) the menu
+            combine_from = -1;
+            game_menu_sound(focus ? SND_SELECT : SND_BACK);
         }
         changed = 1;
     } else if (focus) {
+        int keep_info = 0;     // a command's answer stays in the text box
         if (down & (KEY_START | KEY_B)) {
-            if (row == 1 && (down & KEY_B))
+            if (combine_from >= 0 && (down & KEY_B))
+                combine_from = -1;
+            else if (row == 1 && (down & KEY_B))
                 row = 0;
             else
-                focus = 0;
+                focus = 0, combine_from = -1;
+            game_menu_sound(SND_BACK);
         }
+        if (down & (KEY_LEFT | KEY_RIGHT | KEY_UP | KEY_DOWN))
+            game_menu_sound(SND_CURSOR);
         if (row == 0) {
             if (down & KEY_LEFT)
                 sel = (sel + INV_SLOTS - 1) % INV_SLOTS;
@@ -455,9 +553,13 @@ int menu_frame(uint32_t down, int hp)
                 sel = (sel + 1) % INV_SLOTS;
             if (down & (KEY_UP | KEY_DOWN))
                 sel ^= 4;
-            if (down & KEY_A) {
+            if ((down & KEY_A) && combine_from >= 0) {
+                combine_with(sel);
+                keep_info = 1;
+            } else if (down & KEY_A) {
                 row = 1;
                 cmd_sel = 0;
+                game_menu_sound(SND_SELECT);
             }
         } else {
             if (down & KEY_LEFT)
@@ -467,15 +569,25 @@ int menu_frame(uint32_t down, int hp)
             if (down & KEY_A) {
                 command(cmd_sel);
                 row = 0;
+                keep_info = 1;
             }
         }
+        if (down && !keep_info && combine_from < 0)
+            set_info(sel);
         if (down)
-            set_info(sel), changed = 1;
+            changed = 1;
     } else if (down & KEY_START) {
         focus = 1;
         set_info(sel);
         changed = 1;
+        game_menu_sound(SND_SELECT);
     }
+    // the game changes the inventory too (shots, pickups): redraw then
+    uint32_t inv = inventory_equipped;
+    for (int i = 0; i < INV_SLOTS; i++)
+        inv = inv * 31 + (inventory[i].item << 16 | inventory[i].count);
+    if (inv != last_inv)
+        changed = 1, last_inv = inv;
     if (changed || hp != last_hp) {
         redraw(hp);
         last_hp = hp;
