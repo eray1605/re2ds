@@ -630,7 +630,10 @@ static void use_door(const Aot *a)
     const uint8_t *d = a->data;
     int16_t nx = d[0] | d[1] << 8, ny = d[2] | d[3] << 8, nz = d[4] | d[5] << 8;
     int16_t ndir = d[6] | d[7] << 8;
+    // copy everything now: enter_room() runs the new room's scripts, which
+    // overwrite this AOT slot (a->data) with their own AOTs
     int stage = d[8] + 1, id = d[9], cam = d[10], key_id = d[15], key_type = d[16];
+    int door_type = d[12], door_variant = d[13];
 
     // key id = 0x80 | lock number (shared by both sides of the door), key type
     // = item that opens it. 0xFE / 0xFF mark the two sides of a door that is
@@ -664,7 +667,7 @@ static void use_door(const Aot *a)
     // byte 12 = door type; type t loads disc file 0xD7 + t (table 0x80092948),
     // whose sector (table 0x8009146c) is that of DOORtt.DO2 (checked: file
     // 0xD7 starts at LBA 0xBA41 = DOOR00)
-    if (door_begin(d[12], d[13])) {
+    if (door_begin(door_type, door_variant)) {
         bgHide(bg_id);
         while (door_frame())
             swiWaitForVBlank();
