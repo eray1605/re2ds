@@ -52,7 +52,25 @@ int main(int argc, char **argv)
     int file = argc > 1 ? atoi(argv[1]) : 0, variant = argc > 2 ? atoi(argv[2]) : 0;
     if (!door_begin(file, variant)) { printf("door %d missing\n", file); return 1; }
     int n = 0;
+    const char *dump = getenv("DOOR_DUMP");   // frames to dump as JSON, e.g. "30,120,240"
     while (door_frame()) {
+        if (dump) {
+            char key[16];
+            snprintf(key, sizeof(key), ",%d,", n);
+            char list[256];
+            snprintf(list, sizeof(list), ",%s,", dump);
+            if (strstr(list, key)) {
+                printf("JSON {\"frame\": %d, \"parts\": [", n);
+                for (int i = 0, first = 1; i < MAX_PARTS; i++)
+                    if (parts[i].active) {
+                        printf("%s{\"i\": %d, \"part\": %d, \"flags\": %d, \"pos\": [%d, %d, %d], \"rot\": [%d, %d, %d]}",
+                               first ? "" : ", ", i, parts[i].part, parts[i].flags, parts[i].pos[0], parts[i].pos[1],
+                               parts[i].pos[2], parts[i].rot[0], parts[i].rot[1], parts[i].rot[2]);
+                        first = 0;
+                    }
+                printf("]}\n");
+            }
+        }
         if (n % 30 == 0) {
             printf("frame %3d bright %3d:", n, brightness);
             for (int i = 0; i < MAX_PARTS; i++)
