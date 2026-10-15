@@ -30,6 +30,11 @@ typedef struct {
 } EnemyTarget;
 void enemy_tick(const EnemyTarget *player); // once per game tick
 int enemy_grabbing(void);       // a zombie holds Leon
+#define NOISE_SHOT 0x01
+// auto-aim: nearest living enemy Leon sees within range (0 = any); -1 none
+int enemy_aim_target(int32_t x, int32_t y, int32_t z, int range, int32_t *tx, int32_t *tz);
+// shot / stab toward dir: damage[near, mid, far]; returns the enemy hit or -1
+int enemy_hit(int32_t x, int32_t y, int32_t z, int16_t dir, int range, int weapon, const uint8_t damage[3]);
 // room script access (work_set 3): member 7 = flags; 0 if unknown
 int enemy_member_get(int slot, int member, int *value);
 void enemy_member_set(int slot, int member, int value);

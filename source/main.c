@@ -37,7 +37,20 @@
 #define START_CAM 0
 
 // Animation numbers in leon.bin: 10 PLD animations, then the PL00W00 set.
-enum { ANIM_WALK = 10, ANIM_RUN = 11, ANIM_IDLE = 12 };
+// Leon's moves come from the weapon set (PLW, animations from 10 on), three
+// per health level Fine / Caution / Danger (tables at 0x80010bc0 ff.): walk
+// 0 / 3 / 6, run 1 / 4 / 7, stand 2 / 5 / 8. Hurt, he limps.
+#define PLW_FIRST 10
+static const uint8_t anim_walk_tbl[3] = { 0, 3, 6 }, anim_run_tbl[3] = { 1, 4, 7 },
+                     anim_idle_tbl[3] = { 2, 5, 8 };
+// turning per game frame (4096 = 360 degrees): walking, running, backing
+// up, on the spot (0x80010bc8, 0x80010bd4, 0x80010bdc, 0x80010be4)
+static const uint8_t turn_walk[3] = { 40, 32, 16 }, turn_run[3] = { 56, 48, 24 },
+                     turn_back[3] = { 40, 16, 16 }, turn_spot[3] = { 80, 48, 32 };
+static int health_level(void);
+#define ANIM_WALK (PLW_FIRST + anim_walk_tbl[health_level()])
+#define ANIM_RUN (PLW_FIRST + anim_run_tbl[health_level()])
+#define ANIM_IDLE (PLW_FIRST + anim_idle_tbl[health_level()])
 // Special moves (player states 8 and 9, pl_move_08 / pl_move_09 at
 // 0x8003b6e4 / 0x8003ba78) use the room's own animation set (RBJ, see
 // tools/rbj2ds.py): room/<rdt>_rbj.bin holds climb, jump, fall, land.
@@ -55,7 +68,6 @@ enum { RBJ_CLIMB = 0, RBJ_JUMP = 1, RBJ_FALL = 2, RBJ_LAND = 3 };
 
 // Turn speeds per game tick in RE2 units (4096 = 360 degrees), Fine state
 // (re2ds-notes/player-control.md). Applied per DS frame scaled to DS units.
-enum { TURN_IDLE = 80, TURN_WALK = 40, TURN_RUN = 56 };
 #define TURN_PER_FRAME(t) ((t) * 8 * GAME_HZ / DS_HZ)
 
 #define PLAYER_RADIUS 400
@@ -68,7 +80,7 @@ enum { TURN_IDLE = 80, TURN_WALK = 40, TURN_RUN = 56 };
 #define BG_BASE_FRONT 0
 #define BG_BASE_BACK 4
 
-typedef enum { ST_IDLE, ST_WALK, ST_RUN, ST_BACK, ST_CLIMB, ST_JUMP, ST_FALL, ST_LAND,
+typedef enum { ST_IDLE, ST_WALK, ST_RUN, ST_BACK, ST_TURN, ST_AIM, ST_FIRE, ST_CLIMB, ST_JUMP, ST_FALL, ST_LAND,
                ST_GRABBED, ST_DEAD } PlayerState; // held / killed: enemy.c moves Leon
 
 typedef struct {
@@ -110,9 +122,17 @@ static struct {
     const Model *set;         // animation set: &leon, &rbj or an enemy's (held)
     int32_t slope_base;       // height of that slope's bottom edge
     int16_t hp;               // 200 at the start (PS1 obj+0x156)
+    uint8_t aim_raised;       // weapon up (phase 1 of pl_move_05_aim)
+    uint8_t aim_posture;      // 0 straight, 1 up, 2 down
+    int8_t aim_target;        // enemy the auto-aim turns to, -1 none
+    int32_t aim_x, aim_z;
+    uint8_t shot;             // fired this tick (zombies hear it)
     uint8_t saved_once;       // survived a bite once with 0 HP (PS1 0x800c7948 & 0x1000)
 } player;
 #define PLAYER_HP 200
+
+// Fine / Caution / Danger as the PS1 works it out (hp < 101, hp < 21)
+static int health_level(void) { return player.hp < 21 ? 2 : player.hp < 101 ? 1 : 0; }
 
 static void *voice_bank;            // Leon's voice (CORE00, PS1 bank 4)
 static void *enemy_bank;            // the room's enemy sounds (ENEMSE set, bank 3)
@@ -354,15 +374,53 @@ static void setup_projection(const RoomCamera *c)
     setup_camera(c->from, c->to, c->screen);
 }
 
-static void draw_bone(int bone, int frame)
+// Pose blending (FUN_80028a4c): every animation change of Leon (obj+0x14c =
+// 0x70000 | anim, i.e. counter 7 in byte 0x14e) eases from the shown pose
+// into the new one. Per game tick: shown = new + (shown - new) * counter / 8
+// (angles the short way round, root offset too), then counter - 1.
+#define POSE_BLEND_TICKS 7
+#define POSE_MAX_BONES 32
+static int32_t pose_rot[POSE_MAX_BONES][3];
+static int32_t pose_ofs[3];
+static const Model *pose_set;
+static int pose_anim = -1;          // -1: next update snaps (new room / game)
+static int pose_blend;
+
+static void update_pose(void)
+{
+    const ModelAnim *a = &player.set->anims[player.anim];
+    int key = player.key < a->count ? player.key : a->count - 1;
+    int frame = ANIM_FRAME(player.set->anim_pool[a->first + key]);
+    const ModelFrame *f = model_frame(player.set, frame);
+    const int16_t *rot = model_frame_rot(player.set, frame);
+    int bones = leon.header->num_bones < POSE_MAX_BONES ? leon.header->num_bones : POSE_MAX_BONES;
+    if (pose_anim < 0)
+        pose_blend = 0;
+    else if (player.set != pose_set || player.anim != pose_anim)
+        pose_blend = POSE_BLEND_TICKS;
+    pose_set = player.set;
+    pose_anim = player.anim;
+    int w = pose_blend;               // eighths of the shown pose that stay
+    for (int b = 0; b < bones; b++)
+        for (int k = 0; k < 3; k++) {
+            int32_t to = rot[b * 3 + k];
+            int32_t d = ((pose_rot[b][k] - to + 16384) & 32767) - 16384;
+            pose_rot[b][k] = (to + d * w / 8) & 32767;
+        }
+    for (int k = 0; k < 3; k++)
+        pose_ofs[k] = f->offset[k] + (pose_ofs[k] - f->offset[k]) * w / 8;
+    if (pose_blend)
+        pose_blend--;
+}
+
+static void draw_bone(int bone)
 {
     const ModelBone *b = &leon.bones[bone];
-    const ModelFrame *f = model_frame(player.set, frame);
-    const int16_t *rot = model_frame_rot(player.set, frame) + bone * 3;
+    const int32_t *rot = pose_rot[bone < POSE_MAX_BONES ? bone : 0];
 
     glPushMatrix();
     if (b->parent < 0)
-        glTranslatef32(f->offset[0], f->offset[1], f->offset[2]);
+        glTranslatef32(pose_ofs[0], pose_ofs[1], pose_ofs[2]);
     else
         glTranslatef32(b->pos[0], b->pos[1], b->pos[2]);
     glRotateXi(rot[0]);
@@ -377,20 +435,20 @@ static void draw_bone(int bone, int frame)
         }
     }
     for (int c = first_child[bone]; c >= 0; c = next_sibling[c])
-        draw_bone(c, frame);
+        draw_bone(c);
     glPopMatrix(1);
 }
 
 static void draw_player(void)
 {
-    const ModelAnim *a = &player.set->anims[player.anim];
-    int frame = ANIM_FRAME(player.set->anim_pool[a->first + player.key]);
+    if (pose_anim < 0)
+        update_pose();
     glPushMatrix();
     glTranslatef32(player.x, player.y, player.z);
     glRotateYi(player.dir);
     for (int b = 0; b < leon.header->num_bones; b++)
         if (leon.bones[b].parent < 0)
-            draw_bone(b, frame);
+            draw_bone(b);
     glPopMatrix(1);
 }
 
@@ -661,6 +719,7 @@ static void place_player(int32_t x, int32_t y, int32_t z, int16_t dir, int cam)
     player.slope = -1;
     player.anim = -1;
     set_anim(ANIM_IDLE);
+    pose_anim = -1;
     cam = cut_replace(cam);
     set_camera(cam < room.header->num_cameras ? cam : 0);
 }
@@ -879,9 +938,10 @@ static void new_game(void)
     player.saved_once = 0;
     // Leon starts with the knife and the H&K VP70 (rounds: unverified)
     inventory_reset();
-    inventory_add(0x01, 1);
+    inventory_add(0x01, 0);
     inventory_add(0x02, 18);
     inventory_equipped = 1;
+    player.aim_target = -1;
     enter_room(START_STAGE, START_ROOM, -1);
     if (!room.data)
         fatal("room/room1000.bin missing");
@@ -914,8 +974,8 @@ static void use_door(const Aot *a)
     // = item that opens it. 0xFE / 0xFF mark the two sides of a door that is
     // opened from one side only (which side is which is still a guess).
     if (key_id && !lock_open[key_id & 0x7F]) {
-        if (keysHeld() & KEY_R) {
-            lock_open[key_id & 0x7F] = 1; // debug: R + A opens every lock
+        if (keysHeld() & KEY_L) {
+            lock_open[key_id & 0x7F] = 1; // debug: L + A opens every lock
         } else if (key_type == 0xFE) {
             lock_open[key_id & 0x7F] = 1;
             game_show_message("You unlocked the door.");
@@ -1037,18 +1097,185 @@ static void move_forward(int32_t dist)
 }
 
 // every DS frame: state, animation choice and turning
-static void update_player_frame(uint32_t held)
+// ---------------------------------------------------------------- weapons
+// pl_move_05_aim (re2ds-notes/player-control.md 5.): R raises the weapon in
+// hand (PLW move 9), the auto-aim turns Leon to the nearest enemy he sees
+// (rate 0xd8, FUN_8003ed74); up / down aim high / low; A fires (moves 10 /
+// 12 / 14, held 11 / 13 / 15). Damage near / mid / far from table 0x8009c470.
+enum { PLW_RAISE = 9 };
+static const uint8_t plw_fire[3] = { 10, 12, 14 }, plw_hold[3] = { 11, 13, 15 };
+// A shot plays its whole animation (phase 2, 0x800403ec); holding A in phase
+// 1 fires the next one, so the rate is the animation length (VP70: 23 keys).
+// Releasing R lowers the weapon only after keyframe lower_key (table
+// 0x8009eed8, 3rd byte & 0x7f).
+typedef struct {
+    uint8_t item;
+    uint16_t range;           // 0 = any
+    uint8_t damage[3];
+    uint8_t lower_key;
+} Weapon;
+static const Weapon weapons[] = {
+    { 0x01, 1500, { 3, 0, 0 }, 50 },      // knife
+    { 0x02, 0, { 16, 15, 14 }, 8 },       // H&K VP70
+    { 0x03, 0, { 16, 15, 14 }, 8 },       // Browning
+    { 0x04, 0, { 16, 15, 14 }, 15 },      // custom handgun
+};
+static int leon_weapon = -1;      // item whose model / sound bank are loaded
+static void *weapon_bank;         // ARMSnn (PS1 bank 1): the shot is sound 0
+
+static const Weapon *weapon_in_hand(void)
+{
+    if (inventory_equipped < 0 || !inventory[inventory_equipped].item)
+        return NULL;
+    for (unsigned i = 0; i < sizeof(weapons) / sizeof(weapons[0]); i++)
+        if (weapons[i].item == inventory[inventory_equipped].item)
+            return &weapons[i];
+    return NULL;
+}
+
+// The weapon's own texture (model/leon_wNN_tex.bin, tools/plw2ds.py): a
+// corner of one of Leon's pages and some palette colours, as the PS1 copies
+// the PLW's TIM into VRAM.
+static void apply_weapon_texture(int item)
+{
+    char path[40];
+    uint32_t size;
+    snprintf(path, sizeof(path), "nitro:/model/leon_w%02x_tex.bin", item);
+    uint16_t *t = asset_load(path, &size);
+    if (!t)
+        return;
+    int page = t[0], x = t[1], y = t[2], w = t[3], h = t[4], first = t[5], n = t[6];
+    const uint16_t *colors = t + 8;
+    const uint8_t *pix = (const uint8_t *)(colors + n);
+    uint8_t *tex = page < leon.header->num_pages ? glGetTexturePointer(leon_tex[page]) : NULL;
+    if (tex && size >= 16u + 2 * n + w * h && !(x & 1) && !(w & 1) && x + w <= TEX_PAGE_WIDTH &&
+        y + h <= TEX_PAGE_HEIGHT && first + n <= 256) {
+        DC_FlushRange(t, size);
+        glBindTexture(0, leon_tex[page]);
+        glColorSubTableEXT(0, first, n, 0, 0, colors);
+        // texture banks are CPU-writable only while mapped as LCDC, 16 bits at a time
+        uint8_t cr_b = VRAM_B_CR, cr_c = VRAM_C_CR, cr_d = VRAM_D_CR;
+        VRAM_B_CR = VRAM_ENABLE | VRAM_B_LCD;
+        VRAM_C_CR = VRAM_ENABLE | VRAM_C_LCD;
+        VRAM_D_CR = VRAM_ENABLE | VRAM_D_LCD;
+        for (int r = 0; r < h; r++) {
+            volatile uint16_t *row = (volatile uint16_t *)(tex + (y + r) * TEX_PAGE_WIDTH + x);
+            const uint8_t *src = pix + r * w;
+            for (int i = 0; i < w / 2; i++)
+                row[i] = src[2 * i] | src[2 * i + 1] << 8;
+        }
+        VRAM_B_CR = cr_b;
+        VRAM_C_CR = cr_c;
+        VRAM_D_CR = cr_d;
+    }
+    asset_free(t);
+}
+
+// Leon's model follows the weapon in hand (tools/plw2ds.py: PLW moves and hand)
+static void update_weapon_model(void)
+{
+    int item = inventory_equipped >= 0 ? inventory[inventory_equipped].item : 0;
+    if (item == leon_weapon)
+        return;
+    char path[40];
+    Model m;
+    snprintf(path, sizeof(path), "nitro:/model/leon_w%02x.bin", item);
+    int tex_item = item;
+    if (!model_load(&m, path)) {
+        if (!model_load(&m, "nitro:/model/leon_w00.bin"))
+            return;
+        tex_item = 0;
+    }
+    asset_free(leon.data);
+    leon = m;
+    build_hierarchy();
+    apply_weapon_texture(tex_item);
+    leon_weapon = item;
+    sound_bank_free(weapon_bank);
+    snprintf(path, sizeof(path), "nitro:/sound/arms%02x.bin", item);
+    weapon_bank = item ? sound_bank_load(path) : NULL;
+    if (player.set == &leon && player.anim >= leon.header->num_anims)
+        player.anim = ANIM_IDLE;
+}
+
+static void fire(void)
+{
+    const Weapon *w = weapon_in_hand();
+    InvSlot *slot = &inventory[inventory_equipped];
+    if (!w)
+        return;
+    if (w->item != 0x01) {
+        if (slot->count == 0)
+            return;
+        slot->count--;
+    }
+    player.state = ST_FIRE;
+    player.set = &leon;
+    player.anim = PLW_FIRST + plw_fire[player.aim_posture];
+    player.key = 0;
+    player.shot = 1;
+    sound_play(weapon_bank, 0, 127, 64);
+    enemy_hit(player.x, player.y, player.z, player.dir, w->range, w->item, w->damage);
+}
+
+// aiming / firing per DS frame; returns 1 while the weapon is up
+static int update_aim(uint32_t held, uint32_t down)
+{
+    const Weapon *w = weapon_in_hand();
+    if (!w || (!(held & KEY_R) && !(player.state == ST_FIRE && player.key <= w->lower_key))) {
+        if (player.state == ST_AIM || player.state == ST_FIRE)
+            player.state = ST_IDLE;
+        return 0;
+    }
+    if (player.state != ST_AIM && player.state != ST_FIRE) {
+        player.state = ST_AIM;
+        player.aim_raised = 0;
+        player.set = &leon;
+        player.anim = PLW_FIRST + PLW_RAISE;
+        player.key = 0;
+        player.aim_target = enemy_aim_target(player.x, player.y, player.z, w->range ? w->range * 3 : 0,
+                                             &player.aim_x, &player.aim_z);
+    }
+    player.aim_posture = (held & KEY_UP) ? 1 : (held & KEY_DOWN) ? 2 : 0;
+    if (player.aim_target >= 0 && !player.aim_raised) {
+        int want = (int)(atan2f((float)-(player.aim_z - player.z), (float)(player.aim_x - player.x)) *
+                         32768.0f / (2.0f * 3.14159265f)) & 32767;
+        int diff = ((want - (player.dir & 32767) + 16384) & 32767) - 16384, step = TURN_PER_FRAME(0xD8);
+        player.dir += diff > step ? step : diff < -step ? -step : diff;
+    } else {
+        int turn = TURN_PER_FRAME(player.state == ST_FIRE ? 8 : 64);
+        if (held & KEY_RIGHT)
+            player.dir += turn;
+        if (held & KEY_LEFT)
+            player.dir -= turn;
+    }
+    if (player.state == ST_AIM && player.aim_raised)
+        player.anim = PLW_FIRST + plw_hold[player.aim_posture], player.key = 0;
+    (void)down;
+    if ((held & KEY_A) && (held & KEY_R) && player.state == ST_AIM && player.aim_raised)
+        fire();
+    return 1;
+}
+
+static void update_player_frame(uint32_t held, uint32_t down)
 {
     if (player.state >= ST_CLIMB)
         return; // special move in progress: no control
+    update_weapon_model();
+    if (update_aim(held, down))
+        return;
     PlayerState st = ST_IDLE;
     if (held & KEY_UP)
         st = (held & KEY_B) ? ST_RUN : ST_WALK;
     else if (held & KEY_DOWN)
         st = ST_BACK;
+    else if (held & (KEY_LEFT | KEY_RIGHT))
+        st = ST_TURN; // pl_move_04: walks on the spot while turning
     player.state = st;
 
-    int turn = TURN_PER_FRAME(st == ST_IDLE ? TURN_IDLE : st == ST_RUN ? TURN_RUN : TURN_WALK);
+    int h = health_level();
+    int turn = TURN_PER_FRAME(st == ST_RUN ? turn_run[h] : st == ST_BACK ? turn_back[h]
+                              : st == ST_WALK ? turn_walk[h] : turn_spot[h]);
     if (held & KEY_RIGHT)
         player.dir += turn;
     if (held & KEY_LEFT)
@@ -1202,6 +1429,16 @@ static void update_player_tick(void)
         special_move_tick();
         return;
     }
+    if (st == ST_AIM || st == ST_FIRE) {
+        const ModelAnim *wa = &leon.anims[player.anim];
+        if (player.key + 1 < wa->count)
+            player.key++;
+        else if (st == ST_AIM)
+            player.aim_raised = 1;
+        else
+            player.state = ST_AIM; // shot over: back to holding
+        return;
+    }
     const ModelAnim *a = &leon.anims[player.anim];
     int prev = player.key;
     if (st == ST_BACK)
@@ -1215,7 +1452,7 @@ static void update_player_tick(void)
     if (st != ST_IDLE && (entry & ANIM_FLAG_STEP))
         sound_play(room_bank, floor_sound() + (st == ST_RUN ? 1 : 0), 100, 64);
 
-    if (st != ST_IDLE) {
+    if (st != ST_IDLE && st != ST_TURN) {
         // root motion: cumulative distance along +X between the two keyframes
         int k0 = st == ST_BACK ? player.key : prev;
         int k1 = st == ST_BACK ? prev : player.key;
@@ -1265,7 +1502,7 @@ static void print_status(void)
         printf("A: runterspringen          \n");
     else
         printf("                          \n");
-    printf("\nD-Pad gehen/drehen, B rennen\nA benutzen, R+A Schloss oeffnen\nSELECT Raum-Menue\n");
+    printf("\nD-Pad gehen/drehen, B rennen\nA benutzen, L+A Schloss oeffnen\nSELECT Raum-Menue\n");
 }
 
 static void update_menu(uint32_t down)
@@ -1377,21 +1614,24 @@ int main(void)
             update_menu(down);
         if (!menu_open && !paused) {
             pending_keys |= down;
-            update_player_frame(keysHeld());
+            update_player_frame(keysHeld(), down);
             for (game_tick_acc += GAME_HZ; game_tick_acc >= DS_HZ && !message_text; game_tick_acc -= DS_HZ) {
                 update_player_tick();
                 EnemyTarget target = {
                     .x = player.x, .y = player.y, .z = player.z, .dir = player.dir,
-                    .noise = player.state == ST_RUN ? NOISE_RUN
-                             : player.state == ST_WALK || player.state == ST_BACK ? NOISE_WALK : 0,
+                    .noise = (player.shot ? NOISE_SHOT : 0) | (player.state == ST_RUN ? NOISE_RUN
+                             : player.state == ST_WALK || player.state == ST_BACK || player.state == ST_TURN
+                               ? NOISE_WALK : 0),
                     .pressed = (pending_keys & (KEY_UP | KEY_DOWN | KEY_LEFT | KEY_RIGHT | KEY_A |
                                                 KEY_B | KEY_X | KEY_Y | KEY_L | KEY_R)) != 0,
                     .can_grab = player.state < ST_CLIMB,
                     .dead = player.state == ST_DEAD,
                 };
                 enemy_tick(&target);
+                update_pose();
                 effect_tick();
-                if (player.state < ST_GRABBED)
+                player.shot = 0;
+                if (player.state < ST_GRABBED && player.state != ST_AIM && player.state != ST_FIRE)
                     check_aots(pending_keys);
                 if (!near_aot && !message_text)
                     try_special_move(pending_keys);

@@ -119,7 +119,7 @@ int cut_auto_enabled(void) { return cam_auto; }
 int inventory_has(int item)
 {
     for (int i = 0; i < INV_SLOTS; i++)
-        if (inventory[i].count && inventory[i].item == item)
+        if (inventory[i].item && inventory[i].item == item)
             return 1;
     return 0;
 }
@@ -131,14 +131,14 @@ int inventory_add(int item, int amount)
 {
     if (stacks(item))
         for (int i = 0; i < INV_SLOTS; i++)
-            if (inventory[i].count && inventory[i].item == item) {
+            if (inventory[i].item == item) {
                 inventory[i].count += amount;
                 return 1;
             }
     for (int i = 0; i < INV_SLOTS; i++)
-        if (!inventory[i].count) {
+        if (!inventory[i].item) {
             inventory[i].item = item;
-            inventory[i].count = amount ? amount : 1;
+            inventory[i].count = amount;
             return 1;
         }
     return 0; // full

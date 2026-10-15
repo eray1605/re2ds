@@ -128,10 +128,10 @@ static void draw_slot(int i)
     int c = focus && row == 0 && sel == i ? C_YELLOW : i == inventory_equipped ? C_GREEN : C_DARK;
     fill(x, y, 48, 36, C_BLACK);
     frame(x, y, 48, 36, c);
-    if (inventory[i].count) {
+    if (inventory[i].item) {
         icon(x + 4, y + 3, inventory[i].item);
         int item = inventory[i].item;
-        if (item >= 0x02 || inventory[i].count > 1) { // the knife has no count
+        if (item >= 0x02) { // the knife has no count
             char n[8];
             snprintf(n, sizeof(n), "%d", inventory[i].count);
             text(x + 46 - 8 * (int)strlen(n), y + 27, n, C_WHITE);
@@ -219,7 +219,7 @@ static void draw_weapon(void)
 {
     fill(200, 2, 52, 50, C_BLACK);
     frame(200, 2, 52, 40, C_GREY);
-    if (inventory_equipped >= 0 && inventory[inventory_equipped].count) {
+    if (inventory_equipped >= 0 && inventory[inventory_equipped].item) {
         int item = inventory[inventory_equipped].item;
         icon(206, 7, item);
         if (item != 0x01) {
@@ -369,7 +369,7 @@ int menu_has_focus(void) { return focus; }
 
 static void set_info(int slot)
 {
-    if (slot >= 0 && inventory[slot].count)
+    if (slot >= 0 && inventory[slot].item)
         snprintf(info, sizeof(info), "%s", item_name(inventory[slot].item));
     else
         info[0] = 0;
@@ -378,7 +378,7 @@ static void set_info(int slot)
 static void command(int k)
 {
     InvSlot *s = &inventory[sel];
-    if (!s->count)
+    if (!s->item)
         return;
     switch (k) {
     case CMD_EQUIP:

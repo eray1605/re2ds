@@ -23,6 +23,9 @@
 #define ST_GRAB 3               // grabs and bites (0x8010259c / 0x801025a4)
 #define ST_LYING 7              // lies until EF_HOLD goes, then gets up (0x801036b4)
 #define ST_EAT 8                // eats (variant 8, or Leon's body)
+#define ST_DOWN 5               // knocked down by shots, gets up again
+#define ST_DYING 20             // falls dead (death routine 0x80108470), then lies
+#define ST_DEAD 21
 
 // Enemy.flags = sce_em_set bytes 4..5 (obj+0x10e): spawn variant | status << 8.
 // Room scripts read and write it as member 7.
@@ -42,6 +45,13 @@
 #define P_GRAB_BACK 3           // from behind
 #define P_DIE_FRONT 0x0D
 #define P_DIE_BACK 0x0F
+
+#define A_FALL 0x01             // + 0 / 1: falls forward / backward (death, knockdown)
+
+// health (0x8010c494): (rand >> (rand & 3)) & 15 picks one, +15 early in the game
+static const uint8_t hp_table[16] = { 80, 94, 128, 75, 60, 95, 58, 75, 50, 83, 79, 66, 80, 65, 82, 65 };
+// stagger lost per hit, by weapon id (0x8010ca57); at 0 twice it falls over
+static const uint8_t stagger_hit[20] = { 0, 9, 15, 15, 35, 0, 0, 0, 0, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0, 0 };
 
 #define GRAB_DISTANCE 1200
 #define BITE_KEY 16             // keyframe of the bite (table 0x80100014)
@@ -123,6 +133,11 @@ typedef struct {
     int16_t timer, timer2;      // obj+0x158, obj+0x15a
     uint8_t voice, voice_ofs;   // voice kind (sce_em_set byte 7); + 16 for the second kind
     uint8_t moan_pause;
+    int16_t hp;                 // obj+0x156
+    int8_t stagger;             // obj+0x223
+    uint8_t stagger_out;        // reached 0 once (obj+0x222)
+    uint8_t flinch;             // frames of the hit recoil left
+    uint8_t fall_back;          // death / knockdown: falls backward
 } Enemy;
 
 // The grab: one zombie at a time (PS1 flag 0x80 in 0x800c79c7). Zombie and
@@ -354,6 +369,8 @@ void enemy_spawn(int slot, int type, int flags, int voice, int32_t x, int32_t y,
             voice_second = voice;
     }
     e->gait = gaits[(rnd() >> (rnd() & 3)) & 7];
+    e->hp = hp_table[(rnd() >> (rnd() & 3)) & 15] + 15;
+    e->stagger = (rnd() & 0xF) + 0x10;
     e->sight_timer = slot & 7;
 
     // start state by spawn variant (zombie init 0x80100674)
@@ -443,7 +460,7 @@ static int crowded(int i, int32_t x, int32_t z)
     const Enemy *e = &enemies[i];
     for (int j = 0; j < MAX_ENEMIES; j++) {
         const Enemy *o = &enemies[j];
-        if (j == i || !o->active)
+        if (j == i || !o->active || o->state >= ST_DYING)
             continue;
         int64_t ox = o->x - x, oz = o->z - z, cx = o->x - e->x, cz = o->z - e->z;
         int64_t now = ox * ox + oz * oz, before = cx * cx + cz * cz;
@@ -459,7 +476,7 @@ int enemy_blocks_player(int32_t from_x, int32_t from_z, int32_t x, int32_t z)
 {
     for (int i = 0; i < MAX_ENEMIES; i++) {
         const Enemy *e = &enemies[i];
-        if (!e->active)
+        if (!e->active || e->state >= ST_DYING || e->state == ST_DOWN)
             continue;
         int64_t nx = e->x - x, nz = e->z - z, ox = e->x - from_x, oz = e->z - from_z;
         int64_t now = nx * nx + nz * nz, before = ox * ox + oz * oz;
@@ -878,6 +895,8 @@ static void lying(Enemy *e)
     }
 }
 
+static void fallen(Enemy *e, int i);
+
 void enemy_tick(const EnemyTarget *p)
 {
     for (int i = 0; i < MAX_ENEMIES; i++) {
@@ -892,7 +911,16 @@ void enemy_tick(const EnemyTarget *p)
             e->sight_timer = 7;
             e->sees = !game_sight_blocked(e->x, e->y + EYE_ENEMY, e->z, p->x, p->y + EYE_PLAYER, p->z);
         }
+        if (e->state == ST_DEAD)
+            continue;
+        if (e->flinch) { // hit recoil: holds still a moment
+            e->flinch--;
+            anim_step(e, NULL);
+            continue;
+        }
         switch (e->state) {
+        case ST_DYING:
+        case ST_DOWN: fallen(e, i); break;
         case ST_LURK: lurk(e, i, p->x, p->z, d, p->noise); break;
         case ST_CHASE: chase(e, i, p, d); break;
         case ST_LUNGE: lunge(e, i, p, d); break;
@@ -906,6 +934,137 @@ void enemy_tick(const EnemyTarget *p)
 }
 
 int enemy_grabbing(void) { return grab.enemy >= 0; }
+
+static int alive(const Enemy *e) { return e->active && e->state < ST_DYING; }
+
+// Nearest living enemy Leon can see within range (0 = any), for the
+// auto-aim when he raises a weapon (FUN_8003ed74). -1 if none.
+int enemy_aim_target(int32_t x, int32_t y, int32_t z, int range, int32_t *tx, int32_t *tz)
+{
+    int best = -1;
+    int64_t best_d = 0;
+    for (int i = 0; i < MAX_ENEMIES; i++) {
+        const Enemy *e = &enemies[i];
+        if (!alive(e))
+            continue;
+        int64_t dx = e->x - x, dz = e->z - z, d = dx * dx + dz * dz;
+        if (range && d > (int64_t)range * range)
+            continue;
+        if (game_sight_blocked(x, y + EYE_PLAYER, z, e->x, e->y + EYE_ENEMY, e->z))
+            continue;
+        if (best < 0 || d < best_d) {
+            best = i;
+            best_d = d;
+        }
+    }
+    if (best >= 0) {
+        *tx = enemies[best].x;
+        *tz = enemies[best].z;
+    }
+    return best;
+}
+
+static void fall(Enemy *e, int dying)
+{
+    e->fall_back = rnd() & 1;
+    e->state = dying ? ST_DYING : ST_DOWN;
+    e->sub = 1;
+    e->standing = 0;
+    e->flinch = 0;
+    e->timer = rnd() / 2 + 60; // knocked down: lies this long
+    set_anim(e, SET_MAIN, A_FALL + e->fall_back, 0);
+    if (grab.enemy == (int)(e - enemies))
+        grab.enemy = -1;
+}
+
+// A shot or stab: the nearest living enemy within +-22.5 degrees of dir that
+// Leon can see, within range (0 = any). damage[3] by distance (near < 3000,
+// < 6000, farther; table 0x8009c470). Returns the enemy hit or -1.
+int enemy_hit(int32_t x, int32_t y, int32_t z, int16_t dir, int range, int weapon, const uint8_t damage[3])
+{
+    int best = -1;
+    int64_t best_d = 0;
+    for (int i = 0; i < MAX_ENEMIES; i++) {
+        const Enemy *e = &enemies[i];
+        if (!alive(e))
+            continue;
+        int64_t dx = e->x - x, dz = e->z - z, d = dx * dx + dz * dz;
+        if (range && d > (int64_t)range * range)
+            continue;
+        int a = (int)(atan2f((float)-dz, (float)dx) * 32768.0f / (2.0f * 3.14159265f)) & 32767;
+        int diff = ((a - dir + 16384) & 32767) - 16384;
+        if (abs(diff) > 0x100 * 8)
+            continue;
+        if (game_sight_blocked(x, y + EYE_PLAYER, z, e->x, e->y + EYE_ENEMY, e->z))
+            continue;
+        if (best < 0 || d < best_d) {
+            best = i;
+            best_d = d;
+        }
+    }
+    if (best < 0)
+        return -1;
+    Enemy *e = &enemies[best];
+    float dist = sqrtf((float)best_d);
+    e->hp -= damage[dist < 3000 ? 0 : dist < 6000 ? 1 : 2];
+    game_blood(0, e->x, e->y - 2300, e->z, dir, 20, e->y);
+    if (e->hp < 0) { // dies (0x80108470)
+        fall(e, 1);
+        sound_at(e, (rnd() & 1) ? SND_MOAN + 3 : SND_MOAN + 1);
+        return best;
+    }
+    if (e->state == ST_LYING || e->state == ST_DOWN || e->state == ST_GRAB)
+        return best;
+    // the hit (0x80105378): a short recoil, a groan; twice out of stagger: falls
+    e->flinch = 6;
+    if (!e->moan_pause) {
+        sound_at(e, (rnd() & 1) ? SND_MOAN + 1 : SND_MOAN + 2);
+        e->moan_pause = MOAN_PAUSE;
+    }
+    if (weapon > 0 && weapon < 20)
+        e->stagger -= stagger_hit[weapon];
+    if (e->stagger <= 0) {
+        if (e->stagger_out || weapon == 1) {
+            fall(e, 0);
+            e->stagger_out = 0;
+        } else {
+            e->stagger_out = 1;
+        }
+        e->stagger = (rnd() & 0xF) + 0x10;
+    }
+    if (e->state == ST_LURK)
+        enter_state(e, ST_CHASE); // shot at: comes for Leon
+    return best;
+}
+
+// falling (dead or knocked down), lying, getting up
+static void fallen(Enemy *e, int i)
+{
+    int32_t fwd;
+    if (e->sub == 1) { // falls with the animation's motion
+        int done = anim_step(e, &fwd);
+        walk(e, i, fwd);
+        if (done) {
+            if (e->state == ST_DYING) {
+                e->state = ST_DEAD;
+                return;
+            }
+            e->sub = 2;
+        }
+        return;
+    }
+    if (e->state != ST_DOWN)
+        return;
+    if (e->sub == 2) {
+        if (e->timer-- > 0)
+            return;
+        set_anim(e, SET_MAIN, e->fall_back ? A_GET_UP + 1 : A_GET_UP, 0);
+        e->sub = 3;
+        moan(e, SND_MOAN + 2);
+    } else if (anim_step(e, NULL)) {
+        enter_state(e, ST_CHASE);
+    }
+}
 
 static void draw_bone(const EnemyType *t, int bone, int frame)
 {
@@ -984,6 +1143,8 @@ void enemy_draw(int reserve_vertices, int reserve_polygons)
         glPushMatrix();
         glTranslatef32(e->x, e->y, e->z);
         glRotateYi(e->dir);
+        if (e->flinch) // the shot pushes the upper body back
+            glRotateZi(-e->flinch * 220);
         for (int b = 0; b < t->model.header->num_bones; b++)
             if (t->model.bones[b].parent < 0)
                 draw_bone(t, b, frame);

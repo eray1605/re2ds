@@ -51,6 +51,17 @@ python3 -I tools/enemse2ds.py "$DISC/SLES_009.72" "$DISC/COMMON/SOUND/ENEMSE.VBS
 python3 -I tools/vab2ds.py "$DISC/COMMON/SOUND/CORE00.EDH" build/ds/sound/core00.bin \
     --vb "$DISC/COMMON/SOUND/CORE00.VB" > /dev/null
 
+# weapon sounds (PS1 bank 1): sound/armsNN.bin per weapon id
+for f in "$DISC"/COMMON/SOUND/ARMS*.EDH; do
+    n=$(basename "$f" .EDH | tr 'A-Z' 'a-z')
+    python3 -I tools/vab2ds.py "$f" "build/ds/sound/$n.bin" --vb "${f%.EDH}.VB" > /dev/null
+done
+# Leon with each weapon: model/leon_wNN.bin
+for f in "$DISC"/PL0/PLD/PL00W*.PLW; do
+    n=$(basename "$f" .PLW | sed 's/PL00W/leon_w/' | tr 'A-Z' 'a-z')
+    python3 -I tools/plw2ds.py "$DISC/PL0/PLD/PL00.PLD" "$f" build/leon/w "build/ds/model/$n" > /dev/null
+done
+
 # music: MAINxx.BGM sequences and the room -> music table
 mkdir -p build/ds/music
 for f in "$DISC"/COMMON/SOUND/MAIN*.BGM; do

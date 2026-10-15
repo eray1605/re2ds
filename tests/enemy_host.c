@@ -1,5 +1,6 @@
 // Host test: room scripts + enemy.c with the real model files.
 // Build: cc -Itests/stubs -Isource tests/enemy_host.c source/script.c source/enemy.c -o build/enemy_host
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -63,6 +64,16 @@ int main(int argc, char **argv)
                           .z = host_held ? host_pz : 0, .can_grab = !host_held && !host_dead,
                           .pressed = getenv("MASH") && (t & 1), .dead = host_dead };
         enemy_tick(&p);
+        if (getenv("SHOOT") && t % 15 == 0 && !host_held) { // Leon shoots the nearest zombie
+            int32_t tx, tz;
+            int target = enemy_aim_target(p.x, 0, p.z, 0, &tx, &tz);
+            if (target >= 0) {
+                int16_t dir = (int16_t)((int)(atan2f((float)-(tz - p.z), (float)(tx - p.x)) * 32768.0f / 6.2831853f) & 32767);
+                static const uint8_t dmg[3] = { 16, 15, 14 };
+                int hit = enemy_hit(p.x, 0, p.z, dir, 0, 2, dmg);
+                printf("t%d shot -> %d\n", t, hit);
+            }
+        }
         if (enemy_spawn_calls != before) printf("tick %d: %d spawn calls total, %d active\n", t, enemy_spawn_calls, enemy_count());
         if (getenv("TRACE")) enemy_debug_print(t);
     }
