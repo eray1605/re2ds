@@ -28,3 +28,5 @@ static inline void glRotateZi(int a) { (void)a; }
 static inline void glCallList(const u32 *l) { (void)l; }
 static inline void glFlush(int m) { (void)m; }
 void setBrightness(int screen, int level);
+static inline int cosLerp(int a) { return (int)(4096 * __builtin_cos(a * 6.283185307 / 32768)); }
+static inline int sinLerp(int a) { return (int)(4096 * __builtin_sin(a * 6.283185307 / 32768)); }

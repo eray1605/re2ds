@@ -16,6 +16,11 @@
 #define TURN_FAR 8              // otherwise (pl. 0x801019d0)
 #define GAIT_COUNT 8            // set 0: one of 8 gaits, chosen at random
 
+// The DS geometry engine takes at most 6144 vertices (and 2048 polygons) per
+// frame and silently drops the rest, so enemies would flicker. Enemies are
+// drawn nearest first while they fit; Leon and the masks are counted first.
+#define VERTEX_LIMIT 6144
+
 // collision with the room, shared with the player (main.c)
 int game_blocked(int32_t from_x, int32_t from_z, int32_t x, int32_t z, int32_t y);
 
@@ -26,6 +31,7 @@ typedef struct {
     int tex[MAX_PAGES];
     int pages;
     int drawable;               // textures uploaded
+    int vertices;               // vertices one instance sends to the GPU
     int8_t first_child[64], next_sibling[64];
 } EnemyType;
 
@@ -39,6 +45,11 @@ typedef struct {
 
 static EnemyType types[MAX_TYPES];
 static Enemy enemies[MAX_ENEMIES];
+
+// diagnostics for the debug screen
+int enemy_spawn_calls;
+int enemy_last_error;   // 0 ok, 1 model file, 2 model format, 3 no type slot, 4 no anims,
+                        // 5 bad slot, 6 texture file, 7 texture memory
 
 static void free_type(EnemyType *t)
 {
@@ -59,6 +70,31 @@ void enemy_room_reset(void)
     memset(enemies, 0, sizeof(enemies));
 }
 
+// Vertices in all display lists of a model (packed GX: count VTX_16 commands).
+int model_vertex_count(const Model *m)
+{
+    int total = 0, lists = m->header->num_bones * m->header->num_pages;
+    for (int i = 0; i < lists; i++) {
+        if (!m->lists[i])
+            continue;
+        const uint32_t *w = (const uint32_t *)((const uint8_t *)m->data + m->lists[i]);
+        uint32_t n = *w++, k = 0;
+        while (k < n) {
+            uint32_t ids = w[k++];
+            for (int c = 0; c < 4; c++) {
+                int cmd = (ids >> (8 * c)) & 0xFF;
+                if (cmd == 0x23) {
+                    total++;
+                    k += 2;
+                } else if (cmd == 0x20 || cmd == 0x22 || cmd == 0x40) {
+                    k += 1;
+                }
+            }
+        }
+    }
+    return total;
+}
+
 static int load_type(int type)
 {
     for (int i = 0; i < MAX_TYPES; i++)
@@ -68,12 +104,15 @@ static int load_type(int type)
     for (int i = 0; i < MAX_TYPES && slot < 0; i++)
         if (!types[i].type)
             slot = i;
-    if (slot < 0)
+    if (slot < 0) {
+        enemy_last_error = 3;
         return -1;
+    }
     EnemyType *t = &types[slot];
     char path[48];
     snprintf(path, sizeof(path), "nitro:/model/em%02x.bin", type);
     if (!model_load(&t->model, path)) {
+        enemy_last_error = t->model.data ? 2 : 1;
         if (t->model.data)
             asset_free(t->model.data);
         t->model.data = NULL;
@@ -92,6 +131,8 @@ static int load_type(int type)
         }
     }
 
+    t->vertices = model_vertex_count(&t->model);
+
     uint32_t size;
     snprintf(path, sizeof(path), "nitro:/model/em%02x_tex.bin", type);
     t->tex_data = asset_load(path, &size);
@@ -104,19 +145,28 @@ static int load_type(int type)
             const uint8_t *page = t->tex_data + p * page_size;
             glBindTexture(0, t->tex[p]);
             if (!glTexImage2D(0, 0, GL_RGB256, TEXTURE_SIZE_128, TEXTURE_SIZE_256, 0, TEXGEN_TEXCOORD,
-                              page + 512))
+                              page + 512)) {
                 t->drawable = 0; // texture memory full
+                enemy_last_error = 7;
+            }
             glColorTableEXT(0, 0, 256, 0, 0, (const uint16_t *)page);
         }
+    } else {
+        enemy_last_error = 6;
     }
+    free(t->tex_data); // uploaded: VRAM holds the texture now
+    t->tex_data = NULL;
     return slot;
 }
 
 void enemy_spawn(int slot, int type, int variant, int32_t x, int32_t y, int32_t z, int16_t dir_re2)
 {
     (void)variant;
-    if (slot < 0 || slot >= MAX_ENEMIES)
+    enemy_spawn_calls++;
+    if (slot < 0 || slot >= MAX_ENEMIES) {
+        enemy_last_error = 5;
         return;
+    }
     int t = load_type(type);
     if (t < 0)
         return;
@@ -131,6 +181,7 @@ void enemy_spawn(int slot, int type, int variant, int32_t x, int32_t y, int32_t 
     int anims = types[t].model.header->num_anims;
     if (anims == 0) {
         e->active = 0;
+        enemy_last_error = 4;
         return;
     }
     e->anim = anims >= GAIT_COUNT ? rand() % GAIT_COUNT : 0;
@@ -144,6 +195,22 @@ int enemy_count(void)
     for (int i = 0; i < MAX_ENEMIES; i++)
         n += enemies[i].active;
     return n;
+}
+
+// Would moving enemy i to (x, z) push it deeper into another enemy?
+static int crowded(int i, int32_t x, int32_t z)
+{
+    const Enemy *e = &enemies[i];
+    for (int j = 0; j < MAX_ENEMIES; j++) {
+        const Enemy *o = &enemies[j];
+        if (j == i || !o->active)
+            continue;
+        int64_t ox = o->x - x, oz = o->z - z, cx = o->x - e->x, cz = o->z - e->z;
+        int64_t now = ox * ox + oz * oz, before = cx * cx + cz * cz;
+        if (now < (int64_t)(4 * ENEMY_RADIUS * ENEMY_RADIUS) && now < before)
+            return 1;
+    }
+    return 0;
 }
 
 static int32_t frame_speed(const Model *m, const ModelAnim *a, int key)
@@ -188,9 +255,9 @@ void enemy_tick(int32_t player_x, int32_t player_z)
             step_len = 0; // close enough: no attacks yet, just stand
         int32_t mx = (step_len * cosLerp(e->dir)) >> 12;
         int32_t mz = -((step_len * sinLerp(e->dir)) >> 12);
-        if (!game_blocked(e->x, e->z, e->x + mx, e->z, e->y))
+        if (!game_blocked(e->x, e->z, e->x + mx, e->z, e->y) && !crowded(i, e->x + mx, e->z))
             e->x += mx;
-        if (!game_blocked(e->x, e->z, e->x, e->z + mz, e->y))
+        if (!game_blocked(e->x, e->z, e->x, e->z + mz, e->y) && !crowded(i, e->x, e->z + mz))
             e->z += mz;
     }
 }
@@ -221,18 +288,39 @@ static void draw_bone(const EnemyType *t, int bone, int frame)
     glPopMatrix(1);
 }
 
-void enemy_draw(void)
+// Is the point roughly inside the current view? (camera from main.c)
+int camera_sees(int32_t x, int32_t y, int32_t z, int32_t margin);
+
+void enemy_draw(int vertices_used)
 {
+    // nearest first: simple selection on the distance to the camera
+    int order[MAX_ENEMIES], n = 0;
+    int32_t dist[MAX_ENEMIES];
     for (int i = 0; i < MAX_ENEMIES; i++) {
         const Enemy *e = &enemies[i];
-        if (!e->active || !types[e->type].drawable)
+        if (!e->active || !types[e->type].drawable || !types[e->type].model.anims[e->anim].count)
             continue;
+        int32_t d = camera_sees(e->x, e->y - 900, e->z, 1200);
+        if (d < 0)
+            continue; // off screen
+        int j = n++;
+        while (j > 0 && dist[j - 1] > d) {
+            order[j] = order[j - 1];
+            dist[j] = dist[j - 1];
+            j--;
+        }
+        order[j] = i;
+        dist[j] = d;
+    }
+    for (int k = 0; k < n; k++) {
+        const Enemy *e = &enemies[order[k]];
         const EnemyType *t = &types[e->type];
+        if (vertices_used + t->vertices > VERTEX_LIMIT)
+            break;
+        vertices_used += t->vertices;
         const ModelAnim *a = &t->model.anims[e->anim];
-        if (!a->count)
-            continue;
         int frame = ANIM_FRAME(t->model.anim_pool[a->first + e->key]);
-        glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(3 + i));
+        glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(3 + order[k]));
         glPushMatrix();
         glTranslatef32(e->x, e->y, e->z);
         glRotateYi(e->dir);
@@ -242,3 +330,16 @@ void enemy_draw(void)
         glPopMatrix(1);
     }
 }
+
+#ifndef ARM9
+// host tests: positions and step per tick
+void enemy_debug_print(int tick)
+{
+    for (int i = 0; i < MAX_ENEMIES; i++) {
+        const Enemy *e = &enemies[i];
+        if (e->active)
+            printf("t%d e%d anim %d key %d pos %d %d dir %d verts %d\n", tick, i, e->anim, e->key,
+                   (int)e->x, (int)e->z, e->dir, types[e->type].vertices);
+    }
+}
+#endif

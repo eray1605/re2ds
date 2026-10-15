@@ -67,7 +67,8 @@ static Room room;
 static int cur_stage, cur_room;
 static char bg_prefix[16];    // e.g. "room10a"
 static Model leon;
-static Model rbj;                   // the room's special-move animations (may be absent)
+static Model rbj;
+static int leon_vertices;           // per frame, for the vertex budget (enemy.c)                   // the room's special-move animations (may be absent)
 static Masks masks;
 static int have_masks;
 static int leon_tex[3];
@@ -287,6 +288,41 @@ void setup_camera(const int32_t from[3], const int32_t to[3], int screen)
     MATRIX_MULT4x3 = (int32_t)-(eye[0] * f[0] + eye[1] * f[1] + eye[2] * f[2]);
 }
 
+// Distance along the view direction if (x, y, z) is within the current
+// camera's view (with a margin in world units), else -1. Used to skip
+// enemies that are off screen.
+int camera_sees(int32_t x, int32_t y, int32_t z, int32_t margin)
+{
+    const RoomCamera *c = &room.cameras[cur_cam];
+    float f[3], r[3], d[3], len, v[3];
+    for (int k = 0; k < 3; k++)
+        f[k] = (float)(c->to[k] - c->from[k]);
+    len = sqrtf(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
+    for (int k = 0; k < 3; k++)
+        f[k] /= len;
+    r[0] = f[2];  // right = forward x (0, -1, 0)
+    r[1] = 0.0f;
+    r[2] = -f[0];
+    len = sqrtf(r[0] * r[0] + r[2] * r[2]);
+    r[0] /= len;
+    r[2] /= len;
+    d[0] = f[1] * r[2] - f[2] * r[1];
+    d[1] = f[2] * r[0] - f[0] * r[2];
+    d[2] = f[0] * r[1] - f[1] * r[0];
+    v[0] = (float)(x - c->from[0]);
+    v[1] = (float)(y - c->from[1]);
+    v[2] = (float)(z - c->from[2]);
+    float depth = v[0] * f[0] + v[1] * f[1] + v[2] * f[2];
+    if (depth < 100.0f)
+        return -1;
+    float sx = (v[0] * r[0] + v[1] * r[1] + v[2] * r[2]) * c->screen / depth;
+    float sy = (v[0] * d[0] + v[1] * d[1] + v[2] * d[2]) * c->screen / depth;
+    float m = (float)margin * c->screen / depth;
+    if (sx < -160 - m || sx > 160 + m || sy < -120 - m || sy > 120 + m)
+        return -1;
+    return (int32_t)depth;
+}
+
 static void setup_projection(const RoomCamera *c)
 {
     setup_camera(c->from, c->to, c->screen);
@@ -366,7 +402,7 @@ static void render_frame(void)
     glColor3b(255, 255, 255);
     glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(1));
     draw_player();
-    enemy_draw();
+    enemy_draw(leon_vertices + (have_masks ? 4 * masks.header->num_quads : 0));
     glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(2));
     draw_masks();
     glFlush(0);
@@ -987,7 +1023,7 @@ static void print_status(void)
     printf("pos %6ld %6ld %6ld  \n", (long)player.x, (long)player.y, (long)player.z);
     printf("dir %5d floor %d slope %3d  \n", player.dir & 0x7FFF, player_floor(), player.slope);
     printf("skript: %d threads, %d unbek.  \n", script_threads_running, script_unknown_ops);
-    printf("gegner: %d   \n", enemy_count());
+    printf("gegner: %d  aufrufe %d  fehler %d  \n", enemy_count(), enemy_spawn_calls, enemy_last_error);
     if (near_aot && near_aot->type == SCE_DOOR)
         printf("A: Tuer -> %X%02X            \n", near_aot->data[8] + 1, near_aot->data[9]);
     else if (near_aot)
@@ -1079,6 +1115,7 @@ int main(void)
         fatal("model/leon.bin missing");
     build_hierarchy();
     upload_leon_textures();
+    leon_vertices = model_vertex_count(&leon);
     load_room_index();
 
     setBrightness(1, -16);
