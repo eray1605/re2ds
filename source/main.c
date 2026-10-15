@@ -67,8 +67,7 @@ static Room room;
 static int cur_stage, cur_room;
 static char bg_prefix[16];    // e.g. "room10a"
 static Model leon;
-static Model rbj;
-static int leon_vertices, leon_polygons; // per frame, for the GX budget (enemy.c)                   // the room's special-move animations (may be absent)
+static Model rbj;                   // the room's special-move animations (may be absent)
 static Masks masks;
 static int have_masks;
 static int leon_tex[3];
@@ -401,17 +400,61 @@ static void draw_masks(void)
     glPopMatrix(1);
 }
 
+// RE2 models wind their faces so that (v1 - v0) x (v2 - v0) points into the
+// model (95-98 % of the faces of Leon and the zombies; the rest are concave
+// spots where that test is unreliable), and the PS1 skips faces turned away
+// from the camera. The DS does the same with POLY_CULL_*, and culled polygons
+// take no vertex or polygon RAM, so every model costs about half. Which mode
+// keeps the faces turned toward the camera depends on the view setup, so a
+// test triangle that faces the camera like a visible model face tells: the
+// polygon RAM counter shows whether the hardware stored it.
+int cull_models = POLY_CULL_NONE;   // used for Leon and the enemies
+static int gx_vertices_last, gx_polygons_last; // whole frame, for the status line
+
+static int stores_test_triangle(int mode)
+{
+    static const int32_t from[3] = { 0, -1000, -5000 }, to[3] = { 0, -1000, 0 };
+    setup_camera(from, to, 290);
+    while (GFX_BUSY)
+        ;
+    int before = GFX_POLYGON_RAM_USAGE;
+    glPolyFmt(POLY_ALPHA(31) | mode);
+    glBegin(GL_TRIANGLES);
+    glVertex3v16(0, -1000, 0);
+    glVertex3v16(0, -1100, 0);
+    glVertex3v16(100, -1000, 0);
+    glEnd();
+    while (GFX_BUSY)
+        ;
+    return GFX_POLYGON_RAM_USAGE > before;
+}
+
+static void calibrate_culling(void)
+{
+    setBrightness(1, -16); // the test frame stays dark; the game fades in later
+    int back = stores_test_triangle(POLY_CULL_BACK);
+    int front = stores_test_triangle(POLY_CULL_FRONT);
+    if (back != front)
+        cull_models = back ? POLY_CULL_BACK : POLY_CULL_FRONT;
+    // else: counters unusable, keep drawing both sides
+    glFlush(0);
+    swiWaitForVBlank();
+}
+
 static void render_frame(void)
 {
     setup_projection(&room.cameras[cur_cam]);
     // Textures are modulated with the vertex colour: keep it white.
     glColor3b(255, 255, 255);
-    glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(1));
+    glPolyFmt(POLY_ALPHA(31) | cull_models | POLY_ID(1));
     draw_player();
-    enemy_draw(leon_vertices + (have_masks ? 4 * masks.header->num_quads : 0),
-               leon_polygons + (have_masks ? masks.header->num_quads : 0));
+    enemy_draw(have_masks ? 4 * masks.header->num_quads : 0, have_masks ? masks.header->num_quads : 0);
     glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(2));
     draw_masks();
+    while (GFX_BUSY)
+        ;
+    gx_vertices_last = GFX_VERTEX_RAM_USAGE;
+    gx_polygons_last = GFX_POLYGON_RAM_USAGE;
     glFlush(0);
 }
 
@@ -814,9 +857,11 @@ static void move_forward(int32_t dist)
 {
     int32_t dx = (dist * cosLerp(player.dir)) >> 12;
     int32_t dz = -((dist * sinLerp(player.dir)) >> 12);
-    if (!blocked(player.x, player.z, player.x + dx, player.z))
+    if (!blocked(player.x, player.z, player.x + dx, player.z) &&
+        !enemy_blocks_player(player.x, player.z, player.x + dx, player.z))
         player.x += dx;
-    if (!blocked(player.x, player.z, player.x, player.z + dz))
+    if (!blocked(player.x, player.z, player.x, player.z + dz) &&
+        !enemy_blocks_player(player.x, player.z, player.x, player.z + dz))
         player.z += dz;
     update_height();
 }
@@ -1031,6 +1076,10 @@ static void print_status(void)
     printf("dir %5d floor %d slope %3d  \n", player.dir & 0x7FFF, player_floor(), player.slope);
     printf("skript: %d threads, %d unbek.  \n", script_threads_running, script_unknown_ops);
     printf("gegner: %d  aufrufe %d  fehler %d  \n", enemy_count(), enemy_spawn_calls, enemy_last_error);
+    printf("cull %s gx %4d/%4d   \n",
+           cull_models == POLY_CULL_BACK ? "back " : cull_models == POLY_CULL_FRONT ? "front" : "aus  ",
+           gx_vertices_last, gx_polygons_last);
+    printf("spr %d max %d tog %d   \n", enemy_jumps, enemy_jump_max, enemy_toggles);
     if (near_aot && near_aot->type == SCE_DOOR)
         printf("A: Tuer -> %X%02X            \n", near_aot->data[8] + 1, near_aot->data[9]);
     else if (near_aot)
@@ -1122,7 +1171,7 @@ int main(void)
         fatal("model/leon.bin missing");
     build_hierarchy();
     upload_leon_textures();
-    model_gx_cost(&leon, &leon_vertices, &leon_polygons);
+    calibrate_culling();
     load_room_index();
 
     setBrightness(1, -16);

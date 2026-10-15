@@ -22,6 +22,7 @@ static FILE *host_fopen(const char *path, const char *mode)
 #undef fopen
 int game_blocked(int32_t a, int32_t b, int32_t c, int32_t d, int32_t y) { (void)a; (void)b; (void)c; (void)d; (void)y; return 0; }
 int camera_sees(int32_t x, int32_t y, int32_t z, int32_t m) { (void)x; (void)y; (void)z; (void)m; return 1; }
+int cull_models = 0; // POLY_CULL_NONE in the stubs
 void game_show_message(const char *t) { (void)t; }
 int game_message_open(void) { return 0; }
 void game_cut_change(int c) { (void)c; }
@@ -31,7 +32,7 @@ void game_set_box_flag(int b, int f) { (void)b; (void)f; }
 void game_play_sound(int bank, int sound) { (void)bank; (void)sound; }
 void game_spawn_enemy(int s, int t, int v, int x, int y, int z, int d)
 {
-    printf("  spawn slot %d type %02x\n", s, t);
+    printf("  spawn slot %d type %02x variant %d at %d %d %d dir %d\n", s, t, v, x, y, z, d);
     enemy_spawn(s, t, v, x, y, z, d);
 }
 int main(int argc, char **argv)

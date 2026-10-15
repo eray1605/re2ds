@@ -11,6 +11,7 @@
 #define MAX_TYPES 4             // models loaded at the same time (texture memory)
 #define MAX_PAGES 4
 #define ENEMY_RADIUS 400
+#define CONTACT_DISTANCE 800    // ENEMY_RADIUS + the player's radius (main.c)
 #define CHASE_DISTANCE 20000    // farther away: stand still
 #define TURN_NEAR 16            // RE2 units per game tick when d < 3000
 #define TURN_FAR 8              // otherwise (pl. 0x801019d0)
@@ -19,7 +20,9 @@
 // The DS geometry engine takes at most 6144 vertices (and 2048 polygons) per
 // frame and silently drops the rest, so enemies would flicker. Enemies are
 // drawn nearest first while they fit; Leon and the masks are counted first.
-// Clipping at the screen edges adds vertices, so keep some headroom.
+// Each enemy is planned with what it cost when last drawn (measured with the
+// GX RAM counters; it changes a little as the enemy turns or nears the screen
+// edge, so keep some headroom).
 #define VERTEX_LIMIT 5900
 #define POLYGON_LIMIT 1980
 #define KEEP_BONUS 1500         // drawn last frame: counts as this much nearer
@@ -41,6 +44,8 @@ typedef struct {
 typedef struct {
     uint8_t active;
     uint8_t drawn;              // drawn last frame (keeps the choice stable)
+    int16_t cost_v, cost_p;     // GX vertices / polygons it took when last drawn
+    uint8_t was_visible, was_drawn; // diagnostics
     int8_t type;                // index into types[]
     int32_t x, y, z;
     int16_t dir;                // DS units
@@ -51,6 +56,7 @@ static EnemyType types[MAX_TYPES];
 static Enemy enemies[MAX_ENEMIES];
 
 // diagnostics for the debug screen
+int enemy_jumps, enemy_jump_max, enemy_toggles; // moves > 200 per tick, largest, draw on/off while visible
 int enemy_spawn_calls;
 int enemy_last_error;   // 0 ok, 1 model file, 2 model format, 3 no type slot, 4 no anims,
                         // 5 bad slot, 6 texture file, 7 texture memory
@@ -224,6 +230,22 @@ static int crowded(int i, int32_t x, int32_t z)
     return 0;
 }
 
+// Would the player's step from (from_x, from_z) to (x, z) push him deeper
+// into an enemy? Same rule as for walls: moving away is always allowed.
+int enemy_blocks_player(int32_t from_x, int32_t from_z, int32_t x, int32_t z)
+{
+    for (int i = 0; i < MAX_ENEMIES; i++) {
+        const Enemy *e = &enemies[i];
+        if (!e->active)
+            continue;
+        int64_t nx = e->x - x, nz = e->z - z, ox = e->x - from_x, oz = e->z - from_z;
+        int64_t now = nx * nx + nz * nz, before = ox * ox + oz * oz;
+        if (now < (int64_t)CONTACT_DISTANCE * CONTACT_DISTANCE && now < before)
+            return 1;
+    }
+    return 0;
+}
+
 static int32_t frame_speed(const Model *m, const ModelAnim *a, int key)
 {
     return model_frame(m, ANIM_FRAME(m->anim_pool[a->first + key]))->speed[0];
@@ -239,6 +261,7 @@ void enemy_tick(int32_t player_x, int32_t player_z)
         const ModelAnim *a = &m->anims[e->anim];
         if (!a->count)
             continue;
+        int32_t start_x = e->x, start_z = e->z;
         int32_t dx = player_x - e->x, dz = player_z - e->z;
         float d = sqrtf((float)dx * dx + (float)dz * dz);
         if (d > CHASE_DISTANCE)
@@ -257,21 +280,26 @@ void enemy_tick(int32_t player_x, int32_t player_z)
             e->dir = want;
         e->dir &= 32767;
 
-        // next keyframe and its root motion
+        // next keyframe and its root motion: speed x is the distance walked
+        // since the first keyframe, so a step is the difference to the
+        // previous key (from 0 when the animation starts over). Gaits 4-7
+        // step back a little in places, so the difference may be negative.
         int prev = e->key;
         e->key = (e->key + 1) % a->count;
-        int32_t s0 = e->key == 0 ? 0 : frame_speed(m, a, prev);
-        int32_t step_len = frame_speed(m, a, e->key) - s0;
-        if (step_len < 0)
-            step_len = frame_speed(m, a, e->key);
-        if (d < 700)
-            step_len = 0; // close enough: no attacks yet, just stand
+        int32_t step_len = frame_speed(m, a, e->key) - (e->key == 0 ? 0 : frame_speed(m, a, prev));
+        if (d < CONTACT_DISTANCE)
+            step_len = 0; // touching Leon: no attacks yet, just stand
         int32_t mx = (step_len * cosLerp(e->dir)) >> 12;
         int32_t mz = -((step_len * sinLerp(e->dir)) >> 12);
         if (!game_blocked(e->x, e->z, e->x + mx, e->z, e->y) && !crowded(i, e->x + mx, e->z))
             e->x += mx;
         if (!game_blocked(e->x, e->z, e->x, e->z + mz, e->y) && !crowded(i, e->x, e->z + mz))
             e->z += mz;
+        int32_t moved = (int32_t)sqrtf((float)(e->x - start_x) * (e->x - start_x) + (float)(e->z - start_z) * (e->z - start_z));
+        if (moved > 200)
+            enemy_jumps++;
+        if (moved > enemy_jump_max)
+            enemy_jump_max = moved;
     }
 }
 
@@ -303,8 +331,9 @@ static void draw_bone(const EnemyType *t, int bone, int frame)
 
 // Is the point roughly inside the current view? (camera from main.c)
 int camera_sees(int32_t x, int32_t y, int32_t z, int32_t margin);
+extern int cull_models;  // main.c: POLY_CULL_* that drops faces turned away
 
-void enemy_draw(int vertices_used, int polygons_used)
+void enemy_draw(int reserve_vertices, int reserve_polygons)
 {
     // nearest first: simple selection on the distance to the camera
     int order[MAX_ENEMIES], n = 0;
@@ -316,6 +345,7 @@ void enemy_draw(int vertices_used, int polygons_used)
         int32_t d = camera_sees(e->x, e->y - 900, e->z, 1200);
         if (d < 0) {
             enemies[i].drawn = 0;
+            enemies[i].was_visible = 0;
             continue; // off screen
         }
         if (e->drawn)
@@ -333,14 +363,20 @@ void enemy_draw(int vertices_used, int polygons_used)
         Enemy *e = &enemies[order[k]];
         const EnemyType *t = &types[e->type];
         e->drawn = 0;
-        if (vertices_used + t->vertices > VERTEX_LIMIT || polygons_used + t->polygons > POLYGON_LIMIT)
-            continue; // a smaller model further back may still fit
-        vertices_used += t->vertices;
-        polygons_used += t->polygons;
-        e->drawn = 1;
+        // never drawn yet: all faces, or about 60 % with culling
+        int est_v = e->cost_v, est_p = e->cost_p;
+        if (!est_v) {
+            est_v = cull_models == POLY_CULL_NONE ? t->vertices : t->vertices * 3 / 5;
+            est_p = cull_models == POLY_CULL_NONE ? t->polygons : t->polygons * 3 / 5;
+        }
+        while (GFX_BUSY)
+            ; // the counters are exact once the geometry engine is idle
+        int v0 = GFX_VERTEX_RAM_USAGE, p0 = GFX_POLYGON_RAM_USAGE;
+        if (v0 + est_v + reserve_vertices > VERTEX_LIMIT || p0 + est_p + reserve_polygons > POLYGON_LIMIT)
+            continue; // a cheaper one further back may still fit
         const ModelAnim *a = &t->model.anims[e->anim];
         int frame = ANIM_FRAME(t->model.anim_pool[a->first + e->key]);
-        glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(3 + order[k]));
+        glPolyFmt(POLY_ALPHA(31) | cull_models | POLY_ID(3 + order[k]));
         glPushMatrix();
         glTranslatef32(e->x, e->y, e->z);
         glRotateYi(e->dir);
@@ -348,6 +384,18 @@ void enemy_draw(int vertices_used, int polygons_used)
             if (t->model.bones[b].parent < 0)
                 draw_bone(t, b, frame);
         glPopMatrix(1);
+        while (GFX_BUSY)
+            ;
+        e->cost_v = GFX_VERTEX_RAM_USAGE - v0;
+        e->cost_p = GFX_POLYGON_RAM_USAGE - p0;
+        e->drawn = 1;
+    }
+    for (int k = 0; k < n; k++) {
+        Enemy *e = &enemies[order[k]];
+        if (e->was_visible && e->was_drawn != e->drawn)
+            enemy_toggles++;
+        e->was_visible = 1;
+        e->was_drawn = e->drawn;
     }
 }
 

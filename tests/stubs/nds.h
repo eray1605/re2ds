@@ -30,3 +30,8 @@ static inline void glFlush(int m) { (void)m; }
 void setBrightness(int screen, int level);
 static inline int cosLerp(int a) { return (int)(4096 * __builtin_cos(a * 6.283185307 / 32768)); }
 static inline int sinLerp(int a) { return (int)(4096 * __builtin_sin(a * 6.283185307 / 32768)); }
+// GX status / RAM counters (enemy.c measures what each enemy costs)
+#define GFX_BUSY 0
+static volatile uint16_t host_gx_vertices, host_gx_polygons;
+#define GFX_VERTEX_RAM_USAGE host_gx_vertices
+#define GFX_POLYGON_RAM_USAGE host_gx_polygons
