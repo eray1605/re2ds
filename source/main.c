@@ -26,13 +26,14 @@
 
 // Animation numbers in leon.bin: 10 PLD animations, then the PL00W00 set.
 enum { ANIM_WALK = 10, ANIM_RUN = 11, ANIM_IDLE = 12 };
-// PLD animations of the special moves (player states 8 and 9, pl_move_08 /
-// pl_move_09 at 0x8003b6e4 / 0x8003ba78)
-enum { ANIM_CLIMB_UP = 6, ANIM_JUMP_DOWN = 7, ANIM_FALL = 8 };
+// Special moves (player states 8 and 9, pl_move_08 / pl_move_09 at
+// 0x8003b6e4 / 0x8003ba78) use the room's own animation set (RBJ, see
+// tools/rbj2ds.py): room/<rdt>_rbj.bin holds climb, jump, fall, land.
+enum { RBJ_CLIMB = 0, RBJ_JUMP = 1, RBJ_FALL = 2, RBJ_LAND = 3 };
+#define JUMP_FALL_KEY 13    // the jump turns into the fall at frame 0x0E
 
 #define LEVEL_HEIGHT 1800   // one floor level (0x708): climb and jump height
 #define CLIMB_REACH 700     // probe distance in front of Leon for climb / jump boxes
-#define CLIMB_STEP 900      // how far Leon ends up on top of / beyond the box
 
 // Game logic rate. The PS1 game waits VSync(2) per gameplay frame (0x80013c94
 // sets the wait to 2), so it runs at 25 Hz on PAL (SLES-00972, our disc) and
@@ -65,6 +66,7 @@ static Room room;
 static int cur_stage, cur_room;
 static char bg_prefix[16];    // e.g. "room10a"
 static Model leon;
+static Model rbj;                   // the room's special-move animations (may be absent)
 static Masks masks;
 static int have_masks;
 static int leon_tex[3];
@@ -92,6 +94,7 @@ static struct {
     int slope;                // RoomBox index of the slope/stairs Leon is on, -1 = none
     int32_t fall_speed;       // jump down: rises by 1 per tick, y += speed * 30 (pl_move_09)
     int32_t ground;           // jump down: height to land on
+    const Model *set;         // animation set: &leon or &rbj
     int32_t slope_base;       // height of that slope's bottom edge
 } player;
 
@@ -205,6 +208,14 @@ static int load_room(int stage, int id)
     void *old_bank = room_bank;
     snprintf(path, sizeof(path), "nitro:/sound/room%d%02x0.bin", stage, id);
     room_bank = sound_bank_load(path);
+    if (rbj.data)
+        asset_free(rbj.data);
+    rbj.data = NULL;
+    snprintf(path, sizeof(path), "nitro:/room/room%d%02x0_rbj.bin", stage, id);
+    if (!model_load(&rbj, path) && rbj.data) {
+        asset_free(rbj.data);
+        rbj.data = NULL;
+    }
     if (old_bank)
         sound_bank_free(old_bank);
     near_aot = NULL;
@@ -282,8 +293,8 @@ static void setup_projection(const RoomCamera *c)
 static void draw_bone(int bone, int frame)
 {
     const ModelBone *b = &leon.bones[bone];
-    const ModelFrame *f = model_frame(&leon, frame);
-    const int16_t *rot = model_frame_rot(&leon, frame) + bone * 3;
+    const ModelFrame *f = model_frame(player.set, frame);
+    const int16_t *rot = model_frame_rot(player.set, frame) + bone * 3;
 
     glPushMatrix();
     if (b->parent < 0)
@@ -308,8 +319,8 @@ static void draw_bone(int bone, int frame)
 
 static void draw_player(void)
 {
-    const ModelAnim *a = &leon.anims[player.anim];
-    int frame = ANIM_FRAME(leon.anim_pool[a->first + player.key]);
+    const ModelAnim *a = &player.set->anims[player.anim];
+    int frame = ANIM_FRAME(player.set->anim_pool[a->first + player.key]);
     glPushMatrix();
     glTranslatef32(player.x, player.y, player.z);
     glRotateYi(player.dir);
@@ -514,10 +525,18 @@ static void check_camera_switch(void)
 
 static void set_anim(int anim)
 {
-    if (player.anim != anim) {
+    if (player.anim != anim || player.set != &leon) {
+        player.set = &leon;
         player.anim = anim;
         player.key = 0;
     }
+}
+
+static void set_special_anim(int anim)
+{
+    player.set = &rbj;
+    player.anim = anim;
+    player.key = 0;
 }
 
 static void place_player(int32_t x, int32_t y, int32_t z, int16_t dir, int cam)
@@ -637,12 +656,14 @@ static void use_door(const Aot *a)
     }
 
     // Door sequence (door.c): the PS1 loads the next room while the door
-    // program of DOORnn.DO2 (byte 12 of the door data) plays; here the room
+    // program of the door file plays; here the room
     // is loaded behind a black screen first, then the program runs.
     fade(1);
     enter_room(stage, id, cam);
     place_player(nx, ny, nz, ndir * 8, cam);
-    if (door_begin(d[12], d[13])) {
+    // byte 12 = door type; type t loads disc file 0xD7 + t (table 0x80092948),
+    // which is DOOR(t+1).DO2 (file 0xD6 = DOOR00, checked against all sizes)
+    if (door_begin(d[12] + 1, d[13])) {
         bgHide(bg_id);
         while (door_frame())
             swiWaitForVBlank();
@@ -771,40 +792,59 @@ static void step_forward(int32_t dist)
     player.z -= (dist * sinLerp(player.dir)) >> 12;
 }
 
-// Special moves. Climbing (state 8): crouch and pull up, then Leon stands one
-// level higher on the box. Jumping down (state 9): jump animation, then a fall
-// whose speed rises by one every tick (y += speed * 30) until the floor below.
+// Root motion between two keyframes of the current animation: forward along
+// Leon's facing (speed x) and, if asked, up/down (speed y, -Y is up).
+static void special_root_motion(int k0, int k1, int with_y)
+{
+    const Model *m = player.set;
+    const ModelAnim *a = &m->anims[player.anim];
+    const ModelFrame *f0 = model_frame(m, ANIM_FRAME(m->anim_pool[a->first + k0]));
+    const ModelFrame *f1 = model_frame(m, ANIM_FRAME(m->anim_pool[a->first + k1]));
+    step_forward(f1->speed[0] - f0->speed[0]);
+    if (with_y)
+        player.y += f1->speed[1] - f0->speed[1];
+}
+
+// Special moves, one keyframe per game tick like the PS1.
+// Climbing (state 8): RBJ climb animation; at frame 29 its root motion moves
+// Leon 1000 forward and one level (1800) up onto the box.
+// Jumping down (state 9): RBJ jump until frame 14 (1000 forward), then the
+// fall pose while y += speed * 30 with speed starting at 5 and rising by one
+// per tick, until the floor one level lower; then the landing animation.
 static void special_move_tick(void)
 {
-    const ModelAnim *a = &leon.anims[player.anim];
+    const ModelAnim *a = &player.set->anims[player.anim];
+    int prev = player.key;
     int last = player.key + 1 >= a->count;
-    if (!last)
-        player.key++;
     switch (player.state) {
     case ST_CLIMB:
         if (last) {
-            player.y -= LEVEL_HEIGHT;
-            step_forward(CLIMB_STEP);
             player.state = ST_IDLE;
             set_anim(ANIM_IDLE);
             check_camera_switch();
+            break;
         }
+        player.key++;
+        special_root_motion(prev, player.key, 1);
         break;
     case ST_JUMP:
-        if (last) {
+        if (last || player.key >= JUMP_FALL_KEY) {
             player.state = ST_FALL;
             player.fall_speed = 5;
-            set_anim(ANIM_FALL);
+            set_special_anim(RBJ_FALL);
+            break;
         }
+        player.key++;
+        special_root_motion(prev, player.key, 0);
         break;
     case ST_FALL:
-        player.key = 0;
-        step_forward(CLIMB_STEP / 8);
         player.y += player.fall_speed * 30;
         player.fall_speed++;
         if (player.y >= player.ground) {
             player.y = player.ground;
             player.state = ST_LAND;
+            set_special_anim(RBJ_LAND);
+            sound_play(room_bank, floor_sound() + 1, 100, 64); // landing step
         }
         check_camera_switch();
         break;
@@ -812,6 +852,8 @@ static void special_move_tick(void)
         if (last) {
             player.state = ST_IDLE;
             set_anim(ANIM_IDLE);
+        } else {
+            player.key++;
         }
         break;
     default:
@@ -841,15 +883,27 @@ static void try_special_move(uint32_t pressed)
 {
     if (!(pressed & KEY_A) || player.state >= ST_CLIMB)
         return;
-    if (box_in_front(SHAPE_CLIMB_UP)) {
+    if (!rbj.data)
+        return; // this room has no climb animations
+    const RoomBox *b = box_in_front(SHAPE_CLIMB_UP);
+    if (b) {
+        // face the box square on (the PS1 turns Leon first, pl_move_08 case 1)
+        if (player.x < b->x)
+            player.dir = 0;           // +X
+        else if (player.x > b->x + b->w)
+            player.dir = 16384;       // -X
+        else if (player.z < b->z)
+            player.dir = 24576;       // +Z
+        else
+            player.dir = 8192;        // -Z
         player.state = ST_CLIMB;
         player.slope = -1;
-        set_anim(ANIM_CLIMB_UP);
+        set_special_anim(RBJ_CLIMB);
     } else if (box_in_front(SHAPE_JUMP_DOWN)) {
         player.state = ST_JUMP;
         player.slope = -1;
         player.ground = player.y + LEVEL_HEIGHT;
-        set_anim(ANIM_JUMP_DOWN);
+        set_special_anim(RBJ_JUMP);
     }
 }
 
