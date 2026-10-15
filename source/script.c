@@ -39,7 +39,7 @@ enum {
     OP_RETURN = 25, OP_BREAK = 26, OP_CK = 33, OP_SET = 34, OP_CMP = 35, OP_SAVE = 36,
     OP_COPY = 37, OP_CALC = 38, OP_CALC2 = 39, OP_CUT_CHG = 41, OP_CUT_OLD = 42,
     OP_MESSAGE_ON = 43, OP_AOT_SET = 44, OP_WORK_SET = 46, OP_POS_SET = 50, OP_DIR_SET = 51,
-    OP_SE_ON = 54, OP_SCA_ID_SET = 55, OP_DIR_CK = 57, OP_SCE_EM_SET = 68, OP_DOOR_AOT_SET = 59, OP_CUT_AUTO = 60, OP_MEMBER_CMP = 62,
+    OP_MEMBER_SET = 52, OP_MEMBER_SET2 = 53, OP_SE_ON = 54, OP_SCA_ID_SET = 55, OP_DIR_CK = 57, OP_SCE_EM_SET = 68, OP_DOOR_AOT_SET = 59, OP_CUT_AUTO = 60, OP_MEMBER_COPY = 61, OP_MEMBER_CMP = 62,
     OP_AOT_RESET = 70, OP_AOT_ON = 71, OP_CUT_REPLACE = 75, OP_ITEM_AOT_SET = 78,
     OP_SCE_TRG_CK = 80, OP_KEEP_ITEM_CK = 94, OP_AOT_SET_4P = 103, OP_DOOR_AOT_SET_4P = 104,
     OP_ITEM_AOT_SET_4P = 105,
@@ -61,6 +61,7 @@ typedef struct {
     uint16_t sleep;
     uint8_t wait_message;
     uint8_t work_type;         // work_set: 1 = player, 3 = enemy, 4 = object
+    uint8_t work_index;        // which enemy / object
     int nblocks, ncalls;
     Block blocks[MAX_BLOCKS];
     struct {
@@ -516,8 +517,16 @@ static void run_thread(Thread *t)
         case OP_KEEP_ITEM_CK:
             cond = inventory_has(ins[1]);
             break;
+        case OP_MEMBER_CMP: { // pad, member, compare op, s16 value
+            int value;
+            if (t->work_type != 3)
+                cond = 1; // player / objects: state not modelled yet
+            else
+                cond = game_enemy_member(t->work_index, ins[2], &value) &&
+                       compare((int16_t)value, ins[3], rd16(ins + 4));
+            break;
+        }
         case OP_DIR_CK:
-        case OP_MEMBER_CMP:
         case OP_SCE_TRG_CK:
             cond = 1; // needs object state the engine does not have yet
             break;
@@ -558,11 +567,26 @@ static void run_thread(Thread *t)
             break;
         case OP_WORK_SET:
             t->work_type = ins[1];
+            t->work_index = ins[2];
             break;
+        case OP_MEMBER_SET: // member, u16 value
+            if (t->work_type == 3)
+                game_enemy_member_set(t->work_index, ins[1], ru16(ins + 2));
+            break;
+        case OP_MEMBER_SET2: // member, variable
+            if (t->work_type == 3)
+                game_enemy_member_set(t->work_index, ins[1], (uint16_t)*var(ins[2]));
+            break;
+        case OP_MEMBER_COPY: { // variable, member
+            int value;
+            if (t->work_type == 3 && game_enemy_member(t->work_index, ins[2], &value))
+                *var(ins[1]) = (int16_t)value;
+            break;
+        }
         case OP_SCE_EM_SET: // pad, slot, type, variant, status, floor, sound, model,
                             // set flag, x, y, z, dir, motion, ctr flag
-            game_spawn_enemy(ins[2], ins[3], ins[4], rd16(ins + 10), rd16(ins + 12), rd16(ins + 14),
-                             rd16(ins + 16));
+            game_spawn_enemy(ins[2], ins[3], ru16(ins + 4), rd16(ins + 10), rd16(ins + 12),
+                             rd16(ins + 14), rd16(ins + 16));
             break;
         case OP_SE_ON: // bank, s16 sound (low byte = number), position source, offset
             game_play_sound(ins[1], rd16(ins + 2) & 0xFF);

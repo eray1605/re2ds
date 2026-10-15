@@ -12,10 +12,31 @@
 #define MAX_PAGES 4
 #define ENEMY_RADIUS 400
 #define CONTACT_DISTANCE 800    // ENEMY_RADIUS + the player's radius (main.c)
-#define CHASE_DISTANCE 20000    // farther away: stand still
-#define TURN_NEAR 16            // RE2 units per game tick when d < 3000
-#define TURN_FAR 8              // otherwise (pl. 0x801019d0)
-#define GAIT_COUNT 8            // set 0: one of 8 gaits, chosen at random
+#define MAX_SETS 4
+
+// Zombie behaviour after the PS1 code (zombie overlay of CDEMD0.EMS, linked at
+// 0x80100000; re2ds-notes/enemy-zombie.md). States as in obj+5; only the ones
+// that need no attacks yet. One game tick here is one PS1 frame.
+#define ST_LURK 0               // stands, shuffles now and then (0x801011fc / 0x8010135c)
+#define ST_CHASE 1              // shuffles toward Leon (0x8010167c / 0x801019d0)
+#define ST_LYING 7              // lies until EF_HOLD goes, then gets up (0x801036b4)
+#define ST_EAT 8                // eats (variant 8)
+
+// Enemy.flags = sce_em_set bytes 4..5 (obj+0x10e): spawn variant | status << 8.
+// Room scripts read and write it as member 7.
+#define EF_VARIANT 0x003F       // 0/3 lurk, 1/6 chase, 2/4 lying, 5/7 lying as dead, 8 eat
+#define EF_HOLD 0x4000          // lying: stay down until the room script clears it
+
+// Animations: set 0 holds the gaits, set 1 everything else (emXX_sets.bin)
+#define SET_GAIT 0
+#define SET_MAIN 1
+#define A_STAND 0x00
+#define A_GET_UP 0x08           // 0x09 from the other lying pose
+#define A_EAT 0x12
+#define A_LIE 0x17              // 0x16 = the other lying pose
+
+#define EYE_ENEMY (-2768)       // part 8 above the feet (line of sight, 0x80046fb0)
+#define EYE_PLAYER (-2507)
 
 // The DS geometry engine takes at most 6144 vertices (and 2048 polygons) per
 // frame and silently drops the rest, so enemies would flicker. Enemies are
@@ -29,6 +50,19 @@
 
 // collision with the room, shared with the player (main.c)
 int game_blocked(int32_t from_x, int32_t from_z, int32_t x, int32_t z, int32_t y);
+// does a room box that blocks sight lie between the two points? (main.c)
+int game_sight_blocked(int32_t x0, int32_t y0, int32_t z0, int32_t x1, int32_t y1, int32_t z1);
+
+// Turning while chasing from afar (0x8010c748): frames to keep a course, bit
+// 15 = turn away from Leon for that long. The zombies weave toward him.
+static const uint16_t wander[32] = {
+    0x00be, 0x8032, 0x0096, 0x8040, 0x006e, 0x8040, 0x00b4, 0x8034,
+    0x008c, 0x8034, 0x0078, 0x803a, 0x0096, 0x804e, 0x008c, 0x8032,
+    0x0096, 0x803e, 0x0096, 0x8048, 0x006e, 0x8046, 0x0078, 0x804a,
+    0x00b4, 0x8022, 0x006e, 0x8034, 0x00c8, 0x8042, 0x00b4, 0x8042,
+};
+// gait (set 0 animation) per zombie, picked at random (0x80100004)
+static const uint8_t gaits[8] = { 0, 2, 0, 2, 0, 2, 2, 0 };
 
 typedef struct {
     int type;                   // 0 = free
@@ -38,6 +72,8 @@ typedef struct {
     int pages;
     int drawable;               // textures uploaded
     int vertices, polygons;     // what one instance sends to the GPU
+    int num_sets;
+    uint16_t set_start[MAX_SETS]; // first animation of each set
     int8_t first_child[64], next_sibling[64];
 } EnemyType;
 
@@ -50,6 +86,14 @@ typedef struct {
     int32_t x, y, z;
     int16_t dir;                // DS units
     int anim, key;
+    uint16_t flags;             // EF_*
+    uint8_t state, sub;         // ST_*, step within the state
+    uint8_t gait;               // set 0 animation it walks with
+    uint8_t lie_alt;            // lies in the other pose (obj+0x21a bit 2)
+    uint8_t sees;               // line of sight to Leon (obj+0x154 bit 0x800)
+    uint8_t sight_timer;        // the PS1 checks it every 8 frames
+    uint8_t wander_idx, turn_timer, standing;
+    int16_t timer, timer2;      // obj+0x158, obj+0x15a
 } Enemy;
 
 static EnemyType types[MAX_TYPES];
@@ -150,6 +194,17 @@ static int load_type(int type)
 
     model_gx_cost(&t->model, &t->vertices, &t->polygons);
 
+    // animation sets: u8 count, u16 first animation per set (tools/em2ds.py)
+    uint32_t sets_size;
+    snprintf(path, sizeof(path), "nitro:/model/em%02x_sets.bin", type);
+    uint8_t *sets = asset_load(path, &sets_size);
+    if (sets && sets_size >= 1) {
+        t->num_sets = sets[0] < MAX_SETS ? sets[0] : MAX_SETS;
+        for (int k = 0; k < t->num_sets && 3 + 2 * k <= (int)sets_size; k++)
+            t->set_start[k] = sets[1 + 2 * k] | sets[2 + 2 * k] << 8;
+    }
+    asset_free(sets);
+
     uint32_t size;
     snprintf(path, sizeof(path), "nitro:/model/em%02x_tex.bin", type);
     t->tex_data = asset_load(path, &size);
@@ -176,9 +231,48 @@ static int load_type(int type)
     return slot;
 }
 
-void enemy_spawn(int slot, int type, int variant, int32_t x, int32_t y, int32_t z, int16_t dir_re2)
+static int rnd(void) { return rand() & 0xFF; } // the PS1 generator gives 0..255
+
+static void set_anim(Enemy *e, int set, int n, int key)
 {
-    (void)variant;
+    const EnemyType *t = &types[e->type];
+    int a = (set < t->num_sets ? t->set_start[set] : 0) + n;
+    if (a >= t->model.header->num_anims)
+        a = 0;
+    e->anim = a;
+    int count = t->model.anims[a].count;
+    e->key = count ? key % count : 0;
+}
+
+// Starts a state (what the PS1 does in step 0 of it).
+static void enter_state(Enemy *e, int state)
+{
+    e->state = state;
+    e->sub = 1;
+    e->standing = 0;
+    switch (state) {
+    case ST_LURK:
+        set_anim(e, SET_MAIN, A_STAND, rnd() & 0x1F);
+        e->timer = rnd() + 150;
+        e->timer2 = rnd() + 300;
+        break;
+    case ST_CHASE:
+        set_anim(e, SET_GAIT, e->gait, rnd() & 0x1F);
+        e->wander_idx = (rnd() & 0xF) << 1;
+        e->timer = (wander[e->wander_idx] & 0x7FFF) + rnd();
+        e->turn_timer = (rnd() & 0x1F) + 30;
+        break;
+    case ST_LYING:
+        set_anim(e, SET_MAIN, e->lie_alt ? A_LIE - 1 : A_LIE, 0);
+        break;
+    case ST_EAT:
+        set_anim(e, SET_MAIN, A_EAT, 0);
+        break;
+    }
+}
+
+void enemy_spawn(int slot, int type, int flags, int32_t x, int32_t y, int32_t z, int16_t dir_re2)
+{
     enemy_spawn_calls++;
     if (slot < 0 || slot >= MAX_ENEMIES) {
         enemy_last_error = 5;
@@ -195,15 +289,50 @@ void enemy_spawn(int slot, int type, int variant, int32_t x, int32_t y, int32_t 
     e->y = y;
     e->z = z;
     e->dir = (dir_re2 * 8) & 32767;
-    int anims = types[t].model.header->num_anims;
-    if (anims == 0) {
+    if (types[t].model.header->num_anims == 0) {
         e->active = 0;
         enemy_last_error = 4;
         return;
     }
-    e->anim = anims >= GAIT_COUNT ? rand() % GAIT_COUNT : 0;
-    int count = types[t].model.anims[e->anim].count;
-    e->key = count ? rand() % count : 0;
+    e->flags = flags;
+    e->gait = gaits[(rnd() >> (rnd() & 3)) & 7];
+    e->sight_timer = slot & 7;
+
+    // start state by spawn variant (zombie init 0x80100674)
+    int state = ST_LURK;
+    switch (flags & EF_VARIANT) {
+    case 2: e->lie_alt = 1; state = ST_LYING; break;
+    case 4: state = ST_LYING; break;
+    case 5: e->lie_alt = 1; e->flags = EF_HOLD | 2; state = ST_LYING; break; // lies as if dead
+    case 7: e->flags = EF_HOLD | 4; state = ST_LYING; break;
+    case 1:                                    // PS1: lunges at once (state 2, not done yet)
+    case 6: state = ST_CHASE; break;
+    case 8: state = ST_EAT; break;
+    }
+    enter_state(e, state);
+}
+
+// Members the room scripts read (FUN_8005202c lists all): 0 = object flags,
+// bit 0 set while the enemy exists (rooms 20F0, 4070, 6160, 7000 test it);
+// 7 = flags (obj+0x10e).
+int enemy_member_get(int slot, int member, int *value)
+{
+    if (slot < 0 || slot >= MAX_ENEMIES)
+        return 0;
+    if (member == 0) {
+        *value = enemies[slot].active;
+        return 1;
+    }
+    if (member != 7 || !enemies[slot].active)
+        return 0;
+    *value = enemies[slot].flags;
+    return 1;
+}
+
+void enemy_member_set(int slot, int member, int value)
+{
+    if (slot >= 0 && slot < MAX_ENEMIES && enemies[slot].active && member == 7)
+        enemies[slot].flags = value;
 }
 
 int enemy_count(void)
@@ -251,55 +380,185 @@ static int32_t frame_speed(const Model *m, const ModelAnim *a, int key)
     return model_frame(m, ANIM_FRAME(m->anim_pool[a->first + key]))->speed[0];
 }
 
-void enemy_tick(int32_t player_x, int32_t player_z)
+// DS angle (32768 = 360 degrees) from the enemy to (x, z); facing = (cos, -sin)
+static int angle_to(const Enemy *e, int32_t x, int32_t z)
+{
+    return (int)(atan2f((float)-(z - e->z), (float)(x - e->x)) * 32768.0f / (2.0f * 3.14159265f)) & 32767;
+}
+
+// Turns by at most rate RE2 units (4096 = 360 degrees) toward (x, z), away
+// from it if rate < 0 (0x80014ef8).
+static void turn_toward(Enemy *e, int32_t x, int32_t z, int rate)
+{
+    int want = angle_to(e, x, z);
+    if (rate < 0) {
+        rate = -rate;
+        want += 16384;
+    }
+    int diff = ((want - e->dir + 16384) & 32767) - 16384;
+    int step = rate * 8;
+    if (diff > step)
+        e->dir += step;
+    else if (diff < -step)
+        e->dir -= step;
+    else
+        e->dir = want;
+    e->dir &= 32767;
+}
+
+// Is (x, z) within +-half RE2 units of the facing? (0x80014fb4)
+static int in_cone(const Enemy *e, int32_t x, int32_t z, int half)
+{
+    int diff = ((angle_to(e, x, z) - e->dir + 16384) & 32767) - 16384;
+    return abs(diff) < half * 8;
+}
+
+// Next keyframe. *forward: root motion along the facing (speed x is the
+// distance walked since the first keyframe; gaits 4-7 step back a little in
+// places, so it may be negative). Returns 1 on the last keyframe.
+static int anim_step(Enemy *e, int32_t *forward)
+{
+    const Model *m = &types[e->type].model;
+    const ModelAnim *a = &m->anims[e->anim];
+    if (!a->count)
+        return 1;
+    int prev = e->key;
+    e->key = (e->key + 1) % a->count;
+    if (forward)
+        *forward = frame_speed(m, a, e->key) - (e->key == 0 ? 0 : frame_speed(m, a, prev));
+    return e->key == a->count - 1;
+}
+
+static void walk(Enemy *e, int i, int32_t step_len)
+{
+    int32_t start_x = e->x, start_z = e->z;
+    int32_t mx = (step_len * cosLerp(e->dir)) >> 12;
+    int32_t mz = -((step_len * sinLerp(e->dir)) >> 12);
+    if (!game_blocked(e->x, e->z, e->x + mx, e->z, e->y) && !crowded(i, e->x + mx, e->z))
+        e->x += mx;
+    if (!game_blocked(e->x, e->z, e->x, e->z + mz, e->y) && !crowded(i, e->x, e->z + mz))
+        e->z += mz;
+    int32_t moved = (int32_t)sqrtf((float)(e->x - start_x) * (e->x - start_x) + (float)(e->z - start_z) * (e->z - start_z));
+    if (moved > 200)
+        enemy_jumps++;
+    if (moved > enemy_jump_max)
+        enemy_jump_max = moved;
+}
+
+// noise: what Leon does (PS1 0x800c77f2): NOISE_WALK, NOISE_RUN
+static void lurk(Enemy *e, int i, int32_t px, int32_t pz, uint32_t d, int noise)
+{
+    // decision (0x801011fc); the PS1 first turns round to a noise behind
+    // (state 12), here the zombie starts chasing at once
+    int front90 = in_cone(e, px, pz, 0x400), front70 = in_cone(e, px, pz, 800);
+    if ((d < 5000 && front90 && e->sees) ||
+        (d < 3000 && !front70 && (noise & 0x15) && e->sees && !(rnd() & 1)) ||
+        (d < 2000 && !front90 && e->sees && (noise & 0x17) && (rnd() & 1))) {
+        enter_state(e, ST_CHASE);
+        return;
+    }
+    // movement (0x8010135c)
+    int32_t fwd;
+    if (e->sub == 2) { // shuffle a little toward Leon
+        e->sub = 3;
+        set_anim(e, SET_GAIT, e->gait, 0);
+        e->timer = rnd() + 150;
+    }
+    if (e->sub == 3) {
+        turn_toward(e, px, pz, 16);
+        anim_step(e, &fwd);
+        walk(e, i, fwd);
+        if (e->timer-- == 1)
+            enter_state(e, ST_LURK); // stand again
+        if (d < 3000 || (d < 7500 && e->sees))
+            enter_state(e, ST_CHASE);
+        return;
+    }
+    anim_step(e, NULL); // standing
+    if (e->timer2-- == 0)
+        e->timer2 = rnd() + 300; // PS1: moans (sound 11) half the time
+    if (e->timer2 == 0 && !(rnd() & 1))
+        e->sub = 2;
+    if (e->timer == 0) {
+        if (d < 7500 && e->sees)
+            enter_state(e, ST_CHASE);
+    } else {
+        e->timer--;
+    }
+}
+
+static void chase(Enemy *e, int i, int32_t px, int32_t pz, uint32_t d)
+{
+    // movement (0x801019d0)
+    if (e->timer-- == 0) {
+        e->wander_idx = (e->wander_idx + 1) & 31;
+        e->timer = (wander[e->wander_idx] & 0x7FFF) + (rnd() & 0x1F);
+        e->dir = (e->dir + ((rnd() & 1) ? 16 : -16) * 8) & 32767;
+    }
+    int rate = 8;
+    if (d > 5000 && (wander[e->wander_idx] & 0x8000))
+        rate = -8;
+    turn_toward(e, px, pz, rate);
+    if (e->turn_timer-- == 0) {
+        e->turn_timer = (rnd() & 0xF) + 30;
+        turn_toward(e, px, pz, 16); // PS1: may moan (sound 10 / 11)
+    }
+    if (d < 3000)
+        turn_toward(e, px, pz, 16);
+
+    // touching Leon: the PS1 grabs him (state 3, not done yet); stand
+    // instead of walking on the spot
+    if (d < CONTACT_DISTANCE) {
+        if (!e->standing) {
+            set_anim(e, SET_MAIN, A_STAND, 0);
+            e->standing = 1;
+        }
+        anim_step(e, NULL);
+        return;
+    }
+    if (e->standing) {
+        set_anim(e, SET_GAIT, e->gait, 0);
+        e->standing = 0;
+    }
+    int32_t fwd;
+    anim_step(e, &fwd);
+    walk(e, i, fwd);
+}
+
+static void lying(Enemy *e)
+{
+    switch (e->sub) {
+    case 1: // down until the room script clears the hold flag
+        if (!(e->flags & EF_HOLD)) {
+            set_anim(e, SET_MAIN, e->lie_alt ? A_GET_UP + 1 : A_GET_UP, rnd() & 0xF);
+            e->sub = 3; // PS1: moans (sound 10, 11 or 12)
+        }
+        break;
+    case 3: // getting up
+        if (anim_step(e, NULL))
+            enter_state(e, ST_CHASE);
+        break;
+    }
+}
+
+void enemy_tick(int32_t px, int32_t py, int32_t pz, int noise)
 {
     for (int i = 0; i < MAX_ENEMIES; i++) {
         Enemy *e = &enemies[i];
-        if (!e->active)
+        if (!e->active || !types[e->type].model.anims[e->anim].count)
             continue;
-        const Model *m = &types[e->type].model;
-        const ModelAnim *a = &m->anims[e->anim];
-        if (!a->count)
-            continue;
-        int32_t start_x = e->x, start_z = e->z;
-        int32_t dx = player_x - e->x, dz = player_z - e->z;
-        float d = sqrtf((float)dx * dx + (float)dz * dz);
-        if (d > CHASE_DISTANCE)
-            continue;
-
-        // turn toward the player; facing = (cos dir, -sin dir)
-        int16_t want = (int16_t)(atan2f((float)-dz, (float)dx) * 32768.0f / (2.0f * 3.14159265f));
-        // shortest way round (full circle = 32768)
-        int diff = ((want - e->dir + 16384) & 32767) - 16384;
-        int step = (d < 3000 ? TURN_NEAR : TURN_FAR) * 8;
-        if (diff > step)
-            e->dir += step;
-        else if (diff < -step)
-            e->dir -= step;
-        else
-            e->dir = want;
-        e->dir &= 32767;
-
-        // next keyframe and its root motion: speed x is the distance walked
-        // since the first keyframe, so a step is the difference to the
-        // previous key (from 0 when the animation starts over). Gaits 4-7
-        // step back a little in places, so the difference may be negative.
-        int prev = e->key;
-        e->key = (e->key + 1) % a->count;
-        int32_t step_len = frame_speed(m, a, e->key) - (e->key == 0 ? 0 : frame_speed(m, a, prev));
-        if (d < CONTACT_DISTANCE)
-            step_len = 0; // touching Leon: no attacks yet, just stand
-        int32_t mx = (step_len * cosLerp(e->dir)) >> 12;
-        int32_t mz = -((step_len * sinLerp(e->dir)) >> 12);
-        if (!game_blocked(e->x, e->z, e->x + mx, e->z, e->y) && !crowded(i, e->x + mx, e->z))
-            e->x += mx;
-        if (!game_blocked(e->x, e->z, e->x, e->z + mz, e->y) && !crowded(i, e->x, e->z + mz))
-            e->z += mz;
-        int32_t moved = (int32_t)sqrtf((float)(e->x - start_x) * (e->x - start_x) + (float)(e->z - start_z) * (e->z - start_z));
-        if (moved > 200)
-            enemy_jumps++;
-        if (moved > enemy_jump_max)
-            enemy_jump_max = moved;
+        float fdx = (float)(px - e->x), fdz = (float)(pz - e->z);
+        uint32_t d = (uint32_t)sqrtf(fdx * fdx + fdz * fdz);
+        if (e->sight_timer-- == 0) {
+            e->sight_timer = 7;
+            e->sees = !game_sight_blocked(e->x, e->y + EYE_ENEMY, e->z, px, py + EYE_PLAYER, pz);
+        }
+        switch (e->state) {
+        case ST_LURK: lurk(e, i, px, pz, d, noise); break;
+        case ST_CHASE: chase(e, i, px, pz, d); break;
+        case ST_LYING: lying(e); break;
+        default: anim_step(e, NULL); break;
+        }
     }
 }
 
@@ -406,7 +665,7 @@ void enemy_debug_print(int tick)
     for (int i = 0; i < MAX_ENEMIES; i++) {
         const Enemy *e = &enemies[i];
         if (e->active)
-            printf("t%d e%d anim %d key %d pos %d %d dir %d verts %d\n", tick, i, e->anim, e->key,
+            printf("t%d e%d st %d/%d anim %d key %d pos %d %d dir %d verts %d\n", tick, i, e->state, e->sub, e->anim, e->key,
                    (int)e->x, (int)e->z, e->dir, types[e->type].vertices);
     }
 }

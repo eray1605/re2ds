@@ -32,9 +32,12 @@ void game_set_box_flag(int b, int f) { (void)b; (void)f; }
 void game_play_sound(int bank, int sound) { (void)bank; (void)sound; }
 void game_spawn_enemy(int s, int t, int v, int x, int y, int z, int d)
 {
-    printf("  spawn slot %d type %02x variant %d at %d %d %d dir %d\n", s, t, v, x, y, z, d);
+    printf("  spawn slot %d type %02x flags %04x at %d %d %d dir %d\n", s, t, v, x, y, z, d);
     enemy_spawn(s, t, v, x, y, z, d);
 }
+int game_enemy_member(int s, int m, int *v) { return enemy_member_get(s, m, v); }
+void game_enemy_member_set(int s, int m, int v) { printf("  member_set enemy %d member %d = %04x\n", s, m, v & 0xFFFF); enemy_member_set(s, m, v); }
+int game_sight_blocked(int32_t a, int32_t b, int32_t c, int32_t d, int32_t e, int32_t f) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; return 0; }
 int main(int argc, char **argv)
 {
     Room room;
@@ -45,7 +48,7 @@ int main(int argc, char **argv)
     for (int t = 0; t < ticks; t++) {
         int before = enemy_spawn_calls;
         script_tick();
-        enemy_tick(5899, 0);
+        enemy_tick(getenv("PX") ? atoi(getenv("PX")) : 5899, 0, 0, 0);
         if (enemy_spawn_calls != before) printf("tick %d: %d spawn calls total, %d active\n", t, enemy_spawn_calls, enemy_count());
         if (getenv("TRACE")) enemy_debug_print(t);
     }

@@ -24,6 +24,14 @@
 // Leon's first playable room and the camera the converter picked a spawn for
 #define START_STAGE 1
 #define START_ROOM 0x00
+// New game: Leon at the burning wreck at the east end of the street (camera
+// 0), looking west, where the PS1 starts after the intro. Position chosen by
+// eye; the original start data is not located yet. Zombie 0 lies close by
+// and gets up two seconds in (room script exec function 2).
+#define START_X 19800
+#define START_Z 300
+#define START_DIR 16384  // DS units: -X
+#define START_CAM 0
 
 // Animation numbers in leon.bin: 10 PLD animations, then the PL00W00 set.
 enum { ANIM_WALK = 10, ANIM_RUN = 11, ANIM_IDLE = 12 };
@@ -689,9 +697,70 @@ void game_set_player_pos(int32_t x, int32_t y, int32_t z)
 
 void game_set_player_dir(int16_t dir_re2) { player.dir = dir_re2 * 8; }
 
-void game_spawn_enemy(int slot, int type, int variant, int x, int y, int z, int dir_re2)
+void game_spawn_enemy(int slot, int type, int flags, int x, int y, int z, int dir_re2)
 {
-    enemy_spawn(slot, type, variant, x, y, z, dir_re2);
+    enemy_spawn(slot, type, flags, x, y, z, dir_re2);
+}
+
+int game_enemy_member(int slot, int member, int *value)
+{
+    return enemy_member_get(slot, member, value);
+}
+
+void game_enemy_member_set(int slot, int member, int value)
+{
+    enemy_member_set(slot, member, value);
+}
+
+// Does the segment p0-p1 pass through the box lo..hi? (slab test)
+static int segment_hits_box(const float p0[3], const float p1[3], const float lo[3], const float hi[3])
+{
+    float t0 = 0.0f, t1 = 1.0f;
+    for (int k = 0; k < 3; k++) {
+        float d = p1[k] - p0[k];
+        if (fabsf(d) < 1e-3f) {
+            if (p0[k] < lo[k] || p0[k] > hi[k])
+                return 0;
+            continue;
+        }
+        float a = (lo[k] - p0[k]) / d, b = (hi[k] - p0[k]) / d;
+        if (a > b) {
+            float tmp = a;
+            a = b;
+            b = tmp;
+        }
+        if (a > t0)
+            t0 = a;
+        if (b < t1)
+            t1 = b;
+        if (t0 > t1)
+            return 0;
+    }
+    return 1;
+}
+
+// Line of sight for enemies (0x8004d000): room boxes with flag 0x2000 block
+// it, except shapes 1-5 and 13 (table 0x8009f480); the others count as their
+// rectangle. A box reaches from its lowest floor up to the height in its type
+// field, so low ones like cars do not hide Leon from a zombie's eyes.
+int game_sight_blocked(int32_t x0, int32_t y0, int32_t z0, int32_t x1, int32_t y1, int32_t z1)
+{
+    static const uint8_t skip_shape[16] = { 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0 };
+    const float p0[3] = { (float)x0, (float)y0, (float)z0 }, p1[3] = { (float)x1, (float)y1, (float)z1 };
+    for (int i = 0; i < room.header->num_boxes; i++) {
+        const RoomBox *b = &room.boxes[i];
+        if (!(b->flag & 0x2000) || skip_shape[b->flag & 15] || !b->floors)
+            continue;
+        int32_t top = -((b->type >> 11) * 100 + ((b->type >> 6) & 31) * 1800);
+        int32_t bottom = 0;
+        for (uint32_t f = b->floors; !(f & 1); f >>= 1)
+            bottom += FLOOR_HEIGHT;
+        const float lo[3] = { (float)b->x, (float)top, (float)b->z };
+        const float hi[3] = { (float)(b->x + b->w), (float)bottom, (float)(b->z + b->d) };
+        if (segment_hits_box(p0, p1, lo, hi))
+            return 1;
+    }
+    return 0;
 }
 
 // room collision for enemies (same rule as the player, on the floor of y)
@@ -729,8 +798,7 @@ static void warp_to(int index)
     const RoomRef *r = &room_index[index];
     fade(1);
     enter_room(r->stage, r->room, -1);
-    const RoomHeader *h = room.header;
-    place_player(h->spawn[0], h->spawn[1], h->spawn[2], h->spawn_dir, h->start_camera);
+    place_player(START_X, 0, START_Z, START_DIR, START_CAM);
     fade(-1);
 }
 
@@ -1178,8 +1246,7 @@ int main(void)
     enter_room(START_STAGE, START_ROOM, -1);
     if (!room.data)
         fatal("room/room1000.bin missing");
-    const RoomHeader *h = room.header;
-    place_player(h->spawn[0], h->spawn[1], h->spawn[2], h->spawn_dir, h->start_camera);
+    place_player(START_X, 0, START_Z, START_DIR, START_CAM);
     fade(-1);
 
     // pmMainLoop() services calico's power management (lid, reset, ARM7 messages);
@@ -1203,7 +1270,9 @@ int main(void)
             update_player_frame(keysHeld());
             for (game_tick_acc += GAME_HZ; game_tick_acc >= DS_HZ && !message_text; game_tick_acc -= DS_HZ) {
                 update_player_tick();
-                enemy_tick(player.x, player.z);
+                enemy_tick(player.x, player.y, player.z,
+                           player.state == ST_RUN ? NOISE_RUN
+                           : player.state == ST_WALK || player.state == ST_BACK ? NOISE_WALK : 0);
                 check_aots(pending_keys);
                 if (!near_aot && !message_text)
                     try_special_move(pending_keys);
