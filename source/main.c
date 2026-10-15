@@ -600,6 +600,12 @@ void game_set_player_pos(int32_t x, int32_t y, int32_t z)
 
 void game_set_player_dir(int16_t dir_re2) { player.dir = dir_re2 * 8; }
 
+void game_play_sound(int bank, int sound)
+{
+    if (bank == 2)
+        sound_play(room_bank, sound, 110, 64);
+}
+
 void game_set_box_flag(int box, int flag)
 {
     if (box >= 0 && box < room.header->num_boxes)

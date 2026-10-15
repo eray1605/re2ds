@@ -2,7 +2,10 @@
 arrival point in a room, flood-fill the floor on a grid and report doors that
 cannot be reached. Rule variants can be compared with the options.
 
-Usage: python3 -I reachability.py build/room [--radius N] [--all-flags] [--verbose]
+Floors, stairs, climbing and jumping down are modelled (--no-moves: without
+climbing and jumping).
+
+Usage: python3 -I reachability.py build/room [--radius N] [--all-flags] [--no-moves] [--verbose]
 """
 import glob
 import json
@@ -34,9 +37,9 @@ def in_quad(x, z, q):
     return True
 
 
-def blocked_fn(room, radius, all_flags):
+def blocked_fn(room, radius, all_flags, floor=0):
     boxes = [b for b in room["collision"]["boxes"]
-             if 0 in b["floors"] and b["shape"] not in (11, 12) and (all_flags or b["flag"] & 0x400)]
+             if floor in b["floors"] and b["shape"] not in (11, 12) and (all_flags or b["flag"] & 0x400)]
 
     def blocked(x, z):
         for b in boxes:
@@ -44,6 +47,48 @@ def blocked_fn(room, radius, all_flags):
                 return True
         return False
     return blocked
+
+
+def inside(b, x, z, margin=0):
+    return b["x"] - margin <= x <= b["x"] + b["w"] + margin and b["z"] - margin <= z <= b["z"] + b["d"] + margin
+
+
+def reachable3d(room, start, radius, all_flags, limit, use_moves=True, start_floor=0):
+    """Flood fill over (x, z, floor): walking, stairs/slopes (floor changes
+    within the slope box's floors), climbing (shape 9: next to the box ->
+    on top, floor + 1) and jumping down (shape 10: floor - 1, 1000 ahead)."""
+    boxes = room["collision"]["boxes"]
+    blocked = {}
+
+    def blk(f, x, z):
+        if f not in blocked:
+            blocked[f] = blocked_fn(room, radius, all_flags, f)
+        return blocked[f](x, z)
+    sx, sz = (start[0] // STEP) * STEP, (start[1] // STEP) * STEP
+    seen = {(sx, sz, start_floor)}
+    q = deque(seen)
+    while q and len(seen) < 300000:
+        x, z, f = q.popleft()
+        nxt = [(x + STEP, z, f), (x - STEP, z, f), (x, z + STEP, f), (x, z - STEP, f)]
+        for b in boxes:
+            if b["shape"] in (11, 12) and inside(b, x, z):
+                nxt += [(x, z, g) for g in b["floors"] if g != f]
+            if use_moves and b["shape"] == 9 and f in b["floors"] and inside(b, x, z, 800) and not inside(b, x, z):
+                cx, cz = b["x"] + b["w"] // 2, b["z"] + b["d"] // 2
+                nxt.append(((cx // STEP) * STEP, (cz // STEP) * STEP, f + 1))
+            if use_moves and b["shape"] == 10 and f in b["floors"] and inside(b, x, z, 800):
+                for dx, dz in ((1200, 0), (-1200, 0), (0, 1200), (0, -1200)):
+                    nxt.append((((x + dx) // STEP) * STEP, ((z + dz) // STEP) * STEP, f - 1))
+        for n in nxt:
+            if n in seen or abs(n[0]) > limit or abs(n[1]) > limit or n[2] < 0:
+                continue
+            if blk(n[2], n[0], n[1]) and not blk(f, x, z) and n[2] == f:
+                continue
+            if n[2] != f and blk(n[2], n[0], n[1]):
+                continue
+            seen.add(n)
+            q.append(n)
+    return seen
 
 
 def reachable(room, start, blocked, limit):
@@ -75,23 +120,24 @@ def main():
     for name, r in rooms.items():
         for d in r["doors"]:
             target = f"{d['next_stage']}{d['next_room']:02X}0"
-            if target in arrivals and d["next_floor"] == 0:
-                arrivals[target].append((d["next_pos"][0], d["next_pos"][2], name))
+            if target in arrivals:
+                arrivals[target].append((d["next_pos"][0], d["next_pos"][2], name, d["next_floor"]))
     bad_rooms = 0
     bad_doors = total = 0
     for name in sorted(rooms):
         r = rooms[name]
         blocked = blocked_fn(r, radius, all_flags)
-        doors = [d for d in r["doors"] if d["floor"] == 0 and d["sat"] & 1]
+        doors = [d for d in r["doors"] if d["sat"] & 1]
         if not arrivals[name] or not doors:
             continue
-        x, z, src = arrivals[name][0]
-        area = reachable(r, (x, z), blocked, 40000)
+        x, z, src, start_floor = arrivals[name][0]
+        area3 = reachable3d(r, (x, z), radius, all_flags, 40000, "--no-moves" not in sys.argv, start_floor)
         missing = []
         for d in doors:
             total += 1
             # reachable if a free cell lies in the door quad or within 700 of it
             q = d["quad_xz"]
+            area = {(ax, az) for ax, az, af in area3 if af == d["floor"]}
             ok = any(in_quad(cx, cz, q) for cx, cz in area)
             if not ok:
                 cxm = sum(p[0] for p in q) / 4

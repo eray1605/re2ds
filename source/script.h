@@ -68,6 +68,9 @@ void game_cut_change(int cam);             // force a camera
 void game_set_player_pos(int32_t x, int32_t y, int32_t z);
 void game_set_player_dir(int16_t dir_re2);
 void game_set_box_flag(int box, int flag);  // sca_id_set: collision box on/off
+// se_on: bank 0 = core/door, 2 = room (sound/<rdt>.bin), 3 = ?, 4 = weapon
+// (FUN_80057364: tables 0x800d36c0[bank])
+void game_play_sound(int bank, int sound);
 
 void script_room_enter(const Room *room);   // resets AOTs/threads, runs init, starts main
 void script_tick(void);

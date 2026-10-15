@@ -16,6 +16,7 @@ void game_cut_change(int cam) { cut_changes++; (void)cam; }
 void game_set_player_pos(int32_t x, int32_t y, int32_t z) { pos_sets++; (void)x; (void)y; (void)z; }
 void game_set_player_dir(int16_t dir) { (void)dir; }
 void game_set_box_flag(int box, int flag) { (void)box; (void)flag; }
+void game_play_sound(int bank, int sound) { (void)bank; (void)sound; }
 
 const char *room_message(const Room *room, int n)
 {
