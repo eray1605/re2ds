@@ -77,6 +77,8 @@ int game_player_damage(int damage);       // 0 hurt, 1 down to 0 HP once (breaks
 void game_player_grabbed(int on);
 void game_player_pose(const Model *set, int anim, int key, int32_t x, int32_t z, int16_t dir);
 void game_player_died(void);              // death animation over
+// blood sprite (effect.h kinds), sprayed toward dir (DS units)
+void game_blood(int kind, int32_t x, int32_t y, int32_t z, int16_t dir, int speed, int32_t floor_y);
 
 // Turning while chasing from afar (0x8010c748): frames to keep a course, bit
 // 15 = turn away from Leon for that long. The zombies weave toward him.
@@ -680,7 +682,21 @@ static void grab_player(const Enemy *e)
     int32_t x, z;
     grab_place(m, grab.anim, grab.key, &x, &z);
     // front: Leon faces the zombie; from behind he looks the same way
-    game_player_pose(m, grab.anim, grab.key, x, z, grab.back ? grab.dir : (grab.dir + 16384) & 32767);
+    int16_t pdir = grab.back ? grab.dir : (grab.dir + 16384) & 32767;
+    game_player_pose(m, grab.anim, grab.key, x, z, pdir);
+
+    // blood at his neck (part 8): a splash per bite, spurts while he dies
+    // (FUN_8001b8fc 0x17d0 / 0xbd0 in FUN_8010a8f8 and FUN_8010b3a4)
+    if (grab.step == 3 && grab.key == 15) {
+        int16_t dir = pdir + (rnd() * 2 + (grab.back ? 0x800 : 0) - 0x100) * 8;
+        game_blood(0, x, e->y - 2200, z, dir, 30, e->y);
+        game_blood(2, x, e->y - 2200, z, dir + 0x800, 20, e->y);
+    } else if (grab.step == 7 && grab.key >= 41 && grab.key <= 98 && !(grab.key & 1)) {
+        int32_t y = e->y - 2200 + (grab.key - 41) * 30;
+        game_blood(1, x, y, z, rnd() << 7, 15 + (rnd() & 7), e->y);
+    } else if (grab.step == 7 && grab.key >= 100 && grab.key < 105) {
+        game_blood(0, x, e->y - 300, z, rnd() << 7, 8, e->y);
+    }
 }
 
 // The zombie's side (0x801025a4)

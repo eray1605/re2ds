@@ -51,5 +51,10 @@ python3 -I tools/enemse2ds.py "$DISC/SLES_009.72" "$DISC/COMMON/SOUND/ENEMSE.VBS
 python3 -I tools/vab2ds.py "$DISC/COMMON/SOUND/CORE00.EDH" build/ds/sound/core00.bin \
     --vb "$DISC/COMMON/SOUND/CORE00.VB" > /dev/null
 
-cp -R build/ds/bg build/ds/room build/ds/model build/ds/mask build/ds/sound build/ds/door nitrofiles/
+# effect sprites (blood, sparks, casings)
+mkdir -p build/ds/effect
+python3 -I tools/esp2ds.py "$DISC/COMMON/DATA/CORE00.ESP" "$DISC/COMMON/DATA/CORE01.TIM" \
+    build/ds/effect/core.bin > /dev/null
+
+cp -R build/ds/bg build/ds/room build/ds/model build/ds/mask build/ds/sound build/ds/door build/ds/effect nitrofiles/
 du -sh nitrofiles nitrofiles/*

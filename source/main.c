@@ -19,6 +19,7 @@
 #include "script.h"
 #include "door.h"
 #include "enemy.h"
+#include "effect.h"
 #include "sound.h"
 
 // Leon's first playable room and the camera the converter picked a spawn for
@@ -228,6 +229,7 @@ static int load_room(int stage, int id)
     snprintf(bg_prefix, sizeof(bg_prefix), "room%d%02x", stage, id);
     cur_cam = -1;
     enemy_room_reset(); // the new room's scripts spawn its enemies
+    effect_clear();
     // room sound bank (the previous one may still play a short step: free it
     // only after the new one is loaded)
     void *old_bank = room_bank;
@@ -465,7 +467,9 @@ static void render_frame(void)
     glColor3b(255, 255, 255);
     glPolyFmt(POLY_ALPHA(31) | cull_models | POLY_ID(1));
     draw_player();
-    enemy_draw(have_masks ? 4 * masks.header->num_quads : 0, have_masks ? masks.header->num_quads : 0);
+    enemy_draw((have_masks ? 4 * masks.header->num_quads : 0) + 4 * effect_count(),
+               (have_masks ? masks.header->num_quads : 0) + effect_count());
+    effect_draw(room.cameras[cur_cam].from, room.cameras[cur_cam].to);
     glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(2));
     draw_masks();
     while (GFX_BUSY)
@@ -769,6 +773,11 @@ void game_player_pose(const Model *set, int anim, int key, int32_t x, int32_t z,
 void game_player_died(void)
 {
     game_over = 1;
+}
+
+void game_blood(int kind, int32_t x, int32_t y, int32_t z, int16_t dir, int speed, int32_t floor_y)
+{
+    effect_blood(kind, x, y, z, dir, speed, floor_y);
 }
 
 int game_enemy_member(int slot, int member, int *value)
@@ -1247,7 +1256,7 @@ static void print_status(void)
     printf("cull %s gx %4d/%4d   \n",
            cull_models == POLY_CULL_BACK ? "back " : cull_models == POLY_CULL_FRONT ? "front" : "aus  ",
            gx_vertices_last, gx_polygons_last);
-    printf("spr %d max %d tog %d   \n", enemy_jumps, enemy_jump_max, enemy_toggles);
+    printf("fx %d st %d n %d    \n", effect_count(), effect_status, effect_spawned);
     if (near_aot && near_aot->type == SCE_DOOR)
         printf("A: Tuer -> %X%02X            \n", near_aot->data[8] + 1, near_aot->data[9]);
     else if (near_aot)
@@ -1342,6 +1351,7 @@ int main(void)
     calibrate_culling();
     load_room_index();
 
+    effect_load();
     voice_bank = sound_bank_load("nitro:/sound/core00.bin");
     enemy_pairs = asset_load("nitro:/sound/enem_pairs.bin", NULL);
     setBrightness(1, -16);
@@ -1378,6 +1388,7 @@ int main(void)
                     .dead = player.state == ST_DEAD,
                 };
                 enemy_tick(&target);
+                effect_tick();
                 if (player.state < ST_GRABBED)
                     check_aots(pending_keys);
                 if (!near_aot && !message_text)

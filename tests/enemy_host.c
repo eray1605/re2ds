@@ -44,6 +44,7 @@ int game_player_damage(int dmg) { if (dmg < 41) dmg += dmg >> 1; host_hp -= dmg;
 void game_player_grabbed(int on) { host_held = on; printf("  grabbed %d\n", on); }
 void game_player_pose(const Model *m, int a, int k, int32_t x, int32_t z, int16_t d) { (void)m; (void)d; host_px = x; host_pz = z; if (getenv("TRACE")) printf("  leon anim %d key %d at %d %d\n", a, k, (int)x, (int)z); }
 void game_player_died(void) { host_dead = 1; printf("  died\n"); }
+void game_blood(int k, int32_t x, int32_t y, int32_t z, int16_t d, int sp, int32_t f) { (void)x; (void)z; (void)d; (void)sp; (void)f; if (getenv("TRACE")) printf("  blood %d at y %d\n", k, (int)y); }
 int game_enemy_member(int s, int m, int *v) { return enemy_member_get(s, m, v); }
 void game_enemy_member_set(int s, int m, int v) { printf("  member_set enemy %d member %d = %04x\n", s, m, v & 0xFFFF); enemy_member_set(s, m, v); }
 int game_sight_blocked(int32_t a, int32_t b, int32_t c, int32_t d, int32_t e, int32_t f) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; return 0; }
