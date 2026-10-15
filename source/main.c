@@ -68,7 +68,7 @@ static int cur_stage, cur_room;
 static char bg_prefix[16];    // e.g. "room10a"
 static Model leon;
 static Model rbj;
-static int leon_vertices;           // per frame, for the vertex budget (enemy.c)                   // the room's special-move animations (may be absent)
+static int leon_vertices, leon_polygons; // per frame, for the GX budget (enemy.c)                   // the room's special-move animations (may be absent)
 static Masks masks;
 static int have_masks;
 static int leon_tex[3];
@@ -402,7 +402,8 @@ static void render_frame(void)
     glColor3b(255, 255, 255);
     glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(1));
     draw_player();
-    enemy_draw(leon_vertices + (have_masks ? 4 * masks.header->num_quads : 0));
+    enemy_draw(leon_vertices + (have_masks ? 4 * masks.header->num_quads : 0),
+               leon_polygons + (have_masks ? masks.header->num_quads : 0));
     glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(2));
     draw_masks();
     glFlush(0);
@@ -1115,7 +1116,7 @@ int main(void)
         fatal("model/leon.bin missing");
     build_hierarchy();
     upload_leon_textures();
-    leon_vertices = model_vertex_count(&leon);
+    model_gx_cost(&leon, &leon_vertices, &leon_polygons);
     load_room_index();
 
     setBrightness(1, -16);

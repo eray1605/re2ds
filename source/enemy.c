@@ -19,7 +19,10 @@
 // The DS geometry engine takes at most 6144 vertices (and 2048 polygons) per
 // frame and silently drops the rest, so enemies would flicker. Enemies are
 // drawn nearest first while they fit; Leon and the masks are counted first.
-#define VERTEX_LIMIT 6144
+// Clipping at the screen edges adds vertices, so keep some headroom.
+#define VERTEX_LIMIT 5900
+#define POLYGON_LIMIT 1980
+#define KEEP_BONUS 1500         // drawn last frame: counts as this much nearer
 
 // collision with the room, shared with the player (main.c)
 int game_blocked(int32_t from_x, int32_t from_z, int32_t x, int32_t z, int32_t y);
@@ -31,12 +34,13 @@ typedef struct {
     int tex[MAX_PAGES];
     int pages;
     int drawable;               // textures uploaded
-    int vertices;               // vertices one instance sends to the GPU
+    int vertices, polygons;     // what one instance sends to the GPU
     int8_t first_child[64], next_sibling[64];
 } EnemyType;
 
 typedef struct {
     uint8_t active;
+    uint8_t drawn;              // drawn last frame (keeps the choice stable)
     int8_t type;                // index into types[]
     int32_t x, y, z;
     int16_t dir;                // DS units
@@ -70,29 +74,36 @@ void enemy_room_reset(void)
     memset(enemies, 0, sizeof(enemies));
 }
 
-// Vertices in all display lists of a model (packed GX: count VTX_16 commands).
-int model_vertex_count(const Model *m)
+// Vertices and polygons in all display lists of a model (packed GX lists from
+// tools/model2ds.py: BEGIN triangles or quads, TEXCOORD, VTX_16, END).
+void model_gx_cost(const Model *m, int *vertices, int *polygons)
 {
-    int total = 0, lists = m->header->num_bones * m->header->num_pages;
+    int verts = 0, polys4 = 0, lists = m->header->num_bones * m->header->num_pages;
     for (int i = 0; i < lists; i++) {
         if (!m->lists[i])
             continue;
         const uint32_t *w = (const uint32_t *)((const uint8_t *)m->data + m->lists[i]);
         uint32_t n = *w++, k = 0;
+        int per_poly = 3;
         while (k < n) {
             uint32_t ids = w[k++];
             for (int c = 0; c < 4; c++) {
                 int cmd = (ids >> (8 * c)) & 0xFF;
                 if (cmd == 0x23) {
-                    total++;
+                    verts++;
+                    polys4 += per_poly == 3 ? 4 : 3; // 12 / per_poly per vertex
                     k += 2;
-                } else if (cmd == 0x20 || cmd == 0x22 || cmd == 0x40) {
+                } else if (cmd == 0x40) {
+                    per_poly = w[k] == 1 ? 4 : 3;
+                    k += 1;
+                } else if (cmd == 0x20 || cmd == 0x22) {
                     k += 1;
                 }
             }
         }
     }
-    return total;
+    *vertices = verts;
+    *polygons = polys4 / 12;
 }
 
 static int load_type(int type)
@@ -131,7 +142,7 @@ static int load_type(int type)
         }
     }
 
-    t->vertices = model_vertex_count(&t->model);
+    model_gx_cost(&t->model, &t->vertices, &t->polygons);
 
     uint32_t size;
     snprintf(path, sizeof(path), "nitro:/model/em%02x_tex.bin", type);
@@ -177,7 +188,7 @@ void enemy_spawn(int slot, int type, int variant, int32_t x, int32_t y, int32_t 
     e->x = x;
     e->y = y;
     e->z = z;
-    e->dir = dir_re2 * 8;
+    e->dir = (dir_re2 * 8) & 32767;
     int anims = types[t].model.header->num_anims;
     if (anims == 0) {
         e->active = 0;
@@ -235,7 +246,8 @@ void enemy_tick(int32_t player_x, int32_t player_z)
 
         // turn toward the player; facing = (cos dir, -sin dir)
         int16_t want = (int16_t)(atan2f((float)-dz, (float)dx) * 32768.0f / (2.0f * 3.14159265f));
-        int16_t diff = want - e->dir;
+        // shortest way round (full circle = 32768)
+        int diff = ((want - e->dir + 16384) & 32767) - 16384;
         int step = (d < 3000 ? TURN_NEAR : TURN_FAR) * 8;
         if (diff > step)
             e->dir += step;
@@ -243,6 +255,7 @@ void enemy_tick(int32_t player_x, int32_t player_z)
             e->dir -= step;
         else
             e->dir = want;
+        e->dir &= 32767;
 
         // next keyframe and its root motion
         int prev = e->key;
@@ -291,7 +304,7 @@ static void draw_bone(const EnemyType *t, int bone, int frame)
 // Is the point roughly inside the current view? (camera from main.c)
 int camera_sees(int32_t x, int32_t y, int32_t z, int32_t margin);
 
-void enemy_draw(int vertices_used)
+void enemy_draw(int vertices_used, int polygons_used)
 {
     // nearest first: simple selection on the distance to the camera
     int order[MAX_ENEMIES], n = 0;
@@ -301,8 +314,12 @@ void enemy_draw(int vertices_used)
         if (!e->active || !types[e->type].drawable || !types[e->type].model.anims[e->anim].count)
             continue;
         int32_t d = camera_sees(e->x, e->y - 900, e->z, 1200);
-        if (d < 0)
+        if (d < 0) {
+            enemies[i].drawn = 0;
             continue; // off screen
+        }
+        if (e->drawn)
+            d -= KEEP_BONUS;
         int j = n++;
         while (j > 0 && dist[j - 1] > d) {
             order[j] = order[j - 1];
@@ -313,11 +330,14 @@ void enemy_draw(int vertices_used)
         dist[j] = d;
     }
     for (int k = 0; k < n; k++) {
-        const Enemy *e = &enemies[order[k]];
+        Enemy *e = &enemies[order[k]];
         const EnemyType *t = &types[e->type];
-        if (vertices_used + t->vertices > VERTEX_LIMIT)
-            break;
+        e->drawn = 0;
+        if (vertices_used + t->vertices > VERTEX_LIMIT || polygons_used + t->polygons > POLYGON_LIMIT)
+            continue; // a smaller model further back may still fit
         vertices_used += t->vertices;
+        polygons_used += t->polygons;
+        e->drawn = 1;
         const ModelAnim *a = &t->model.anims[e->anim];
         int frame = ANIM_FRAME(t->model.anim_pool[a->first + e->key]);
         glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(3 + order[k]));

@@ -14,11 +14,11 @@ void enemy_room_reset(void);   // frees all enemy models (room change)
 // sce_em_set: slot, type (0x10.. ), spawn variant, position, facing (RE2 units)
 void enemy_spawn(int slot, int type, int variant, int32_t x, int32_t y, int32_t z, int16_t dir_re2);
 void enemy_tick(int32_t player_x, int32_t player_z);   // once per game tick
-// vertices_used: what the frame already sends (Leon, masks)
-void enemy_draw(int vertices_used);
+// vertices/polygons_used: what the frame already sends (Leon, masks)
+void enemy_draw(int vertices_used, int polygons_used);
 int enemy_count(void);
 extern int enemy_spawn_calls, enemy_last_error;
 
 #include "assets.h"
-int model_vertex_count(const Model *m);
+void model_gx_cost(const Model *m, int *vertices, int *polygons);
 void enemy_debug_print(int tick);   // host tests only
