@@ -51,10 +51,19 @@ python3 -I tools/enemse2ds.py "$DISC/SLES_009.72" "$DISC/COMMON/SOUND/ENEMSE.VBS
 python3 -I tools/vab2ds.py "$DISC/COMMON/SOUND/CORE00.EDH" build/ds/sound/core00.bin \
     --vb "$DISC/COMMON/SOUND/CORE00.VB" > /dev/null
 
+# music: MAINxx.BGM sequences and the room -> music table
+mkdir -p build/ds/music
+for f in "$DISC"/COMMON/SOUND/MAIN*.BGM; do
+    n=$(basename "$f" .BGM | tr 'A-Z' 'a-z')
+    python3 -I tools/bgm2ds.py "$f" "build/ds/music/$n.bin" > /dev/null
+done
+python3 -I tools/bgm2ds.py --table "$DISC/SLES_009.72" "$DISC/COMMON/DATA/INIT_TBL.DAT" \
+    build/ds/music/bgm_table.bin > /dev/null
+
 # effect sprites (blood, sparks, casings)
 mkdir -p build/ds/effect
 python3 -I tools/esp2ds.py "$DISC/COMMON/DATA/CORE00.ESP" "$DISC/COMMON/DATA/CORE01.TIM" \
     build/ds/effect/core.bin > /dev/null
 
-cp -R build/ds/bg build/ds/room build/ds/model build/ds/mask build/ds/sound build/ds/door build/ds/effect nitrofiles/
+cp -R build/ds/bg build/ds/room build/ds/model build/ds/mask build/ds/sound build/ds/door build/ds/effect build/ds/music nitrofiles/
 du -sh nitrofiles nitrofiles/*

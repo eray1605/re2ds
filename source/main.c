@@ -20,6 +20,7 @@
 #include "door.h"
 #include "enemy.h"
 #include "effect.h"
+#include "music.h"
 #include "sound.h"
 
 // Leon's first playable room and the camera the converter picked a spawn for
@@ -488,6 +489,7 @@ static void fade(int dir)
         setBrightness(1, dir > 0 ? -level : level - 16);
         render_frame();
         swiWaitForVBlank();
+        music_frame();
     }
 }
 
@@ -775,6 +777,11 @@ void game_player_died(void)
     game_over = 1;
 }
 
+void game_bgm_control(int id, int op, int type, int left, int right)
+{
+    music_control(id, op, type, left, right);
+}
+
 void game_blood(int kind, int32_t x, int32_t y, int32_t z, int16_t dir, int speed, int32_t floor_y)
 {
     effect_blood(kind, x, y, z, dir, speed, floor_y);
@@ -867,6 +874,7 @@ void game_set_box_flag(int box, int flag)
 static void enter_room(int stage, int id, int arrival_cam)
 {
     load_room(stage, id);
+    music_room(stage, id);
     script_camera_changed(-1, arrival_cam);
     script_room_enter(&room);
 
@@ -953,8 +961,10 @@ static void use_door(const Aot *a)
     // 0xD7 starts at LBA 0xBA41 = DOOR00)
     if (door_begin(door_type, door_variant)) {
         bgHide(bg_id);
-        while (door_frame())
+        while (door_frame()) {
             swiWaitForVBlank();
+            music_frame();
+        }
         door_end();
         setBrightness(1, -16);
         bgShow(bg_id);
@@ -1401,6 +1411,7 @@ int main(void)
         }
         render_frame();
         swiWaitForVBlank();
+        music_frame();
         if (game_over)
             new_game();
     }

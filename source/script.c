@@ -41,7 +41,7 @@ enum {
     OP_MESSAGE_ON = 43, OP_AOT_SET = 44, OP_WORK_SET = 46, OP_POS_SET = 50, OP_DIR_SET = 51,
     OP_MEMBER_SET = 52, OP_MEMBER_SET2 = 53, OP_SE_ON = 54, OP_SCA_ID_SET = 55, OP_DIR_CK = 57, OP_SCE_EM_SET = 68, OP_DOOR_AOT_SET = 59, OP_CUT_AUTO = 60, OP_MEMBER_COPY = 61, OP_MEMBER_CMP = 62,
     OP_AOT_RESET = 70, OP_AOT_ON = 71, OP_CUT_REPLACE = 75, OP_ITEM_AOT_SET = 78,
-    OP_SCE_TRG_CK = 80, OP_KEEP_ITEM_CK = 94, OP_AOT_SET_4P = 103, OP_DOOR_AOT_SET_4P = 104,
+    OP_SCE_TRG_CK = 80, OP_SCE_BGM_CONTROL = 81, OP_KEEP_ITEM_CK = 94, OP_AOT_SET_4P = 103, OP_DOOR_AOT_SET_4P = 104,
     OP_ITEM_AOT_SET_4P = 105,
 };
 
@@ -590,6 +590,9 @@ static void run_thread(Thread *t)
             break;
         case OP_SE_ON: // bank, s16 sound (low byte = number), position source, offset
             game_play_sound(ins[1], rd16(ins + 2) & 0xFF);
+            break;
+        case OP_SCE_BGM_CONTROL: // id, operation, type, left, right
+            game_bgm_control(ins[1], ins[2], ins[3], ins[4], ins[5]);
             break;
         case OP_SCA_ID_SET:
             game_set_box_flag(ins[1], ru16(ins + 2));

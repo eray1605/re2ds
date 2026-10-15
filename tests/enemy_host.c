@@ -29,6 +29,7 @@ void game_cut_change(int c) { (void)c; }
 void game_set_player_pos(int32_t x, int32_t y, int32_t z) { (void)x; (void)y; (void)z; }
 void game_set_player_dir(int16_t d) { (void)d; }
 void game_set_box_flag(int b, int f) { (void)b; (void)f; }
+void game_bgm_control(int i, int o, int t, int l, int r) { (void)i; (void)o; (void)t; (void)l; (void)r; }
 void game_play_sound(int bank, int sound) { (void)bank; (void)sound; }
 void game_spawn_enemy(int s, int t, int v, int voice, int x, int y, int z, int d)
 {
