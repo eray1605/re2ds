@@ -662,8 +662,9 @@ static void use_door(const Aot *a)
     enter_room(stage, id, cam);
     place_player(nx, ny, nz, ndir * 8, cam);
     // byte 12 = door type; type t loads disc file 0xD7 + t (table 0x80092948),
-    // which is DOOR(t+1).DO2 (file 0xD6 = DOOR00, checked against all sizes)
-    if (door_begin(d[12] + 1, d[13])) {
+    // whose sector (table 0x8009146c) is that of DOORtt.DO2 (checked: file
+    // 0xD7 starts at LBA 0xBA41 = DOOR00)
+    if (door_begin(d[12], d[13])) {
         bgHide(bg_id);
         while (door_frame())
             swiWaitForVBlank();
