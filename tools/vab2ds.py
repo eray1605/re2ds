@@ -105,6 +105,12 @@ def main():
     else:                           # door bank: sound table in the first 16 bytes
         tone, ps, vags = parse_vab(d, base)
         picks = sound_table(struct.unpack_from("<4I", d, 0))
+    write_bank(tone, ps, vags, picks, dst)
+
+
+def write_bank(tone, ps, vags, picks, dst):
+    """Writes the DS bank: one entry per sound number of picks (or per tone of
+    program 0 when picks is None)."""
     entries, pcm = [], bytearray()
     if picks is None:
         items = [(None, tone(0, i)) for i in range(16) if tone(0, i)["vag"] > 0]

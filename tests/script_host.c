@@ -19,7 +19,7 @@ void game_set_box_flag(int box, int flag) { (void)box; (void)flag; }
 void game_play_sound(int bank, int sound) { (void)bank; (void)sound; }
 int game_enemy_member(int s, int m, int *v) { (void)s; (void)m; (void)v; return 0; }
 void game_enemy_member_set(int s, int m, int v) { (void)s; (void)m; (void)v; }
-void game_spawn_enemy(int s, int t, int v, int x, int y, int z, int d) { if (getenv("SHOW_SPAWNS")) printf("  spawn slot %d type %02x variant %d at %d %d %d dir %d\n", s, t, v, x, y, z, d); }
+void game_spawn_enemy(int s, int t, int v, int voice, int x, int y, int z, int d) { (void)voice; if (getenv("SHOW_SPAWNS")) printf("  spawn slot %d type %02x variant %d at %d %d %d dir %d\n", s, t, v, x, y, z, d); }
 
 const char *room_message(const Room *room, int n)
 {

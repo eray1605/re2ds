@@ -45,5 +45,11 @@ PY
 
 rm -rf nitrofiles
 mkdir -p nitrofiles
+# enemy voices (bank 3, one set per room) and Leon's voice (bank 4: CORE00,
+# file 0x132 of table 0x800a0118 for character 0)
+python3 -I tools/enemse2ds.py "$DISC/SLES_009.72" "$DISC/COMMON/SOUND/ENEMSE.VBS" build/ds/sound > /dev/null
+python3 -I tools/vab2ds.py "$DISC/COMMON/SOUND/CORE00.EDH" build/ds/sound/core00.bin \
+    --vb "$DISC/COMMON/SOUND/CORE00.VB" > /dev/null
+
 cp -R build/ds/bg build/ds/room build/ds/model build/ds/mask build/ds/sound build/ds/door nitrofiles/
 du -sh nitrofiles nitrofiles/*

@@ -12,10 +12,24 @@
 void enemy_room_reset(void);   // frees all enemy models (room change)
 // sce_em_set: slot, type (0x10.. ), flags (bytes 4..5: variant | status << 8),
 // position, facing (RE2 units)
-void enemy_spawn(int slot, int type, int flags, int32_t x, int32_t y, int32_t z, int16_t dir_re2);
+// voice: kind of voice (byte 7), see enemy_sound_set
+void enemy_spawn(int slot, int type, int flags, int voice, int32_t x, int32_t y, int32_t z, int16_t dir_re2);
+// after the room's spawns: index of its enemy sound set (sound/enemNN.bin)
+// from the voice kind pairs of sound/enem_pairs.bin, -1 if none
+int enemy_sound_set(const uint8_t *pairs);
+
 #define NOISE_WALK 0x02
 #define NOISE_RUN 0x04
-void enemy_tick(int32_t player_x, int32_t player_y, int32_t player_z, int noise); // once per game tick
+typedef struct {
+    int32_t x, y, z;
+    int16_t dir;                // DS units
+    int noise;                  // NOISE_*
+    int pressed;                // a key went down since the last tick (struggling free)
+    int can_grab;               // walks or stands under control (not climbing, not held)
+    int dead;
+} EnemyTarget;
+void enemy_tick(const EnemyTarget *player); // once per game tick
+int enemy_grabbing(void);       // a zombie holds Leon
 // room script access (work_set 3): member 7 = flags; 0 if unknown
 int enemy_member_get(int slot, int member, int *value);
 void enemy_member_set(int slot, int member, int value);

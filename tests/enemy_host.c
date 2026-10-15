@@ -30,11 +30,20 @@ void game_set_player_pos(int32_t x, int32_t y, int32_t z) { (void)x; (void)y; (v
 void game_set_player_dir(int16_t d) { (void)d; }
 void game_set_box_flag(int b, int f) { (void)b; (void)f; }
 void game_play_sound(int bank, int sound) { (void)bank; (void)sound; }
-void game_spawn_enemy(int s, int t, int v, int x, int y, int z, int d)
+void game_spawn_enemy(int s, int t, int v, int voice, int x, int y, int z, int d)
 {
-    printf("  spawn slot %d type %02x flags %04x at %d %d %d dir %d\n", s, t, v, x, y, z, d);
-    enemy_spawn(s, t, v, x, y, z, d);
+    printf("  spawn slot %d type %02x flags %04x voice %d at %d %d %d dir %d\n", s, t, v, voice, x, y, z, d);
+    enemy_spawn(s, t, v, voice, x, y, z, d);
 }
+// Leon for the grab test: stands still at PX, 0
+static int host_hp = 200, host_held, host_dead;
+static int32_t host_px, host_pz;
+void game_enemy_sound(int sound, int32_t x, int32_t z) { (void)x; (void)z; if (getenv("TRACE")) printf("  enemy sound %d\n", sound); }
+void game_player_voice(int sound) { if (getenv("TRACE")) printf("  voice %d\n", sound); }
+int game_player_damage(int dmg) { if (dmg < 41) dmg += dmg >> 1; host_hp -= dmg; printf("  bite: hp %d\n", host_hp); return host_hp < 0 ? 2 : 0; }
+void game_player_grabbed(int on) { host_held = on; printf("  grabbed %d\n", on); }
+void game_player_pose(const Model *m, int a, int k, int32_t x, int32_t z, int16_t d) { (void)m; (void)d; host_px = x; host_pz = z; if (getenv("TRACE")) printf("  leon anim %d key %d at %d %d\n", a, k, (int)x, (int)z); }
+void game_player_died(void) { host_dead = 1; printf("  died\n"); }
 int game_enemy_member(int s, int m, int *v) { return enemy_member_get(s, m, v); }
 void game_enemy_member_set(int s, int m, int v) { printf("  member_set enemy %d member %d = %04x\n", s, m, v & 0xFFFF); enemy_member_set(s, m, v); }
 int game_sight_blocked(int32_t a, int32_t b, int32_t c, int32_t d, int32_t e, int32_t f) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; return 0; }
@@ -48,7 +57,10 @@ int main(int argc, char **argv)
     for (int t = 0; t < ticks; t++) {
         int before = enemy_spawn_calls;
         script_tick();
-        enemy_tick(getenv("PX") ? atoi(getenv("PX")) : 5899, 0, 0, 0);
+        EnemyTarget p = { .x = host_held ? host_px : (getenv("PX") ? atoi(getenv("PX")) : 5899),
+                          .z = host_held ? host_pz : 0, .can_grab = !host_held && !host_dead,
+                          .pressed = getenv("MASH") && (t & 1), .dead = host_dead };
+        enemy_tick(&p);
         if (enemy_spawn_calls != before) printf("tick %d: %d spawn calls total, %d active\n", t, enemy_spawn_calls, enemy_count());
         if (getenv("TRACE")) enemy_debug_print(t);
     }

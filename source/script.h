@@ -72,7 +72,8 @@ void game_set_box_flag(int box, int flag);  // sca_id_set: collision box on/off
 // (FUN_80057364: tables 0x800d36c0[bank])
 void game_play_sound(int bank, int sound);
 // sce_em_set: enemy / character in slot `slot` (enemy.c)
-void game_spawn_enemy(int slot, int type, int flags, int x, int y, int z, int dir_re2);
+// voice: kind of voice (byte 7), picks the enemy sound set of the room
+void game_spawn_enemy(int slot, int type, int flags, int voice, int x, int y, int z, int dir_re2);
 // enemy object members for the room scripts (member_set / member_copy /
 // member_cmp after work_set 3): 0 if the member is not modelled
 int game_enemy_member(int slot, int member, int *value);

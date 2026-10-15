@@ -585,7 +585,7 @@ static void run_thread(Thread *t)
         }
         case OP_SCE_EM_SET: // pad, slot, type, variant, status, floor, sound, model,
                             // set flag, x, y, z, dir, motion, ctr flag
-            game_spawn_enemy(ins[2], ins[3], ru16(ins + 4), rd16(ins + 10), rd16(ins + 12),
+            game_spawn_enemy(ins[2], ins[3], ru16(ins + 4), ins[7], rd16(ins + 10), rd16(ins + 12),
                              rd16(ins + 14), rd16(ins + 16));
             break;
         case OP_SE_ON: // bank, s16 sound (low byte = number), position source, offset

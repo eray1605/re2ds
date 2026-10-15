@@ -19,8 +19,10 @@
 // that need no attacks yet. One game tick here is one PS1 frame.
 #define ST_LURK 0               // stands, shuffles now and then (0x801011fc / 0x8010135c)
 #define ST_CHASE 1              // shuffles toward Leon (0x8010167c / 0x801019d0)
+#define ST_LUNGE 2              // arms up, faster at Leon (0x80101f0c / 0x80102218)
+#define ST_GRAB 3               // grabs and bites (0x8010259c / 0x801025a4)
 #define ST_LYING 7              // lies until EF_HOLD goes, then gets up (0x801036b4)
-#define ST_EAT 8                // eats (variant 8)
+#define ST_EAT 8                // eats (variant 8, or Leon's body)
 
 // Enemy.flags = sce_em_set bytes 4..5 (obj+0x10e): spawn variant | status << 8.
 // Room scripts read and write it as member 7.
@@ -34,6 +36,22 @@
 #define A_GET_UP 0x08           // 0x09 from the other lying pose
 #define A_EAT 0x12
 #define A_LIE 0x17              // 0x16 = the other lying pose
+#define A_GRAB 0x0B             // grab; + 1 bite (loops), + 2 pushed away
+#define SET_PLAYER 2            // set 2 is for Leon's skeleton (the PS1 plays it on him)
+#define P_GRAB_FRONT 0          // grabbed from the front; + 1 struggle, + 2 break free
+#define P_GRAB_BACK 3           // from behind
+#define P_DIE_FRONT 0x0D
+#define P_DIE_BACK 0x0F
+
+#define GRAB_DISTANCE 1200
+#define BITE_KEY 16             // keyframe of the bite (table 0x80100014)
+#define BITE_DAMAGE 20          // before the PS1's x1.5 (FUN_8003cf38): 30 HP
+#define STRUGGLE 148            // -2 per frame, -5 more per frame with a key pressed
+
+// Enemy sounds (bank 3, sound/enemNN.bin), + 16 for the room's second voice
+#define SND_BITE 3
+#define SND_MOAN 10             // 10..13
+#define MOAN_PAUSE 150          // frames between moans (obj+0x239)
 
 #define EYE_ENEMY (-2768)       // part 8 above the feet (line of sight, 0x80046fb0)
 #define EYE_PLAYER (-2507)
@@ -52,6 +70,13 @@
 int game_blocked(int32_t from_x, int32_t from_z, int32_t x, int32_t z, int32_t y);
 // does a room box that blocks sight lie between the two points? (main.c)
 int game_sight_blocked(int32_t x0, int32_t y0, int32_t z0, int32_t x1, int32_t y1, int32_t z1);
+// sounds and Leon while he is held (main.c)
+void game_enemy_sound(int sound, int32_t x, int32_t z);
+void game_player_voice(int sound);         // CORE00: 0 / 2 grabbed, 3 dies
+int game_player_damage(int damage);       // 0 hurt, 1 down to 0 HP once (breaks free), 2 dies
+void game_player_grabbed(int on);
+void game_player_pose(const Model *set, int anim, int key, int32_t x, int32_t z, int16_t dir);
+void game_player_died(void);              // death animation over
 
 // Turning while chasing from afar (0x8010c748): frames to keep a course, bit
 // 15 = turn away from Leon for that long. The zombies weave toward him.
@@ -94,7 +119,24 @@ typedef struct {
     uint8_t sight_timer;        // the PS1 checks it every 8 frames
     uint8_t wander_idx, turn_timer, standing;
     int16_t timer, timer2;      // obj+0x158, obj+0x15a
+    uint8_t voice, voice_ofs;   // voice kind (sce_em_set byte 7); + 16 for the second kind
+    uint8_t moan_pause;
 } Enemy;
+
+// The grab: one zombie at a time (PS1 flag 0x80 in 0x800c79c7). Zombie and
+// Leon stand at an anchor plus their animation's offset (speed x/y/z), turned
+// to the zombie's facing (FUN_80015534 / FUN_80015658), so the two animations
+// fit together.
+static struct {
+    int8_t enemy;               // -1 = none
+    uint8_t back;               // grabbed from behind
+    uint8_t step;               // Leon: 1 grab, 3 struggle, 4/5 break free, 6/7 dies
+    int32_t ax, az;             // anchor
+    int16_t dir;                // the zombie's facing when it grabbed
+    int anim, key;              // Leon's animation (zombie model, set 2)
+    int16_t struggle;
+} grab = { .enemy = -1 };
+static uint8_t voice_first, voice_second; // PS1 0x800d0818 / 0x800d0819
 
 static EnemyType types[MAX_TYPES];
 static Enemy enemies[MAX_ENEMIES];
@@ -122,6 +164,8 @@ void enemy_room_reset(void)
         if (types[i].type)
             free_type(&types[i]);
     memset(enemies, 0, sizeof(enemies));
+    grab.enemy = -1;
+    voice_first = voice_second = 0;
 }
 
 // Vertices and polygons in all display lists of a model (packed GX lists from
@@ -261,6 +305,11 @@ static void enter_state(Enemy *e, int state)
         e->wander_idx = (rnd() & 0xF) << 1;
         e->timer = (wander[e->wander_idx] & 0x7FFF) + rnd();
         e->turn_timer = (rnd() & 0x1F) + 30;
+        e->timer2 = (rnd() >> 3) + 100;
+        break;
+    case ST_LUNGE:
+        set_anim(e, SET_GAIT, e->gait + 4, rnd() & 0x1F); // the arms-up gaits
+        e->timer = (rnd() & 0x3F) + 180;
         break;
     case ST_LYING:
         set_anim(e, SET_MAIN, e->lie_alt ? A_LIE - 1 : A_LIE, 0);
@@ -271,7 +320,7 @@ static void enter_state(Enemy *e, int state)
     }
 }
 
-void enemy_spawn(int slot, int type, int flags, int32_t x, int32_t y, int32_t z, int16_t dir_re2)
+void enemy_spawn(int slot, int type, int flags, int voice, int32_t x, int32_t y, int32_t z, int16_t dir_re2)
 {
     enemy_spawn_calls++;
     if (slot < 0 || slot >= MAX_ENEMIES) {
@@ -295,6 +344,13 @@ void enemy_spawn(int slot, int type, int flags, int32_t x, int32_t y, int32_t z,
         return;
     }
     e->flags = flags;
+    e->voice = voice;
+    if (voice && voice != voice_first) { // PS1: the room's first and a second voice kind
+        if (!voice_first)
+            voice_first = voice;
+        else
+            voice_second = voice;
+    }
     e->gait = gaits[(rnd() >> (rnd() & 3)) & 7];
     e->sight_timer = slot & 7;
 
@@ -305,11 +361,47 @@ void enemy_spawn(int slot, int type, int flags, int32_t x, int32_t y, int32_t z,
     case 4: state = ST_LYING; break;
     case 5: e->lie_alt = 1; e->flags = EF_HOLD | 2; state = ST_LYING; break; // lies as if dead
     case 7: e->flags = EF_HOLD | 4; state = ST_LYING; break;
-    case 1:                                    // PS1: lunges at once (state 2, not done yet)
+    case 1: state = ST_LUNGE; break;
     case 6: state = ST_CHASE; break;
     case 8: state = ST_EAT; break;
     }
     enter_state(e, state);
+}
+
+// The room's enemy sound set (FUN_8004f1d0): the first pair of voice kinds in
+// pairs (u8 count, then (first, second) per set) that matches the room's;
+// enemies of the pair's second kind use sound + 16. -1 if none.
+int enemy_sound_set(const uint8_t *pairs)
+{
+    if (!pairs || !voice_first)
+        return -1;
+    for (int i = 0; i < pairs[0]; i++) {
+        int a = pairs[1 + 2 * i], b = pairs[2 + 2 * i];
+        int fits = a == voice_first && (!voice_second || voice_second == b);
+        int swapped = !fits && b == voice_first && (!voice_second || voice_second == a);
+        if (!fits && !swapped)
+            continue;
+        for (int k = 0; k < MAX_ENEMIES; k++) {
+            Enemy *e = &enemies[k];
+            e->voice_ofs = (e->voice == voice_first && swapped) ||
+                           (e->voice == voice_second && voice_second && !swapped) ? 16 : 0;
+        }
+        return i;
+    }
+    return -1;
+}
+
+static void sound_at(const Enemy *e, int sound)
+{
+    game_enemy_sound(sound + e->voice_ofs, e->x, e->z);
+}
+
+static void moan(Enemy *e, int sound)
+{
+    if (e->moan_pause)
+        return;
+    sound_at(e, sound);
+    e->moan_pause = MOAN_PAUSE;
 }
 
 // Members the room scripts read (FUN_8005202c lists all): 0 = object flags,
@@ -475,8 +567,11 @@ static void lurk(Enemy *e, int i, int32_t px, int32_t pz, uint32_t d, int noise)
         return;
     }
     anim_step(e, NULL); // standing
-    if (e->timer2-- == 0)
-        e->timer2 = rnd() + 300; // PS1: moans (sound 11) half the time
+    if (e->timer2-- == 0) {
+        e->timer2 = rnd() + 300;
+        if (rnd() & 1)
+            moan(e, SND_MOAN + 1);
+    }
     if (e->timer2 == 0 && !(rnd() & 1))
         e->sub = 2;
     if (e->timer == 0) {
@@ -487,8 +582,192 @@ static void lurk(Enemy *e, int i, int32_t px, int32_t pz, uint32_t d, int noise)
     }
 }
 
-static void chase(Enemy *e, int i, int32_t px, int32_t pz, uint32_t d)
+// Grab Leon: he must be within +-45 degrees in front (two +-22.5 degree cones
+// for the arms, FUN_800150f8), closer than 1200, and nobody else holds him.
+static int can_grab(const Enemy *e, const EnemyTarget *p, uint32_t d)
 {
+    return d < GRAB_DISTANCE && grab.enemy < 0 && p->can_grab && in_cone(e, p->x, p->z, 0x200);
+}
+
+// World position of an animation offset (speed x/y/z) of the grab, turned
+// like the PS1's RotMatrixY(dir) (x' = c x + s z, z' = -s x + c z).
+static void turned_offset(const Model *m, int anim, int key, int16_t dir, int32_t *x, int32_t *z)
+{
+    const ModelAnim *a = &m->anims[anim];
+    const ModelFrame *f = model_frame(m, ANIM_FRAME(m->anim_pool[a->first + key]));
+    int32_t c = cosLerp(dir), sn = sinLerp(dir);
+    *x = (f->speed[0] * c + f->speed[2] * sn) >> 12;
+    *z = (-f->speed[0] * sn + f->speed[2] * c) >> 12;
+}
+
+static void grab_place(const Model *m, int anim, int key, int32_t *x, int32_t *z)
+{
+    turned_offset(m, anim, key, grab.dir, x, z);
+    *x += grab.ax;
+    *z += grab.az;
+}
+
+static void start_grab(Enemy *e, int i, const EnemyTarget *p)
+{
+    const Model *m = &types[e->type].model;
+    e->state = ST_GRAB;
+    e->sub = 1;
+    e->standing = 0;
+    e->dir = angle_to(e, p->x, p->z); // turns to Leon at once
+    set_anim(e, SET_MAIN, A_GRAB, 0);
+    grab.enemy = i;
+    grab.dir = e->dir;
+    // from behind if Leon looks the same way as the zombie (FUN_800152b0)
+    grab.back = ((p->dir - e->dir + 8192) & 32767) < 16384;
+    // anchor: the zombie's position minus its own animation offset
+    grab.ax = grab.az = 0;
+    int32_t ox, oz;
+    grab_place(m, e->anim, e->key, &ox, &oz);
+    grab.ax = e->x - ox;
+    grab.az = e->z - oz;
+    grab.step = 1;
+    grab.anim = types[e->type].set_start[SET_PLAYER] + (grab.back ? P_GRAB_BACK : P_GRAB_FRONT);
+    grab.key = 0;
+    game_player_grabbed(1);
+    game_player_voice((rnd() & 1) ? 2 : 0);
+    moan(e, (rnd() & 1) ? SND_MOAN : SND_MOAN + 1);
+}
+
+// Leon's side of the grab (FUN_8010a8f8 front / back, FUN_8010b3a4 dying)
+static void grab_player(const Enemy *e)
+{
+    const EnemyType *t = &types[e->type];
+    const Model *m = &t->model;
+    int base = t->set_start[SET_PLAYER];
+    int count = m->anims[grab.anim].count;
+    switch (grab.step) {
+    case 1: // grabbed
+        if (++grab.key >= count) {
+            grab.anim = base + (grab.back ? P_GRAB_BACK : P_GRAB_FRONT) + 1;
+            grab.key = 0;
+            grab.step = 3;
+        }
+        break;
+    case 3: // struggles
+        grab.key = (grab.key + 1) % count;
+        break;
+    case 4: // breaks free
+        grab.anim = base + (grab.back ? P_GRAB_BACK : P_GRAB_FRONT) + 2;
+        grab.key = 0;
+        grab.step = 5;
+        break;
+    case 5:
+        if (++grab.key >= count) {
+            grab.enemy = -1;
+            game_player_grabbed(0);
+            return;
+        }
+        break;
+    case 6: // dies
+        grab.anim = base + (grab.back ? P_DIE_BACK : P_DIE_FRONT);
+        grab.key = 0;
+        grab.step = 7;
+        game_player_voice(3);
+        break;
+    case 7:
+        if (grab.key + 1 >= count) {
+            game_player_died();
+            return;
+        }
+        grab.key++;
+        break;
+    }
+    int32_t x, z;
+    grab_place(m, grab.anim, grab.key, &x, &z);
+    // front: Leon faces the zombie; from behind he looks the same way
+    game_player_pose(m, grab.anim, grab.key, x, z, grab.back ? grab.dir : (grab.dir + 16384) & 32767);
+}
+
+// The zombie's side (0x801025a4)
+static void grab_zombie(Enemy *e, int i, int pressed)
+{
+    const Model *m = &types[e->type].model;
+    int32_t x, z;
+    switch (e->sub) {
+    case 1: // grabs
+        if (anim_step(e, NULL)) {
+            set_anim(e, SET_MAIN, A_GRAB + 1, 0);
+            grab.struggle = STRUGGLE;
+            e->sub = 3;
+        }
+        break;
+    case 3: // bites
+        anim_step(e, NULL);
+        if (grab.step == 3) {
+            grab.struggle -= 2 + (pressed ? 5 : 0);
+            if (grab.struggle < 0) {
+                e->sub = 4;
+                grab.step = 4;
+                break;
+            }
+        }
+        if (e->key == BITE_KEY) {
+            sound_at(e, SND_BITE);
+            int r = game_player_damage(BITE_DAMAGE);
+            if (r == 1) {         // down to 0 HP the first time: he tears free
+                e->sub = 4;
+                grab.step = 4;
+            } else if (r == 2) {  // dead: keeps eating
+                e->sub = 9;
+                grab.step = 6;
+            }
+        }
+        break;
+    case 4: // pushed away
+        set_anim(e, SET_MAIN, A_GRAB + 2, 0);
+        e->sub = 5;
+        break;
+    case 5: { // staggers back; from key 7 on it has let go and collides
+        int32_t x0, z0;
+        turned_offset(m, e->anim, e->key, e->dir, &x0, &z0);
+        int done = anim_step(e, NULL);
+        if (e->key < 7) {
+            grab_place(m, e->anim, e->key, &x, &z);
+            e->x = x;
+            e->z = z;
+        } else {
+            turned_offset(m, e->anim, e->key, e->dir, &x, &z);
+            int32_t dx = x - x0, dz = z - z0;
+            if (!game_blocked(e->x, e->z, e->x + dx, e->z, e->y))
+                e->x += dx;
+            if (!game_blocked(e->x, e->z, e->x, e->z + dz, e->y))
+                e->z += dz;
+        }
+        if (done) {
+            if (grab.enemy == i && grab.step < 4)
+                grab.enemy = -1;
+            enter_state(e, ST_LURK);
+        }
+        return;
+    }
+    case 9: // eats the body
+        anim_step(e, NULL);
+        break;
+    }
+    if (e->sub != 5) {
+        grab_place(m, e->anim, e->key, &x, &z);
+        e->x = x;
+        e->z = z;
+    }
+}
+
+static void chase(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
+{
+    int32_t px = p->x, pz = p->z;
+    // decision (0x8010167c): grab, or eat Leon's body
+    if (can_grab(e, p, d)) {
+        start_grab(e, i, p);
+        return;
+    }
+    if (p->dead && d < 1000 && in_cone(e, px, pz, 0x200)) {
+        enter_state(e, ST_EAT);
+        return;
+    }
     // movement (0x801019d0)
     if (e->timer-- == 0) {
         e->wander_idx = (e->wander_idx + 1) & 31;
@@ -501,13 +780,17 @@ static void chase(Enemy *e, int i, int32_t px, int32_t pz, uint32_t d)
     turn_toward(e, px, pz, rate);
     if (e->turn_timer-- == 0) {
         e->turn_timer = (rnd() & 0xF) + 30;
-        turn_toward(e, px, pz, 16); // PS1: may moan (sound 10 / 11)
+        turn_toward(e, px, pz, 16);
+        if (!(rnd() & 0x1F))
+            moan(e, SND_MOAN);
+        else if (!(rnd() & 0x1F))
+            moan(e, SND_MOAN + 1);
     }
     if (d < 3000)
         turn_toward(e, px, pz, 16);
 
-    // touching Leon: the PS1 grabs him (state 3, not done yet); stand
-    // instead of walking on the spot
+    // touching Leon while another zombie holds him: stand instead of
+    // walking on the spot
     if (d < CONTACT_DISTANCE) {
         if (!e->standing) {
             set_anim(e, SET_MAIN, A_STAND, 0);
@@ -523,6 +806,43 @@ static void chase(Enemy *e, int i, int32_t px, int32_t pz, uint32_t d)
     int32_t fwd;
     anim_step(e, &fwd);
     walk(e, i, fwd);
+
+    // now and then, or when Leon is close in front or runs: arms up (state 2)
+    if (e->timer2-- == 1) {
+        e->timer2 = (rnd() >> 3) + 100;
+        if (!(rnd() & 3) && d < 5000)
+            goto lunge;
+    }
+    if ((d < 2000 && in_cone(e, px, pz, 0x200) && grab.enemy < 0) ||
+        ((p->noise & NOISE_RUN) && d < 2500 && in_cone(e, px, pz, 0x52C)))
+        goto lunge;
+    return;
+lunge:
+    enter_state(e, ST_LUNGE);
+    if (rnd() & 1)
+        moan(e, SND_MOAN + 1);
+    else
+        moan(e, SND_MOAN);
+}
+
+// arms up, toward Leon (0x80102218); back to shuffling after a while
+static void lunge(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
+{
+    if (can_grab(e, p, d)) {
+        start_grab(e, i, p);
+        return;
+    }
+    turn_toward(e, p->x, p->z, 16);
+    if (d >= CONTACT_DISTANCE) {
+        int32_t fwd;
+        anim_step(e, &fwd);
+        walk(e, i, fwd);
+    } else {
+        anim_step(e, NULL);
+    }
+    if (e->timer-- == 0 || grab.enemy >= 0 ||
+        ((d > 5000 || !in_cone(e, p->x, p->z, 0x400)) && e->timer < 120))
+        enter_state(e, ST_CHASE);
 }
 
 static void lying(Enemy *e)
@@ -531,7 +851,8 @@ static void lying(Enemy *e)
     case 1: // down until the room script clears the hold flag
         if (!(e->flags & EF_HOLD)) {
             set_anim(e, SET_MAIN, e->lie_alt ? A_GET_UP + 1 : A_GET_UP, rnd() & 0xF);
-            e->sub = 3; // PS1: moans (sound 10, 11 or 12)
+            e->sub = 3;
+            moan(e, (rnd() & 1) ? SND_MOAN + 2 : (rnd() & 1) ? SND_MOAN + 1 : SND_MOAN);
         }
         break;
     case 3: // getting up
@@ -541,26 +862,34 @@ static void lying(Enemy *e)
     }
 }
 
-void enemy_tick(int32_t px, int32_t py, int32_t pz, int noise)
+void enemy_tick(const EnemyTarget *p)
 {
     for (int i = 0; i < MAX_ENEMIES; i++) {
         Enemy *e = &enemies[i];
         if (!e->active || !types[e->type].model.anims[e->anim].count)
             continue;
-        float fdx = (float)(px - e->x), fdz = (float)(pz - e->z);
+        float fdx = (float)(p->x - e->x), fdz = (float)(p->z - e->z);
         uint32_t d = (uint32_t)sqrtf(fdx * fdx + fdz * fdz);
+        if (e->moan_pause)
+            e->moan_pause--;
         if (e->sight_timer-- == 0) {
             e->sight_timer = 7;
-            e->sees = !game_sight_blocked(e->x, e->y + EYE_ENEMY, e->z, px, py + EYE_PLAYER, pz);
+            e->sees = !game_sight_blocked(e->x, e->y + EYE_ENEMY, e->z, p->x, p->y + EYE_PLAYER, p->z);
         }
         switch (e->state) {
-        case ST_LURK: lurk(e, i, px, pz, d, noise); break;
-        case ST_CHASE: chase(e, i, px, pz, d); break;
+        case ST_LURK: lurk(e, i, p->x, p->z, d, p->noise); break;
+        case ST_CHASE: chase(e, i, p, d); break;
+        case ST_LUNGE: lunge(e, i, p, d); break;
+        case ST_GRAB: grab_zombie(e, i, p->pressed); break;
         case ST_LYING: lying(e); break;
         default: anim_step(e, NULL); break;
         }
     }
+    if (grab.enemy >= 0 && enemies[grab.enemy].state == ST_GRAB)
+        grab_player(&enemies[grab.enemy]);
 }
+
+int enemy_grabbing(void) { return grab.enemy >= 0; }
 
 static void draw_bone(const EnemyType *t, int bone, int frame)
 {

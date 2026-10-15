@@ -65,7 +65,8 @@ enum { TURN_IDLE = 80, TURN_WALK = 40, TURN_RUN = 56 };
 #define BG_BASE_FRONT 0
 #define BG_BASE_BACK 4
 
-typedef enum { ST_IDLE, ST_WALK, ST_RUN, ST_BACK, ST_CLIMB, ST_JUMP, ST_FALL, ST_LAND } PlayerState;
+typedef enum { ST_IDLE, ST_WALK, ST_RUN, ST_BACK, ST_CLIMB, ST_JUMP, ST_FALL, ST_LAND,
+               ST_GRABBED, ST_DEAD } PlayerState; // held / killed: enemy.c moves Leon
 
 typedef struct {
     uint8_t stage, room;
@@ -103,9 +104,17 @@ static struct {
     int slope;                // RoomBox index of the slope/stairs Leon is on, -1 = none
     int32_t fall_speed;       // jump down: rises by 1 per tick, y += speed * 30 (pl_move_09)
     int32_t ground;           // jump down: height to land on
-    const Model *set;         // animation set: &leon or &rbj
+    const Model *set;         // animation set: &leon, &rbj or an enemy's (held)
     int32_t slope_base;       // height of that slope's bottom edge
+    int16_t hp;               // 200 at the start (PS1 obj+0x156)
+    uint8_t saved_once;       // survived a bite once with 0 HP (PS1 0x800c7948 & 0x1000)
 } player;
+#define PLAYER_HP 200
+
+static void *voice_bank;            // Leon's voice (CORE00, PS1 bank 4)
+static void *enemy_bank;            // the room's enemy sounds (ENEMSE set, bank 3)
+static uint8_t *enemy_pairs;        // voice kind pairs per set (enemse2ds.py)
+static int game_over;               // Leon's death animation is over
 
 static void render_frame(void);
 
@@ -697,9 +706,69 @@ void game_set_player_pos(int32_t x, int32_t y, int32_t z)
 
 void game_set_player_dir(int16_t dir_re2) { player.dir = dir_re2 * 8; }
 
-void game_spawn_enemy(int slot, int type, int flags, int x, int y, int z, int dir_re2)
+void game_spawn_enemy(int slot, int type, int flags, int voice, int x, int y, int z, int dir_re2)
 {
-    enemy_spawn(slot, type, flags, x, y, z, dir_re2);
+    enemy_spawn(slot, type, flags, voice, x, y, z, dir_re2);
+}
+
+// Enemy sounds get quieter with the distance to Leon (the PS1 places them in
+// 3D; this is the simple version).
+void game_enemy_sound(int sound, int32_t x, int32_t z)
+{
+    float dx = (float)(x - player.x), dz = (float)(z - player.z);
+    int d = (int)sqrtf(dx * dx + dz * dz);
+    int volume = d >= 20000 ? 20 : 127 - d * 107 / 20000;
+    sound_play(enemy_bank, sound, volume, 64);
+}
+
+void game_player_voice(int sound)
+{
+    sound_play(voice_bank, sound, 127, 64);
+}
+
+// FUN_8003cf38: bites under 41 count 1.5 times; at the first drop below 0 by
+// at most 14 Leon is left with 0 HP and tears free instead of dying.
+int game_player_damage(int damage)
+{
+    if (damage < 41)
+        damage += damage >> 1;
+    player.hp -= damage;
+    if (player.hp >= 0)
+        return 0;
+    if (player.hp < -14 || player.saved_once)
+        return 2;
+    player.hp = 0;
+    player.saved_once = 1;
+    return 1;
+}
+
+void game_player_grabbed(int on)
+{
+    if (on) {
+        player.state = ST_GRABBED;
+        player.slope = -1;
+    } else {
+        player.state = ST_IDLE;
+        set_anim(ANIM_IDLE);
+    }
+}
+
+void game_player_pose(const Model *set, int anim, int key, int32_t x, int32_t z, int16_t dir)
+{
+    if (player.hp < 0)
+        player.state = ST_DEAD;
+    player.set = set;
+    player.anim = anim;
+    player.key = key;
+    player.x = x;
+    player.z = z;
+    player.dir = dir;
+    check_camera_switch();
+}
+
+void game_player_died(void)
+{
+    game_over = 1;
 }
 
 int game_enemy_member(int slot, int member, int *value)
@@ -791,6 +860,33 @@ static void enter_room(int stage, int id, int arrival_cam)
     load_room(stage, id);
     script_camera_changed(-1, arrival_cam);
     script_room_enter(&room);
+
+    // the enemy voices of the room pick its enemy sound set
+    char path[40];
+    int set = enemy_sound_set(enemy_pairs);
+    sound_bank_free(enemy_bank);
+    enemy_bank = NULL;
+    if (set >= 0) {
+        snprintf(path, sizeof(path), "nitro:/sound/enem%02d.bin", set);
+        enemy_bank = sound_bank_load(path);
+    }
+}
+
+// New game, and after Leon died (the PS1 shows "YOU DIED" and goes back to
+// the title; here the game simply starts over)
+static void new_game(void)
+{
+    if (game_over)
+        fade(1);
+    game_over = 0;
+    player.state = ST_IDLE;
+    player.hp = PLAYER_HP;
+    player.saved_once = 0;
+    enter_room(START_STAGE, START_ROOM, -1);
+    if (!room.data)
+        fatal("room/room1000.bin missing");
+    place_player(START_X, 0, START_Z, START_DIR, START_CAM);
+    fade(-1);
 }
 
 static void warp_to(int index)
@@ -798,7 +894,8 @@ static void warp_to(int index)
     const RoomRef *r = &room_index[index];
     fade(1);
     enter_room(r->stage, r->room, -1);
-    place_player(START_X, 0, START_Z, START_DIR, START_CAM);
+    const RoomHeader *h = room.header;
+    place_player(h->spawn[0], h->spawn[1], h->spawn[2], h->spawn_dir, h->start_camera);
     fade(-1);
 }
 
@@ -1094,6 +1191,8 @@ static void try_special_move(uint32_t pressed)
 static void update_player_tick(void)
 {
     PlayerState st = player.state;
+    if (st >= ST_GRABBED)
+        return; // enemy.c moves him
     if (st >= ST_CLIMB) {
         special_move_tick();
         return;
@@ -1143,7 +1242,8 @@ static void print_status(void)
     printf("pos %6ld %6ld %6ld  \n", (long)player.x, (long)player.y, (long)player.z);
     printf("dir %5d floor %d slope %3d  \n", player.dir & 0x7FFF, player_floor(), player.slope);
     printf("skript: %d threads, %d unbek.  \n", script_threads_running, script_unknown_ops);
-    printf("gegner: %d  aufrufe %d  fehler %d  \n", enemy_count(), enemy_spawn_calls, enemy_last_error);
+    printf("HP %3d %s  gegner %d  \n", player.hp,
+           player.hp < 21 ? "Danger " : player.hp < 101 ? "Caution" : "Fine   ", enemy_count());
     printf("cull %s gx %4d/%4d   \n",
            cull_models == POLY_CULL_BACK ? "back " : cull_models == POLY_CULL_FRONT ? "front" : "aus  ",
            gx_vertices_last, gx_polygons_last);
@@ -1242,12 +1342,10 @@ int main(void)
     calibrate_culling();
     load_room_index();
 
+    voice_bank = sound_bank_load("nitro:/sound/core00.bin");
+    enemy_pairs = asset_load("nitro:/sound/enem_pairs.bin", NULL);
     setBrightness(1, -16);
-    enter_room(START_STAGE, START_ROOM, -1);
-    if (!room.data)
-        fatal("room/room1000.bin missing");
-    place_player(START_X, 0, START_Z, START_DIR, START_CAM);
-    fade(-1);
+    new_game();
 
     // pmMainLoop() services calico's power management (lid, reset, ARM7 messages);
     // the devkitPro examples call it every frame before reading input.
@@ -1270,10 +1368,18 @@ int main(void)
             update_player_frame(keysHeld());
             for (game_tick_acc += GAME_HZ; game_tick_acc >= DS_HZ && !message_text; game_tick_acc -= DS_HZ) {
                 update_player_tick();
-                enemy_tick(player.x, player.y, player.z,
-                           player.state == ST_RUN ? NOISE_RUN
-                           : player.state == ST_WALK || player.state == ST_BACK ? NOISE_WALK : 0);
-                check_aots(pending_keys);
+                EnemyTarget target = {
+                    .x = player.x, .y = player.y, .z = player.z, .dir = player.dir,
+                    .noise = player.state == ST_RUN ? NOISE_RUN
+                             : player.state == ST_WALK || player.state == ST_BACK ? NOISE_WALK : 0,
+                    .pressed = (pending_keys & (KEY_UP | KEY_DOWN | KEY_LEFT | KEY_RIGHT | KEY_A |
+                                                KEY_B | KEY_X | KEY_Y | KEY_L | KEY_R)) != 0,
+                    .can_grab = player.state < ST_CLIMB,
+                    .dead = player.state == ST_DEAD,
+                };
+                enemy_tick(&target);
+                if (player.state < ST_GRABBED)
+                    check_aots(pending_keys);
                 if (!near_aot && !message_text)
                     try_special_move(pending_keys);
                 pending_keys = 0;
@@ -1284,6 +1390,8 @@ int main(void)
         }
         render_frame();
         swiWaitForVBlank();
+        if (game_over)
+            new_game();
     }
     return 0;
 }
