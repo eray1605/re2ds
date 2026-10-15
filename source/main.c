@@ -21,6 +21,7 @@
 #include "enemy.h"
 #include "effect.h"
 #include "music.h"
+#include "menu.h"
 #include "sound.h"
 
 // Leon's first playable room and the camera the converter picked a spawn for
@@ -668,33 +669,10 @@ static void place_player(int32_t x, int32_t y, int32_t z, int16_t dir, int cam)
 void game_show_message(const char *text)
 {
     message_text = text;
-    consoleClear();
-    printf("\x1b[2;0H");
-    // word wrap at 32 columns
-    int col = 0;
-    for (const char *p = text; *p; p++) {
-        if (*p == '\n') {
-            printf("\n");
-            col = 0;
-            continue;
-        }
-        if (*p == ' ' && col > 0) {
-            int len = 0;
-            while (p[1 + len] && p[1 + len] != ' ' && p[1 + len] != '\n')
-                len++;
-            if (col + 1 + len > 31) {
-                printf("\n");
-                col = 0;
-                continue;
-            }
-        }
-        printf("%c", *p);
-        col++;
-    }
-    printf("\n\n\n                       [A]\n");
+    menu_message(text);
 }
 
-int game_message_open(void) { return message_text != NULL; }
+int game_message_open(void) { return menu_message_open(); }
 
 void game_cut_change(int cam)
 {
@@ -899,6 +877,11 @@ static void new_game(void)
     player.state = ST_IDLE;
     player.hp = PLAYER_HP;
     player.saved_once = 0;
+    // Leon starts with the knife and the H&K VP70 (rounds: unverified)
+    inventory_reset();
+    inventory_add(0x01, 1);
+    inventory_add(0x02, 18);
+    inventory_equipped = 1;
     enter_room(START_STAGE, START_ROOM, -1);
     if (!room.data)
         fatal("room/room1000.bin missing");
@@ -982,10 +965,13 @@ static void trigger(Aot *a)
     case SCE_ITEM: {
         int item = a->data[0] | a->data[1] << 8, amount = a->data[2] | a->data[3] << 8;
         int picked = a->data[4] | a->data[5] << 8;
-        inventory_add(item, amount);
+        if (!inventory_add(item, amount)) {
+            game_show_message("You cannot carry any more.");
+            break;
+        }
         flag_set(FLAGS_ITEM_PICKED, picked, 1);
         a->active = 0;
-        snprintf(text, sizeof(text), "Item %d picked up (x%d).", item, amount);
+        snprintf(text, sizeof(text), "You picked up the %s.", item_name(item));
         game_show_message(text);
         break;
     }
@@ -1257,6 +1243,8 @@ static const char *aot_name(int type)
 
 static void print_status(void)
 {
+    if (menu_sel >= 0 && menu_open)
+        return; // the room list uses the console
     printf("\x1b[0;0HRE2 DS - room %X%02X  cam %d   \n", cur_stage, cur_room, cur_cam);
     printf("pos %6ld %6ld %6ld  \n", (long)player.x, (long)player.y, (long)player.z);
     printf("dir %5d floor %d slope %3d  \n", player.dir & 0x7FFF, player_floor(), player.slope);
@@ -1284,7 +1272,7 @@ static void update_menu(uint32_t down)
 {
     if (down & KEY_SELECT) {
         menu_open = !menu_open;
-        consoleClear();
+        menu_debug(menu_open);
         if (menu_open) {
             for (int i = 0; i < room_count; i++)
                 if (room_index[i].stage == cur_stage && room_index[i].room == cur_room)
@@ -1304,7 +1292,7 @@ static void update_menu(uint32_t down)
     menu_sel = (menu_sel % room_count + room_count) % room_count;
     if (down & (KEY_A | KEY_B)) {
         menu_open = 0;
-        consoleClear();
+        menu_debug(0);
         if (down & KEY_A)
             warp_to(menu_sel);
         return;
@@ -1362,6 +1350,7 @@ int main(void)
     load_room_index();
 
     effect_load();
+    menu_init();
     voice_bank = sound_bank_load("nitro:/sound/core00.bin");
     enemy_pairs = asset_load("nitro:/sound/enem_pairs.bin", NULL);
     setBrightness(1, -16);
@@ -1372,18 +1361,21 @@ int main(void)
     while (pmMainLoop()) {
         scanKeys();
         uint32_t down = keysDown();
-        if (message_text) {
-            // play is paused while a message is shown; the closing press is
-            // not passed on (it would trigger the same AOT again)
-            if (down & (KEY_A | KEY_B)) {
+        // the status screen pauses play while it has the focus or shows a
+        // message; the closing press is not passed on (it would trigger the
+        // same AOT again)
+        int paused = 0;
+        if (!menu_open) {
+            int had_message = menu_message_open();
+            paused = menu_frame(down, player.hp) || had_message;
+            if (!menu_message_open())
                 message_text = NULL;
-                consoleClear();
-            }
-            down = 0;
-        } else {
-            update_menu(down);
+            if (paused)
+                down = 0;
         }
-        if (!menu_open && !message_text) {
+        if (!paused)
+            update_menu(down);
+        if (!menu_open && !paused) {
             pending_keys |= down;
             update_player_frame(keysHeld());
             for (game_tick_acc += GAME_HZ; game_tick_acc >= DS_HZ && !message_text; game_tick_acc -= DS_HZ) {
@@ -1406,9 +1398,9 @@ int main(void)
                 pending_keys = 0;
                 script_tick();
             }
-            if (!message_text)
-                print_status();
         }
+        if (menu_open)
+            print_status();
         render_frame();
         swiWaitForVBlank();
         music_frame();
