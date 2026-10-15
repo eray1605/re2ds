@@ -39,7 +39,7 @@ enum {
     OP_RETURN = 25, OP_BREAK = 26, OP_CK = 33, OP_SET = 34, OP_CMP = 35, OP_SAVE = 36,
     OP_COPY = 37, OP_CALC = 38, OP_CALC2 = 39, OP_CUT_CHG = 41, OP_CUT_OLD = 42,
     OP_MESSAGE_ON = 43, OP_AOT_SET = 44, OP_WORK_SET = 46, OP_POS_SET = 50, OP_DIR_SET = 51,
-    OP_SE_ON = 54, OP_SCA_ID_SET = 55, OP_DIR_CK = 57, OP_DOOR_AOT_SET = 59, OP_CUT_AUTO = 60, OP_MEMBER_CMP = 62,
+    OP_SE_ON = 54, OP_SCA_ID_SET = 55, OP_DIR_CK = 57, OP_SCE_EM_SET = 68, OP_DOOR_AOT_SET = 59, OP_CUT_AUTO = 60, OP_MEMBER_CMP = 62,
     OP_AOT_RESET = 70, OP_AOT_ON = 71, OP_CUT_REPLACE = 75, OP_ITEM_AOT_SET = 78,
     OP_SCE_TRG_CK = 80, OP_KEEP_ITEM_CK = 94, OP_AOT_SET_4P = 103, OP_DOOR_AOT_SET_4P = 104,
     OP_ITEM_AOT_SET_4P = 105,
@@ -558,6 +558,11 @@ static void run_thread(Thread *t)
             break;
         case OP_WORK_SET:
             t->work_type = ins[1];
+            break;
+        case OP_SCE_EM_SET: // pad, slot, type, variant, status, floor, sound, model,
+                            // set flag, x, y, z, dir, motion, ctr flag
+            game_spawn_enemy(ins[2], ins[3], ins[4], rd16(ins + 10), rd16(ins + 12), rd16(ins + 14),
+                             rd16(ins + 16));
             break;
         case OP_SE_ON: // bank, s16 sound (low byte = number), position source, offset
             game_play_sound(ins[1], rd16(ins + 2) & 0xFF);

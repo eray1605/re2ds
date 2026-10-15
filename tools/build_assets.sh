@@ -19,6 +19,8 @@ mkdir -p build/bg build/room build/leon build/mask build/ds/bg build/ds/room bui
 
 python3 -I tools/pld2json.py "$DISC/PL0/PLD/PL00.PLD" build/leon/leon --plw "$DISC/PL0/PLD/PL00W00.PLW"
 python3 -I tools/model2ds.py build/leon/leon.json "$DISC/PL0/PLD/PL00.PLD" build/ds/model/leon
+# enemies and characters (model/emXX*.bin)
+python3 -I tools/em2ds.py "$DISC/SLES_009.72" "$DISC/PL0/PLD/CDEMD0.EMS" build/ds/model > /dev/null
 
 # doors: sound/doorNN.bin and door/doorNN_{model,tex,prog}.bin from COMMON/DOOR/DOORNN.DO2
 mkdir -p build/ds/sound build/ds/door

@@ -67,9 +67,9 @@ def build_lists(mesh, page):
     return pack_gx(lists) if lists else None
 
 
-def main():
-    model = json.load(open(sys.argv[1]))
-    pld_path, out = sys.argv[2], sys.argv[3]
+def write_model(model, tim, out):
+    """model: pld2json-style dict (skeleton with frames, meshes, animations,
+    animation_flags, texture.palettes); tim: pld2json.parse_tim_8bpp result."""
     skel = model["skeleton"]
     nb = skel["bones"]
     pages = model["texture"]["palettes"]
@@ -125,10 +125,6 @@ def main():
         f.write(blob)
 
     # texture pages
-    d = open(pld_path, "rb").read()
-    dir_off, _ = struct.unpack_from("<II", d, 0)
-    off_tim = struct.unpack_from("<4I", d, dir_off)[3]
-    tim = pld2json.parse_tim_8bpp(d, off_tim)
     pw = tim["width"] // pages
     tex = bytearray()
     for p in range(pages):
@@ -143,6 +139,15 @@ def main():
     print(f"{out}.bin: {len(blob)} bytes ({nb} bones, {n_lists} display lists = {len(lists_blob)} bytes, "
           f"{len(skel['frames'])} keyframes, {len(model['animations'])} animations); "
           f"{out}_tex.bin: {len(tex)} bytes ({pages} pages {pw}x{tim['height']})")
+
+
+def main():
+    model = json.load(open(sys.argv[1]))
+    pld_path, out = sys.argv[2], sys.argv[3]
+    d = open(pld_path, "rb").read()
+    dir_off, _ = struct.unpack_from("<II", d, 0)
+    off_tim = struct.unpack_from("<4I", d, dir_off)[3]
+    write_model(model, pld2json.parse_tim_8bpp(d, off_tim), out)
 
 
 if __name__ == "__main__":

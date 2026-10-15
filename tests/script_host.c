@@ -17,6 +17,7 @@ void game_set_player_pos(int32_t x, int32_t y, int32_t z) { pos_sets++; (void)x;
 void game_set_player_dir(int16_t dir) { (void)dir; }
 void game_set_box_flag(int box, int flag) { (void)box; (void)flag; }
 void game_play_sound(int bank, int sound) { (void)bank; (void)sound; }
+void game_spawn_enemy(int s, int t, int v, int x, int y, int z, int d) { (void)s; (void)t; (void)v; (void)x; (void)y; (void)z; (void)d; }
 
 const char *room_message(const Room *room, int n)
 {

@@ -18,6 +18,7 @@
 #include "assets.h"
 #include "script.h"
 #include "door.h"
+#include "enemy.h"
 #include "sound.h"
 
 // Leon's first playable room and the camera the converter picked a spawn for
@@ -203,6 +204,7 @@ static int load_room(int stage, int id)
     cur_room = id;
     snprintf(bg_prefix, sizeof(bg_prefix), "room%d%02x", stage, id);
     cur_cam = -1;
+    enemy_room_reset(); // the new room's scripts spawn its enemies
     // room sound bank (the previous one may still play a short step: free it
     // only after the new one is loaded)
     void *old_bank = room_bank;
@@ -364,6 +366,7 @@ static void render_frame(void)
     glColor3b(255, 255, 255);
     glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(1));
     draw_player();
+    enemy_draw();
     glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(2));
     draw_masks();
     glFlush(0);
@@ -599,6 +602,21 @@ void game_set_player_pos(int32_t x, int32_t y, int32_t z)
 }
 
 void game_set_player_dir(int16_t dir_re2) { player.dir = dir_re2 * 8; }
+
+void game_spawn_enemy(int slot, int type, int variant, int x, int y, int z, int dir_re2)
+{
+    enemy_spawn(slot, type, variant, x, y, z, dir_re2);
+}
+
+// room collision for enemies (same rule as the player, on the floor of y)
+int game_blocked(int32_t from_x, int32_t from_z, int32_t x, int32_t z, int32_t y)
+{
+    int32_t saved = player.y;
+    player.y = y; // player_floor() reads it
+    int b = blocked(from_x, from_z, x, z);
+    player.y = saved;
+    return b;
+}
 
 void game_play_sound(int bank, int sound)
 {
@@ -969,6 +987,7 @@ static void print_status(void)
     printf("pos %6ld %6ld %6ld  \n", (long)player.x, (long)player.y, (long)player.z);
     printf("dir %5d floor %d slope %3d  \n", player.dir & 0x7FFF, player_floor(), player.slope);
     printf("skript: %d threads, %d unbek.  \n", script_threads_running, script_unknown_ops);
+    printf("gegner: %d   \n", enemy_count());
     if (near_aot && near_aot->type == SCE_DOOR)
         printf("A: Tuer -> %X%02X            \n", near_aot->data[8] + 1, near_aot->data[9]);
     else if (near_aot)
@@ -1031,9 +1050,13 @@ int main(void)
     // Default slots only: libnds derives the texture slot from the bank
     // number (B = slot 1, D = slot 3) when it uploads.
     vramSetBankB(VRAM_B_TEXTURE);
+    vramSetBankC(VRAM_C_TEXTURE);  // enemy textures
     vramSetBankD(VRAM_D_TEXTURE);
     vramSetBankE(VRAM_E_TEX_PALETTE);
-    consoleDemoInit(); // sub screen text, uses VRAM C
+    // sub screen text on VRAM H (32 KB): font tiles at 0, map at 8 KB
+    videoSetModeSub(MODE_0_2D);
+    vramSetBankH(VRAM_H_SUB_BG);
+    consoleInit(NULL, 0, BgType_Text4bpp, BgSize_T_256x256, 4, 0, false, true);
 
     if (!nitroFSInit(NULL))
         fatal("NitroFS init failed");
@@ -1087,6 +1110,7 @@ int main(void)
             update_player_frame(keysHeld());
             for (game_tick_acc += GAME_HZ; game_tick_acc >= DS_HZ && !message_text; game_tick_acc -= DS_HZ) {
                 update_player_tick();
+                enemy_tick(player.x, player.z);
                 check_aots(pending_keys);
                 if (!near_aot && !message_text)
                     try_special_move(pending_keys);
