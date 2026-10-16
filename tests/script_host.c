@@ -20,6 +20,15 @@ void game_bgm_control(int i, int o, int t, int l, int r) { (void)i; (void)o; (vo
 void game_play_sound(int bank, int sound) { (void)bank; (void)sound; }
 int game_enemy_member(int s, int m, int *v) { (void)s; (void)m; (void)v; return 0; }
 void game_enemy_member_set(int s, int m, int v) { (void)s; (void)m; (void)v; }
+int game_player_member(int m, int *v) { (void)m; (void)v; return 0; }
+void game_player_member_set(int m, int v) { (void)m; (void)v; }
+void game_voice(int k, int n) { (void)k; (void)n; }
+int game_voice_playing(void) { return 0; }
+void game_object_set(const uint8_t *ins) { (void)ins; }
+void game_object_hide(int model) { (void)model; }
+int game_object_member(int n, int m, int *v) { (void)n; (void)m; (void)v; return 0; }
+void game_object_member_set(int n, int m, int v) { (void)n; (void)m; (void)v; }
+void game_plc(int w, int i, const uint8_t *ins) { (void)w; (void)i; (void)ins; }
 void game_spawn_enemy(int s, int t, int v, int voice, int x, int y, int z, int d) { (void)voice; if (getenv("SHOW_SPAWNS")) printf("  spawn slot %d type %02x variant %d at %d %d %d dir %d\n", s, t, v, x, y, z, d); }
 
 const char *room_message(const Room *room, int n)

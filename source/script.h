@@ -79,6 +79,21 @@ void game_spawn_enemy(int slot, int type, int flags, int voice, int x, int y, in
 // member_cmp after work_set 3): 0 if the member is not modelled
 int game_enemy_member(int slot, int member, int *value);
 void game_enemy_member_set(int slot, int member, int value);
+// the same for Leon (work_set 1): 0x0B-0x0D position, 0x0F facing
+int game_player_member(int member, int *value);
+void game_player_member_set(int member, int value);
+// plc_* commands (plc.h) for the work object: type 1 = Leon, 3 = enemy index
+void game_plc(int work_type, int index, const uint8_t *ins);
+// xa_on: voice clip n of the stage (kind 0) or of the common table (kind 1)
+void game_voice(int kind, int n);
+int game_voice_playing(void);  // wsleeping waits for it (PS1 0x800c77d4 & 0x20)
+// obj_model_set: place model ins[1] of the room (the whole 38-byte instruction)
+void game_object_set(const uint8_t *ins);
+// an item AOT whose item is already taken: its model stays hidden
+void game_object_hide(int model);
+// work_set 4: members 0x0B-0x0D position, 0x0F facing of room object n
+int game_object_member(int n, int member, int *value);
+void game_object_member_set(int n, int member, int value);
 
 void script_room_enter(const Room *room);   // resets AOTs/threads, runs init, starts main
 void script_tick(void);

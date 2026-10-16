@@ -14,6 +14,7 @@
 #define ITEMS_MAGIC 0x31544952 // "RIT1"
 #define ICON_W 40
 #define ICON_H 30
+#define PICTURES_MAGIC 0x31504952 // "RIP1"
 
 enum { C_BLACK, C_DARK, C_GREY, C_LIGHT, C_WHITE, C_GREEN, C_YELLOW, C_RED, C_DIM_GREEN, C_DIM_YELLOW, C_DIM_RED };
 enum { CMD_EQUIP, CMD_USE, CMD_CHECK, CMD_COMBINE, NUM_CMDS };
@@ -40,6 +41,9 @@ static const char *message;
 static char info[96];                  // text box when no message is open
 static int ecg_phase;
 static int combine_from = -1;          // COMBINE picked on this slot: choosing the other
+static uint8_t *pictures;              // menu/pictures.bin (tools/itps2ds.py)
+static int num_pictures, picture_w, picture_h;
+static int picture;                    // item whose picture covers the slots (0 = none)
 
 // Menu sounds from CORE00 (PS1 bank 4; the status screen plays 0x404..0x40A):
 // by length 4 is the short cursor blip, 5 / 6 select and back, 7 the "no"
@@ -241,6 +245,19 @@ static void draw_weapon(void)
     }
 }
 
+// the PS1's item picture (ITPS.ITP), over the slots
+static void draw_picture(void)
+{
+    if (!pictures || picture < 1 || picture >= num_pictures)
+        return;
+    int x = (256 - picture_w) / 2, y = 58;
+    fill(x - 4, y - 4, picture_w + 8, picture_h + 8, C_BLACK);
+    frame(x - 2, y - 2, picture_w + 4, picture_h + 4, C_GREY);
+    const uint8_t *p = pictures + 12 + picture * picture_w * picture_h;
+    for (int j = 0; j < picture_h; j++)
+        memcpy(fb + (y + j) * 256 + x, p + j * picture_w, picture_w);
+}
+
 static void redraw(int hp)
 {
     memset(fb, col(C_BLACK), sizeof(fb));
@@ -250,6 +267,7 @@ static void redraw(int hp)
     for (int i = 0; i < INV_SLOTS; i++)
         draw_slot(i);
     draw_commands();
+    draw_picture();
     if (message)
         text_box(message, C_WHITE);
     else
@@ -341,6 +359,15 @@ void menu_init(void)
         name_offs = (const uint16_t *)(portrait + portrait_w * portrait_h);
         names = (const char *)(name_offs + num_names);
     }
+    pictures = asset_load("nitro:/menu/pictures.bin", NULL);
+    if (pictures && *(uint32_t *)pictures == PICTURES_MAGIC) {
+        num_pictures = *(uint16_t *)(pictures + 4);
+        picture_w = *(uint16_t *)(pictures + 6);
+        picture_h = *(uint16_t *)(pictures + 8);
+    } else if (pictures) {
+        asset_free(pictures);
+        pictures = NULL;
+    }
     show_screen();
 }
 
@@ -366,6 +393,12 @@ void menu_message(const char *t)
 }
 
 int menu_message_open(void) { return message != NULL; }
+
+void menu_picture(int item)
+{
+    picture = item;
+    last_hp = -9999;
+}
 
 void menu_focus(int on)
 {
@@ -470,6 +503,7 @@ static void command(int k)
         break;
     case CMD_CHECK:
         snprintf(info, sizeof(info), "%s.", item_name(s->item));
+        menu_picture(s->item);
         break;
     case CMD_COMBINE:
         combine_from = sel;
@@ -503,9 +537,14 @@ int menu_frame(uint32_t down, int hp)
     if (debug_mode)
         return 0;
     int changed = 0;
+    if (picture && !message && down) { // a CHECK picture stays until the next input
+        picture = 0;
+        changed = 1;
+    }
     if (message) {
         if (down & (KEY_A | KEY_B | KEY_TOUCH)) {
             message = NULL;
+            picture = 0;
             changed = 1;
         }
     } else if (down & KEY_TOUCH) {

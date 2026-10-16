@@ -12,3 +12,4 @@ int music_playing(void);
 // picks MAINxx; the same music keeps playing across rooms.
 void music_room(int stage, int room);
 void music_control(int id, int op, int type, int left, int right); // sce_bgm_control
+void music_duck(int on);      // quieter while a voice clip plays

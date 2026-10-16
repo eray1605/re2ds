@@ -7,6 +7,7 @@
 
 #include "assets.h"
 #include "enemy.h"
+#include "plc.h"
 
 #define MAX_TYPES 4             // models loaded at the same time (texture memory)
 #define MAX_PAGES 4
@@ -116,6 +117,9 @@ typedef struct {
     int8_t first_child[64], next_sibling[64];
 } EnemyType;
 
+#define POSE_BONES 32
+#define POSE_BLEND_TICKS 7
+
 typedef struct {
     uint8_t active;
     uint8_t drawn;              // drawn last frame (keeps the choice stable)
@@ -146,6 +150,17 @@ typedef struct {
     int8_t target;              // obj+0x1da (member 0x1a): object index, 2 + slot
     uint8_t has_goal;
     int16_t goal_x, goal_z;     // where it heads for Leon (obj+0x1c4 / 0x1c6 in routine 1)
+    Plc plc;                    // routine 4: the room script moves it (plc.c)
+    uint8_t victim;             // a person a zombie got (routine 8 mode 2): falls, then lies
+    const Model *anim_set;      // e->anim is in this set (the room's), NULL = its own model
+    // shown pose: eases into a new animation over POSE_BLEND_TICKS like Leon's
+    // (FUN_80028a4c), so a person switching gestures does not snap
+    int16_t pose_rot[POSE_BONES][3];
+    int16_t pose_ofs[3];
+    const Model *pose_set;
+    int16_t pose_anim;
+    uint8_t pose_blend, pose_valid;
+    uint8_t no_blend;           // plc flag 0x40: the next animation starts without easing
 } Enemy;
 
 // The grab: one zombie at a time (PS1 flag 0x80 in 0x800c79c7). Zombie and
@@ -165,6 +180,21 @@ static uint8_t voice_first, voice_second; // PS1 0x800d0818 / 0x800d0819
 
 static EnemyType types[MAX_TYPES];
 static Enemy enemies[MAX_ENEMIES];
+static const Model *room_sets[MAX_ENEMIES]; // the room's animations per slot (RBJ masks)
+
+// People (types 0x40 and up: Kendo 0x48, ...) do not fight; the room scripts
+// move them, otherwise they stand.
+#define FIRST_PERSON_TYPE 0x40
+static int is_person(const Enemy *e) { return types[e->type].type >= FIRST_PERSON_TYPE; }
+
+// the set e->anim / e->key refer to
+static const Model *anim_model(const Enemy *e) { return e->anim_set ? e->anim_set : &types[e->type].model; }
+
+void enemy_set_room_set(int slot, const Model *set)
+{
+    if (slot >= 0 && slot < MAX_ENEMIES)
+        room_sets[slot] = set;
+}
 
 // diagnostics for the debug screen
 int enemy_jumps, enemy_jump_max, enemy_toggles; // moves > 200 per tick, largest, draw on/off while visible
@@ -394,6 +424,8 @@ void enemy_spawn(int slot, int type, int flags, int voice, int32_t x, int32_t y,
     case 8: state = ST_EAT; break;
     }
     enter_state(e, state);
+    if (is_person(e))
+        set_anim(e, SET_MAIN, 2, 0);
 }
 
 // The room's enemy sound set (FUN_8004f1d0): the first pair of voice kinds in
@@ -980,6 +1012,16 @@ static void script_mode(Enemy *e, int i)
         if (e->sub == 1 && e->key == LUNGE_HOLD_KEY) {
             e->sub = 2;
             set_anim(e, SET_MAIN, A_SCRIPT_HOLD, 0);
+            // the victim plays the zombie's set 2 (FUN_80015534): here its fall
+            Enemy *v = e->target >= 2 && e->target - 2 < MAX_ENEMIES ? &enemies[e->target - 2] : NULL;
+            const EnemyType *zt = &types[e->type];
+            if (v && v->active && is_person(v) && zt->num_sets > SET_PLAYER) {
+                v->plc.active = 0;
+                v->victim = 1;
+                v->anim_set = &zt->model;
+                v->anim = zt->set_start[SET_PLAYER] + P_DIE_FRONT;
+                v->key = 0;
+            }
         }
         break;
     case 3:
@@ -991,6 +1033,101 @@ static void script_mode(Enemy *e, int i)
         anim_step(e, NULL);
         break;
     }
+}
+
+// ---------------------------------------------------------------- pose
+// The pose to draw this tick: the animation's keyframe, eased in over
+// POSE_BLEND_TICKS after the animation changed (shown = new + (shown - new)
+// * left / 8, as FUN_80028a4c does for every character).
+static void update_pose(Enemy *e)
+{
+    const Model *fm = anim_model(e);
+    const ModelAnim *a = &fm->anims[e->anim];
+    if (!a->count)
+        return;
+    int key = e->key < a->count ? e->key : a->count - 1;
+    int frame = ANIM_FRAME(fm->anim_pool[a->first + key]);
+    const ModelFrame *f = model_frame(fm, frame);
+    const int16_t *rot = model_frame_rot(fm, frame);
+    int bones = types[e->type].model.header->num_bones;
+    if (fm->header->num_bones < bones)
+        bones = fm->header->num_bones;
+    if (bones > POSE_BONES)
+        bones = POSE_BONES;
+    if (!e->pose_valid || e->no_blend)
+        e->pose_blend = 0;
+    else if (fm != e->pose_set || e->anim != e->pose_anim)
+        e->pose_blend = POSE_BLEND_TICKS;
+    e->no_blend = 0;
+    e->pose_set = fm;
+    e->pose_anim = e->anim;
+    e->pose_valid = 1;
+    int w = e->pose_blend;
+    for (int b = 0; b < bones; b++)
+        for (int k = 0; k < 3; k++) {
+            int32_t to = rot[b * 3 + k] & 32767;
+            int32_t d = ((e->pose_rot[b][k] - to + 16384) & 32767) - 16384;
+            e->pose_rot[b][k] = (int16_t)((to + d * w / 8) & 32767);
+        }
+    for (int k = 0; k < 3; k++)
+        e->pose_ofs[k] = (int16_t)(f->offset[k] + (e->pose_ofs[k] - f->offset[k]) * w / 8);
+    if (e->pose_blend)
+        e->pose_blend--;
+}
+
+// ---------------------------------------------------------------- plc
+// The character as plc.c sees it: the room's set for mode 0, its own model
+// for the rest. Zombies walk with their gait (set 0) and stand with set 1's
+// first animation; people (Kendo) walk with set 0's first and stand with set
+// 1's third (0x800116bc / 0x800116c8: walk 0, stand 2 of those sets).
+static PlcBody enemy_body(const Enemy *e, int slot)
+{
+    const EnemyType *t = &types[e->type];
+    int set0 = t->num_sets > 0 ? t->set_start[0] : 0, set1 = t->num_sets > 1 ? t->set_start[1] : set0;
+    PlcBody b = { .x = e->x, .z = e->z, .dir = e->dir, .set = anim_model(e), .anim = e->anim,
+                  .key = e->key, .room_set = room_sets[slot], .own_set = &t->model, .own_first = set0,
+                  .walk_anim = set0 + (is_person(e) ? 0 : e->gait),
+                  .idle_anim = is_person(e) ? set1 + 2 : set1 + A_STAND,
+                  .table = t->type >= FIRST_PERSON_TYPE ? t->type - FIRST_PERSON_TYPE : 16 };
+    if (b.idle_anim >= t->model.header->num_anims)
+        b.idle_anim = 0;
+    return b;
+}
+
+static void enemy_body_back(Enemy *e, const PlcBody *b)
+{
+    e->x = b->x;
+    e->z = b->z;
+    e->dir = b->dir;
+    e->anim_set = b->set == &types[e->type].model ? NULL : b->set;
+    e->anim = b->anim;
+    e->key = b->key;
+    e->no_blend |= b->no_blend;
+}
+
+void enemy_plc(int slot, const uint8_t *ins)
+{
+    if (slot < 0 || slot >= MAX_ENEMIES || !enemies[slot].active)
+        return;
+    Enemy *e = &enemies[slot];
+    PlcBody b = enemy_body(e, slot);
+    int was = e->plc.active;
+    plc_command(&e->plc, &b, ins);
+    enemy_body_back(e, &b);
+    if (was && !e->plc.active) { // plc_ret: back to its own routine
+        e->anim_set = NULL;
+        if (is_person(e))
+            set_anim(e, SET_MAIN, 2, 0);
+        else
+            enter_state(e, e->state);
+    }
+}
+
+static void plc_step(Enemy *e, int slot)
+{
+    PlcBody b = enemy_body(e, slot);
+    plc_tick(&e->plc, &b);
+    enemy_body_back(e, &b);
 }
 
 // ---------------------------------------------------------------- path zones
@@ -1158,7 +1295,7 @@ void enemy_tick(const EnemyTarget *p)
 {
     for (int i = 0; i < MAX_ENEMIES; i++) {
         Enemy *e = &enemies[i];
-        if (!present(e) || !types[e->type].model.anims[e->anim].count)
+        if (!present(e) || !anim_model(e)->anims[e->anim].count)
             continue;
         float fdx = (float)(p->x - e->x), fdz = (float)(p->z - e->z);
         uint32_t d = (uint32_t)sqrtf(fdx * fdx + fdz * fdz);
@@ -1171,6 +1308,20 @@ void enemy_tick(const EnemyTarget *p)
         }
         if (e->state == ST_DEAD)
             continue;
+        if (e->plc.active) {
+            plc_step(e, i);
+            continue;
+        }
+        if (e->victim) { // falls, then stays down
+            const ModelAnim *a = &anim_model(e)->anims[e->anim];
+            if (e->key + 1 < a->count)
+                e->key++;
+            continue;
+        }
+        if (is_person(e)) { // stands (routine 1 of the people is not ported)
+            anim_step(e, NULL);
+            continue;
+        }
         if (e->routine == 8) {
             script_mode(e, i);
             continue;
@@ -1193,11 +1344,14 @@ void enemy_tick(const EnemyTarget *p)
     }
     if (grab.enemy >= 0 && enemies[grab.enemy].state == ST_GRAB)
         grab_player(&enemies[grab.enemy]);
+    for (int i = 0; i < MAX_ENEMIES; i++)
+        if (present(&enemies[i]))
+            update_pose(&enemies[i]);
 }
 
 int enemy_grabbing(void) { return grab.enemy >= 0; }
 
-static int alive(const Enemy *e) { return present(e) && e->state < ST_DYING; }
+static int alive(const Enemy *e) { return present(e) && e->state < ST_DYING && !is_person(e); }
 
 // Nearest living enemy Leon can see within range (0 = any), for the
 // auto-aim when he raises a weapon (FUN_8003ed74). -1 if none.
@@ -1329,15 +1483,14 @@ static void fallen(Enemy *e, int i)
     }
 }
 
-static void draw_bone(const EnemyType *t, int bone, int frame)
+static void draw_bone(const EnemyType *t, const Enemy *e, int bone)
 {
     const Model *m = &t->model;
     const ModelBone *b = &m->bones[bone];
-    const ModelFrame *f = model_frame(m, frame);
-    const int16_t *rot = model_frame_rot(m, frame) + bone * 3;
+    const int16_t *rot = e->pose_rot[bone < POSE_BONES ? bone : 0];
     glPushMatrix();
     if (b->parent < 0)
-        glTranslatef32(f->offset[0], f->offset[1], f->offset[2]);
+        glTranslatef32(e->pose_ofs[0], e->pose_ofs[1], e->pose_ofs[2]);
     else
         glTranslatef32(b->pos[0], b->pos[1], b->pos[2]);
     glRotateXi(rot[0]);
@@ -1351,7 +1504,7 @@ static void draw_bone(const EnemyType *t, int bone, int frame)
         }
     }
     for (int c = t->first_child[bone]; c >= 0; c = t->next_sibling[c])
-        draw_bone(t, c, frame);
+        draw_bone(t, e, c);
     glPopMatrix(1);
 }
 
@@ -1368,7 +1521,7 @@ void enemy_draw(int reserve_vertices, int reserve_polygons)
     int32_t dist[MAX_ENEMIES];
     for (int i = 0; i < MAX_ENEMIES; i++) {
         const Enemy *e = &enemies[i];
-        if (!present(e) || !types[e->type].drawable || !types[e->type].model.anims[e->anim].count)
+        if (!present(e) || !types[e->type].drawable || !anim_model(e)->anims[e->anim].count)
             continue;
         int32_t d = camera_sees(e->x, e->y - 900, e->z, 1200);
         if (d >= 0 && camera_occluded(e->x, e->y, e->z))
@@ -1404,8 +1557,8 @@ void enemy_draw(int reserve_vertices, int reserve_polygons)
         int v0 = GFX_VERTEX_RAM_USAGE, p0 = GFX_POLYGON_RAM_USAGE;
         if (v0 + est_v + reserve_vertices > VERTEX_LIMIT || p0 + est_p + reserve_polygons > POLYGON_LIMIT)
             continue; // a cheaper one further back may still fit
-        const ModelAnim *a = &t->model.anims[e->anim];
-        int frame = ANIM_FRAME(t->model.anim_pool[a->first + e->key]);
+        if (!e->pose_valid)
+            update_pose(e);
         glPolyFmt(POLY_ALPHA(31) | cull_models | POLY_ID(3 + order[k]));
         glPushMatrix();
         glTranslatef32(e->x, e->y, e->z);
@@ -1414,7 +1567,7 @@ void enemy_draw(int reserve_vertices, int reserve_polygons)
             glRotateZi(-e->flinch * 220);
         for (int b = 0; b < t->model.header->num_bones; b++)
             if (t->model.bones[b].parent < 0)
-                draw_bone(t, b, frame);
+                draw_bone(t, e, b);
         glPopMatrix(1);
         while (GFX_BUSY)
             ;

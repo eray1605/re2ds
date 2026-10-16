@@ -21,4 +21,5 @@ python3 -I tools/mask2ds.py "build/room/$RDT.json" "build/mask/$R" "build/ds/mas
 python3 -I tools/vab2ds.py "$DISC/PL0/RDT/$RDT.RDT" "build/ds/sound/$LOWER.bin" --rdt > /dev/null
 python3 -I tools/rbj2ds.py "$DISC/PL0/RDT/$RDT.RDT" "build/ds/room/${LOWER}_rbj.bin" > /dev/null
 python3 -I tools/blk2ds.py "$DISC/PL0/RDT/$RDT.RDT" "build/ds/room/${LOWER}_blk.bin" > /dev/null
+python3 -I tools/obj2ds.py "$DISC/PL0/RDT/$RDT.RDT" "build/ds/room/${LOWER}_obj.bin" > /dev/null
 echo "$RDT ok"

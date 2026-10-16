@@ -38,11 +38,12 @@ enum {
     OP_SWITCH = 19, OP_CASE = 20, OP_DEFAULT = 21, OP_ESWITCH = 22, OP_GOTO = 23, OP_GOSUB = 24,
     OP_RETURN = 25, OP_BREAK = 26, OP_CK = 33, OP_SET = 34, OP_CMP = 35, OP_SAVE = 36,
     OP_COPY = 37, OP_CALC = 38, OP_CALC2 = 39, OP_CUT_CHG = 41, OP_CUT_OLD = 42,
-    OP_MESSAGE_ON = 43, OP_AOT_SET = 44, OP_WORK_SET = 46, OP_POS_SET = 50, OP_DIR_SET = 51,
+    OP_MESSAGE_ON = 43, OP_AOT_SET = 44, OP_OBJ_MODEL_SET = 45, OP_WORK_SET = 46, OP_SPEED_SET = 47, OP_ADD_SPEED = 48, OP_ADD_ASPEED = 49, OP_POS_SET = 50, OP_DIR_SET = 51,
     OP_MEMBER_SET = 52, OP_MEMBER_SET2 = 53, OP_SE_ON = 54, OP_SCA_ID_SET = 55, OP_DIR_CK = 57, OP_SCE_EM_SET = 68, OP_DOOR_AOT_SET = 59, OP_CUT_AUTO = 60, OP_MEMBER_COPY = 61, OP_MEMBER_CMP = 62,
     OP_AOT_RESET = 70, OP_AOT_ON = 71, OP_CUT_REPLACE = 75, OP_ITEM_AOT_SET = 78,
     OP_SCE_TRG_CK = 80, OP_SCE_BGM_CONTROL = 81, OP_KEEP_ITEM_CK = 94, OP_AOT_SET_4P = 103, OP_DOOR_AOT_SET_4P = 104,
-    OP_ITEM_AOT_SET_4P = 105,
+    OP_ITEM_AOT_SET_4P = 105, OP_PLC_MOTION = 63, OP_PLC_DEST = 64, OP_PLC_RET = 66, OP_PLC_ROT = 88,
+    OP_PLC_CNT = 91, OP_PLC_STOP = 102, OP_XA_ON = 89,
 };
 
 enum { B_IF, B_FOR, B_WHILE, B_DO, B_DOCOND, B_SWITCH };
@@ -62,6 +63,8 @@ typedef struct {
     uint8_t wait_message;
     uint8_t work_type;         // work_set: 1 = player, 3 = enemy, 4 = object
     uint8_t work_index;        // which enemy / object
+    int16_t speed[12];         // speed_set: 0-2 position speed, 3-5 rotation speed (added by
+                               // add_speed), 6-11 their accelerations (add_aspeed); thread+0x158
     int nblocks, ncalls;
     Block blocks[MAX_BLOCKS];
     struct {
@@ -214,6 +217,11 @@ static void op_aot(const uint8_t *ins)
         memcpy(a->data, ins + 22, 8);
         break;
     }
+    // the PS1 skips items already taken (and the model lying there)
+    if (a->type == SCE_ITEM && flag_get(FLAGS_ITEM_PICKED, a->data[4] | a->data[5] << 8)) {
+        a->active = 0;
+        game_object_hide(a->data[6]);
+    }
 }
 
 // aot_reset: op, aot, id, sat, data[6] (position stays)
@@ -225,6 +233,28 @@ static void op_aot_reset(const uint8_t *ins)
     a->type = ins[2];
     a->sat = ins[3];
     memcpy(a->data, ins + 4, 6);
+}
+
+// ------------------------------------------------------------ work object
+// The object work_set selected: 1 = Leon, 3 = enemy, 4 = room object.
+// Members 0x0B-0x0D position, 0x0F facing (RE2 units).
+static int work_member(const Thread *t, int member, int *value)
+{
+    switch (t->work_type) {
+    case 1: return game_player_member(member, value);
+    case 3: return game_enemy_member(t->work_index, member, value);
+    case 4: return game_object_member(t->work_index, member, value);
+    }
+    return 0;
+}
+
+static void work_member_set(const Thread *t, int member, int value)
+{
+    switch (t->work_type) {
+    case 1: game_player_member_set(member, value); break;
+    case 3: game_enemy_member_set(t->work_index, member, value); break;
+    case 4: game_object_member_set(t->work_index, member, value); break;
+    }
 }
 
 // ------------------------------------------------------------ threads
@@ -416,9 +446,15 @@ static void run_thread(Thread *t)
             t->pc = next;
             return;
         case OP_WSLEEP:
-        case OP_WSLEEPING:
             t->pc = next;
             return;
+        case OP_WSLEEPING: // scd_op_0c: yields until the voice clip has ended
+            if (!game_voice_playing())
+                t->pc = next;
+            return;
+        case OP_XA_ON: // scd_op_59: kind, u16 clip
+            game_voice(ins[1], ru16(ins + 2));
+            break;
         case OP_FOR:
             if (ru16(ins + 4) == 0) {
                 next += ru16(ins + 2);
@@ -541,8 +577,9 @@ static void run_thread(Thread *t)
             cond = 1; // needs object state the engine does not have yet
             break;
 
-        case OP_CUT_CHG:
-            game_cut_change(ins[1]);
+        case OP_CUT_CHG: // scd_op_29: also stops the automatic cuts until cut_auto 1
+            cam_auto = 0;
+            game_cut_change(ins[1] & 0x7F);
             break;
         case OP_CUT_OLD:
             game_cut_change(old_cam);
@@ -575,24 +612,51 @@ static void run_thread(Thread *t)
         case OP_AOT_RESET:
             op_aot_reset(ins);
             break;
+        case OP_OBJ_MODEL_SET:
+            game_object_set(ins);
+            break;
         case OP_WORK_SET:
             t->work_type = ins[1];
             t->work_index = ins[2];
             break;
         case OP_MEMBER_SET: // member, u16 value
-            if (t->work_type == 3)
-                game_enemy_member_set(t->work_index, ins[1], ru16(ins + 2));
+            work_member_set(t, ins[1], ru16(ins + 2));
             break;
         case OP_MEMBER_SET2: // member, variable
-            if (t->work_type == 3)
-                game_enemy_member_set(t->work_index, ins[1], (uint16_t)*var(ins[2]));
+            work_member_set(t, ins[1], (uint16_t)*var(ins[2]));
             break;
         case OP_MEMBER_COPY: { // variable, member
             int value;
-            if (t->work_type == 3 && game_enemy_member(t->work_index, ins[2], &value))
+            if (work_member(t, ins[2], &value))
                 *var(ins[1]) = (int16_t)value;
             break;
         }
+        case OP_SPEED_SET: // scd_op_2f: index, s16 value
+            if (ins[1] < 12)
+                t->speed[ins[1]] = rd16(ins + 2);
+            break;
+        case OP_ADD_SPEED: { // scd_op_30: position += speed 0-2, rotation += 3-5 (only the
+                             // facing, member 0x0F, is modelled)
+            int value;
+            for (int k = 0; k < 3; k++)
+                if (t->speed[k] && work_member(t, 0x0B + k, &value))
+                    work_member_set(t, 0x0B + k, (int16_t)value + t->speed[k]);
+            if (t->speed[4] && work_member(t, 0x0F, &value))
+                work_member_set(t, 0x0F, (uint16_t)(value + t->speed[4]));
+            break;
+        }
+        case OP_ADD_ASPEED: // scd_op_31
+            for (int k = 0; k < 6; k++)
+                t->speed[k] += t->speed[6 + k];
+            break;
+        case OP_PLC_MOTION:
+        case OP_PLC_DEST:
+        case OP_PLC_RET:
+        case OP_PLC_ROT:
+        case OP_PLC_CNT:
+        case OP_PLC_STOP:
+            game_plc(t->work_type, t->work_index, ins);
+            break;
         case OP_SCE_EM_SET: // pad, slot, type, variant, status, floor, sound, model,
                             // set flag, x, y, z, dir, motion, ctr flag
             game_spawn_enemy(ins[2], ins[3], ru16(ins + 4), ins[7], rd16(ins + 10), rd16(ins + 12),
@@ -610,16 +674,16 @@ static void run_thread(Thread *t)
         case OP_POS_SET:
             if (t->work_type == 1) {
                 game_set_player_pos(rd16(ins + 2), rd16(ins + 4), rd16(ins + 6));
-            } else if (t->work_type == 3) { // members 0x0B-0x0D
+            } else { // members 0x0B-0x0D
                 for (int k = 0; k < 3; k++)
-                    game_enemy_member_set(t->work_index, 0x0B + k, rd16(ins + 2 + 2 * k));
+                    work_member_set(t, 0x0B + k, rd16(ins + 2 + 2 * k));
             }
             break;
         case OP_DIR_SET:
             if (t->work_type == 1)
                 game_set_player_dir(rd16(ins + 4));
-            else if (t->work_type == 3)
-                game_enemy_member_set(t->work_index, 0x0F, rd16(ins + 4));
+            else
+                work_member_set(t, 0x0F, rd16(ins + 4));
             break;
         default:
             break; // not implemented yet: skipped

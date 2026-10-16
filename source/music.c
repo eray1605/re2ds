@@ -16,6 +16,8 @@
 #define MUSIC_MAGIC 0x31554D52 // "RMU1"
 #define MAX_VOICES 10           // DS channels for music; the rest stay free for effects
 #define MASTER_VOLUME 64        // below the effects, like the PS1 mix
+#define DUCKED 40               // while a voice clip plays
+static int duck = 127;
 #define RELEASE_FRAMES 10
 
 typedef struct {
@@ -75,6 +77,8 @@ static void voice_stop(Voice *v)
         soundKill(v->ch);
     v->ch = -1;
 }
+
+void music_duck(int on) { duck = on ? DUCKED : 127; }
 
 void music_stop(void)
 {
@@ -166,7 +170,7 @@ static void note_on(int midi, int note, int velocity)
         l = l * prog_l[program[midi]] / 127;
         r = r * prog_r[program[midi]] / 127;
     }
-    int volume = t->volume * ch_volume[midi] / 127 * velocity / 127 * MASTER_VOLUME / 127;
+    int volume = t->volume * ch_volume[midi] / 127 * velocity / 127 * MASTER_VOLUME / 127 * duck / 127;
     volume = volume * (l > r ? l : r) / 127;
     int pan = ch_pan[midi] + (t->pan - 64) + (l + r ? (r - l) * 64 / (l + r) : 0);
     pan = pan < 0 ? 0 : pan > 127 ? 127 : pan;

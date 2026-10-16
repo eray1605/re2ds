@@ -75,11 +75,22 @@ python3 -I tools/bgm2ds.py --table "$DISC/SLES_009.72" "$DISC/COMMON/DATA/INIT_T
 mkdir -p build/ds/menu
 python3 -I tools/menu2ds.py "$DISC/SLES_009.72" "$DISC/COMMON/DATA/ST0.TIM" \
     "$DISC/COMMON/DATA/ITEMALL.PIX" build/ds/menu/items.bin > /dev/null
+python3 -I tools/itps2ds.py "$DISC/COMMON/DATA/ITPS.ITP" build/ds/menu/items.bin \
+    build/ds/menu/pictures.bin > /dev/null
 
 # effect sprites (blood, sparks, casings)
 mkdir -p build/ds/effect
 python3 -I tools/esp2ds.py "$DISC/COMMON/DATA/CORE00.ESP" "$DISC/COMMON/DATA/CORE01.TIM" \
     build/ds/effect/core.bin > /dev/null
 
-cp -R build/ds/bg build/ds/room build/ds/model build/ds/mask build/ds/sound build/ds/door build/ds/effect build/ds/music build/ds/menu nitrofiles/
+# the opening movies (Leon meets Claire): need the STRs as raw sectors,
+# see tools/extract_str.py; skipped without them
+mkdir -p build/ds/movie
+for m in OPN1STL:opn1 OPN2NDL:opn2; do
+    if [ -f "$DISC/PL0/ZMOVIE/${m%%:*}.STR.raw2352" ]; then
+        python3 -I tools/str2ds.py "$DISC/PL0/ZMOVIE/${m%%:*}.STR.raw2352" "build/ds/movie/${m##*:}.bin" > /dev/null
+    fi
+done
+
+cp -R build/ds/bg build/ds/room build/ds/model build/ds/mask build/ds/sound build/ds/door build/ds/effect build/ds/music build/ds/menu build/ds/movie nitrofiles/
 du -sh nitrofiles nitrofiles/*

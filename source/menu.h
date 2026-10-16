@@ -16,6 +16,9 @@ int menu_has_focus(void);
 // messages (room texts, items) in the text box; A / B / touch closes them
 void menu_message(const char *text);
 int menu_message_open(void);
+// show the item's picture (as on the PS1 when picking it up) until the
+// message closes or, without a message, until the next input
+void menu_picture(int item);
 // debug mode: the lower screen shows the text console instead
 void menu_debug(int on);
 int menu_debug_on(void);

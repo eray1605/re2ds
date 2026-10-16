@@ -7,11 +7,17 @@
 
 #include <stdint.h>
 
+#include "assets.h"
+
 #define MAX_ENEMIES 8
 
 void enemy_room_reset(void);   // frees all enemy models (room change)
 // the room's path zones (tools/blk2ds.py, kept by the caller), NULL if none
 void enemy_set_zones(const void *data);
+// the room's own animations for the enemy in slot (RBJ, tools/rbj2ds.py), NULL if none
+void enemy_set_room_set(int slot, const Model *set);
+// plc_* script commands for the enemy in slot (plc.h)
+void enemy_plc(int slot, const uint8_t *ins);
 // sce_em_set: slot, type (0x10.. ), flags (bytes 4..5: variant | status << 8),
 // position, facing (RE2 units)
 // voice: kind of voice (byte 7), see enemy_sound_set
@@ -48,6 +54,5 @@ int enemy_blocks_player(int32_t from_x, int32_t from_z, int32_t x, int32_t z);
 extern int enemy_spawn_calls, enemy_last_error;
 extern int enemy_jumps, enemy_jump_max, enemy_toggles;
 
-#include "assets.h"
 void model_gx_cost(const Model *m, int *vertices, int *polygons);
 void enemy_debug_print(int tick);   // host tests only

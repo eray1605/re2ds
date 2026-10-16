@@ -19,6 +19,8 @@
 #include "script.h"
 #include "door.h"
 #include "enemy.h"
+#include "movie.h"
+#include "plc.h"
 #include "effect.h"
 #include "music.h"
 #include "menu.h"
@@ -53,8 +55,10 @@ static int health_level(void);
 #define ANIM_IDLE (PLW_FIRST + anim_idle_tbl[health_level()])
 // Special moves (player states 8 and 9, pl_move_08 / pl_move_09 at
 // 0x8003b6e4 / 0x8003ba78) use the room's own animation set (RBJ, see
-// tools/rbj2ds.py): room/<rdt>_rbj.bin holds climb, jump, fall, land.
-enum { RBJ_CLIMB = 0, RBJ_JUMP = 1, RBJ_FALL = 2, RBJ_LAND = 3 };
+// tools/rbj2ds.py): in room/<rdt>_rbj.bin (the room's player set) they are
+// animations 6..9 when the set has them (rbj_moves).
+enum { RBJ_CLIMB = 6, RBJ_JUMP = 7, RBJ_FALL = 8, RBJ_LAND = 9 };
+static const uint8_t rbj_move_keys[4] = { 50, 15, 20, 20 };
 #define JUMP_FALL_KEY 13    // the jump turns into the fall at frame 0x0E
 
 #define LEVEL_HEIGHT 1800   // one floor level (0x708): climb and jump height
@@ -75,13 +79,14 @@ enum { RBJ_CLIMB = 0, RBJ_JUMP = 1, RBJ_FALL = 2, RBJ_LAND = 3 };
 #define FADE_STEPS 8
 #define MASK_SCALE 4        // see draw_masks        // frames per fade (brightness 0 -> -16)
 
-// The background bitmap is 256x256 at 8 bpp = 64 KB; VRAM A (128 KB) holds
-// two of them. Map base unit for bitmaps is 16 KB.
-#define BG_BASE_FRONT 0
-#define BG_BASE_BACK 4
+// The background bitmap is 256x256 at 8 bpp = 64 KB, exactly VRAM E. A new
+// camera's picture is unpacked into RAM and copied over in the vblank that
+// shows the first 3D frame of it, so all four big banks hold textures.
+#define BG_BYTES (256 * 256)
+static uint8_t bg_ram[BG_BYTES] __attribute__((aligned(32)));
 
 typedef enum { ST_IDLE, ST_WALK, ST_RUN, ST_BACK, ST_TURN, ST_AIM, ST_FIRE, ST_CLIMB, ST_JUMP, ST_FALL, ST_LAND,
-               ST_GRABBED, ST_DEAD } PlayerState; // held / killed: enemy.c moves Leon
+               ST_SCRIPT, ST_GRABBED, ST_DEAD } PlayerState; // script: plc.c; held / killed: enemy.c
 
 typedef struct {
     uint8_t stage, room;
@@ -92,14 +97,33 @@ static int cur_stage, cur_room;
 static char bg_prefix[16];    // e.g. "room10a"
 static Model leon;
 static void *room_zones;             // the room's path zones (may be absent)
-static Model rbj;                   // the room's special-move animations (may be absent)
+static Model rbj;                   // the room's animations for Leon (special moves, cutscenes)
+static int rbj_moves;                // rbj holds climb / jump / fall / land
+// The room's object models (items lying around, ...: tools/obj2ds.py), placed
+// by obj_model_set; index = the model's number in the room
+#define MAX_OBJECTS 32
+#define OBJ_MAGIC 0x31424F52  // "ROB1"
+// Their textures (up to 190 KB in a room) are uploaded only for placed models,
+// after the room's first enemies have theirs, items first, within a budget:
+// an enemy without texture memory is invisible.
+#define OBJ_TEX_BUDGET (96 * 1024)
+static uint8_t *obj_data;             // room<id>_obj.bin
+static int obj_count, obj_tex_count;
+static int obj_tex[MAX_OBJECTS];
+static uint8_t obj_tex_state[MAX_OBJECTS]; // 0 not uploaded, 1 uploaded, 2 no room for it
+static int obj_tex_used;              // bytes uploaded in this room
+static int objects_ready;             // the room's init scripts have run
+static struct {
+    uint8_t placed, hidden;
+    int16_t pos[3], dir[3];
+} objects[MAX_OBJECTS];
+static Model rbj_enemy[MAX_ENEMIES];  // the room's animations per enemy slot (Kendo in 101)
 static Masks masks;
 static int have_masks;
 static int leon_tex[3];
 static int mask_tex = -1;
 static int bg_id;
 static void *room_bank;             // the room's sound bank (footsteps, room effects)
-static int bg_base = BG_BASE_FRONT;
 static int cur_cam = -1;
 static int8_t first_child[64], next_sibling[64];
 
@@ -129,6 +153,7 @@ static struct {
     int32_t aim_x, aim_z;
     uint8_t shot;             // fired this tick (zombies hear it)
     uint8_t saved_once;       // survived a bite once with 0 HP (PS1 0x800c7948 & 0x1000)
+    Plc plc;                  // the room script moves him (ST_SCRIPT)
 } player;
 #define PLAYER_HP 200
 
@@ -141,22 +166,27 @@ static uint8_t *enemy_pairs;        // voice kind pairs per set (enemse2ds.py)
 static int game_over;               // Leon's death animation is over
 
 static void render_frame(void);
+static int floor_sound(void);
+static void check_camera_switch(void);
+static void update_height(void);
 static void update_occlusion(void);
 
 // ---------------------------------------------------------------- loading
-// Writes into texture VRAM (banks B-D), which the CPU can only reach while
+// Writes into texture VRAM (banks A-D), which the CPU can only reach while
 // they are mapped as LCDC, 16 bits at a time. dst and bytes even.
 static void texture_write(void *dst, const uint8_t *src, int bytes)
 {
     if (!dst)
         return;
-    uint8_t cr_b = VRAM_B_CR, cr_c = VRAM_C_CR, cr_d = VRAM_D_CR;
+    uint8_t cr_a = VRAM_A_CR, cr_b = VRAM_B_CR, cr_c = VRAM_C_CR, cr_d = VRAM_D_CR;
+    VRAM_A_CR = VRAM_ENABLE | VRAM_A_LCD;
     VRAM_B_CR = VRAM_ENABLE | VRAM_B_LCD;
     VRAM_C_CR = VRAM_ENABLE | VRAM_C_LCD;
     VRAM_D_CR = VRAM_ENABLE | VRAM_D_LCD;
     volatile uint16_t *d = dst;
     for (int i = 0; i < bytes / 2; i++)
         d[i] = src[2 * i] | src[2 * i + 1] << 8;
+    VRAM_A_CR = cr_a;
     VRAM_B_CR = cr_b;
     VRAM_C_CR = cr_c;
     VRAM_D_CR = cr_d;
@@ -230,8 +260,7 @@ static void set_camera(int cam)
     }
     if (!bg || bg->magic != BG_MAGIC)
         fatal(path);
-    int back = bg_base == BG_BASE_FRONT ? BG_BASE_BACK : BG_BASE_FRONT;
-    decompress(bg + 1, (u16 *)BG_GFX + 0x2000 * back, LZ77Vram);
+    decompress(bg + 1, bg_ram, LZ77);
 
     // masks for this camera (optional), into the texture reserved at start
     if (have_masks)
@@ -254,12 +283,162 @@ static void set_camera(int cam)
     // Leon and the enemies stand at their old screen positions on the new
     // background until the next frame (or while the masks above load).
     render_frame();
+    DC_FlushRange(bg_ram, BG_BYTES);
     swiWaitForVBlank();
-    bgSetMapBase(bg_id, back);
+    dmaCopy(bg_ram, BG_GFX, BG_BYTES); // well inside the vblank (~4.5 ms)
     for (int i = 1; i < 256; i++)
         BG_PALETTE[i] = bg->palette[i];
-    bg_base = back;
     asset_free(bg);
+}
+
+static void free_objects(void)
+{
+    for (int i = 0; i < obj_tex_count; i++)
+        if (obj_tex_state[i] == 1)
+            glDeleteTextures(1, &obj_tex[i]);
+    if (obj_data)
+        asset_free(obj_data);
+    obj_data = NULL;
+    obj_count = obj_tex_count = obj_tex_used = objects_ready = 0;
+    memset(obj_tex_state, 0, sizeof(obj_tex_state));
+    memset(objects, 0, sizeof(objects));
+}
+
+static int texture_size(int n) { int s = 0; while ((8 << s) < n) s++; return s; } // TEXTURE_SIZE_8 = 0
+
+static uint32_t rd32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
+
+static void load_objects(int stage, int id)
+{
+    char path[48];
+    uint32_t size;
+    free_objects();
+    snprintf(path, sizeof(path), "nitro:/room/room%d%02x0_obj.bin", stage, id);
+    obj_data = asset_load(path, &size);
+    if (!obj_data)
+        return;
+    if (size < 8 || rd32(obj_data) != OBJ_MAGIC) {
+        asset_free(obj_data);
+        obj_data = NULL;
+        return;
+    }
+    obj_count = obj_data[4] | obj_data[5] << 8;
+    int textures = obj_data[6] | obj_data[7] << 8;
+    if (obj_count > MAX_OBJECTS)
+        obj_count = MAX_OBJECTS;
+    if (textures > MAX_OBJECTS)
+        textures = MAX_OBJECTS;
+    DC_FlushRange(obj_data, size);
+    obj_tex_count = textures;
+}
+
+static const uint8_t *object_entry(int n) { return obj_data + 8 + 8 * obj_tex_count + 8 * n; }
+
+static void upload_object_texture(int i)
+{
+    if (i >= obj_tex_count || obj_tex_state[i])
+        return;
+    const uint8_t *e = obj_data + 8 + 8 * i;
+    int w = e[0] | e[1] << 8, h = e[2] | e[3] << 8;
+    if (obj_tex_used + w * h + 512 > OBJ_TEX_BUDGET) {
+        obj_tex_state[i] = 2;
+        return;
+    }
+    const uint8_t *tex = obj_data + rd32(e + 4);
+    const uint16_t *pal = (const uint16_t *)tex;
+    glGenTextures(1, &obj_tex[i]);
+    glBindTexture(0, obj_tex[i]);
+    if (!glTexImage2D(0, 0, GL_RGB256, texture_size(w), texture_size(h), 0,
+                      TEXGEN_TEXCOORD | (pal[0] ? 0 : GL_TEXTURE_COLOR0_TRANSPARENT), tex + 512)) {
+        glDeleteTextures(1, &obj_tex[i]);
+        obj_tex_state[i] = 2;
+        return;
+    }
+    glColorTableEXT(0, 0, 256, 0, 0, pal);
+    obj_tex_state[i] = 1;
+    obj_tex_used += w * h + 512;
+}
+
+static int is_item_model(int n)
+{
+    for (int i = 0; i < NUM_AOTS; i++)
+        if (aots[i].active && aots[i].type == SCE_ITEM && aots[i].data[6] == n)
+            return 1;
+    return 0;
+}
+
+// textures of the placed models: those of items first
+static void upload_objects(void)
+{
+    if (!obj_data || !objects_ready)
+        return;
+    for (int pass = 0; pass < 2; pass++)
+        for (int n = 0; n < obj_count; n++)
+            if (objects[n].placed && !objects[n].hidden && is_item_model(n) == !pass)
+                upload_object_texture(object_entry(n)[0] | object_entry(n)[1] << 8);
+}
+
+void game_object_set(const uint8_t *ins)
+{
+    int n = ins[1];
+    if (n >= MAX_OBJECTS)
+        return; // 255: no model
+    objects[n].placed = 1;
+    for (int k = 0; k < 3; k++) {
+        objects[n].pos[k] = (int16_t)(ins[14 + 2 * k] | ins[15 + 2 * k] << 8);
+        objects[n].dir[k] = (int16_t)(ins[20 + 2 * k] | ins[21 + 2 * k] << 8);
+    }
+    upload_objects(); // placed later by an event
+}
+
+void game_object_hide(int model)
+{
+    if (model < MAX_OBJECTS)
+        objects[model].hidden = 1;
+}
+
+int game_object_member(int n, int member, int *value)
+{
+    if (n >= MAX_OBJECTS)
+        return 0;
+    if (member >= 0x0B && member <= 0x0D)
+        *value = objects[n].pos[member - 0x0B];
+    else if (member == 0x0F)
+        *value = objects[n].dir[1];
+    else
+        return 0;
+    return 1;
+}
+
+void game_object_member_set(int n, int member, int value)
+{
+    if (n >= MAX_OBJECTS)
+        return;
+    if (member >= 0x0B && member <= 0x0D)
+        objects[n].pos[member - 0x0B] = (int16_t)value;
+    else if (member == 0x0F)
+        objects[n].dir[1] = (int16_t)value;
+}
+
+static void draw_objects(void)
+{
+    if (!obj_data)
+        return;
+    for (int n = 0; n < obj_count; n++) {
+        const uint8_t *m = object_entry(n);
+        uint32_t list = rd32(m + 4);
+        int tex = m[0] | m[1] << 8;
+        if (!objects[n].placed || objects[n].hidden || !list || tex >= obj_tex_count || obj_tex_state[tex] != 1)
+            continue;
+        glPushMatrix();
+        glTranslatef32(objects[n].pos[0], objects[n].pos[1], objects[n].pos[2]);
+        glRotateXi(objects[n].dir[0] * 8);
+        glRotateYi(objects[n].dir[1] * 8);
+        glRotateZi(objects[n].dir[2] * 8);
+        glBindTexture(0, obj_tex[tex]);
+        glCallList((const u32 *)(obj_data + list));
+        glPopMatrix(1);
+    }
 }
 
 // Replaces the current room; returns 0 (and keeps the old one) if the file is
@@ -293,6 +472,21 @@ static int load_room(int stage, int id)
         asset_free(rbj.data);
         rbj.data = NULL;
     }
+    rbj_moves = rbj.data && rbj.header->num_anims > RBJ_LAND;
+    for (int k = 0; rbj_moves && k < 4; k++)
+        rbj_moves = rbj.anims[RBJ_CLIMB + k].count == rbj_move_keys[k];
+    for (int i = 0; i < MAX_ENEMIES; i++) {
+        enemy_set_room_set(i, NULL);
+        if (rbj_enemy[i].data)
+            asset_free(rbj_enemy[i].data);
+        rbj_enemy[i].data = NULL;
+        snprintf(path, sizeof(path), "nitro:/room/room%d%02x0_rbj_e%d.bin", stage, id, i);
+        if (model_load(&rbj_enemy[i], path))
+            enemy_set_room_set(i, &rbj_enemy[i]);
+        else if (rbj_enemy[i].data)
+            asset_free(rbj_enemy[i].data), rbj_enemy[i].data = NULL;
+    }
+    voice_stop();
     // path zones for the enemies (tools/blk2ds.py)
     enemy_set_zones(NULL);
     if (room_zones)
@@ -300,6 +494,7 @@ static int load_room(int stage, int id)
     snprintf(path, sizeof(path), "nitro:/room/room%d%02x0_blk.bin", stage, id);
     room_zones = asset_load(path, NULL);
     enemy_set_zones(room_zones);
+    load_objects(stage, id);
     if (old_bank)
         sound_bank_free(old_bank);
     near_aot = NULL;
@@ -562,6 +757,7 @@ static void render_frame(void)
     glColor3b(255, 255, 255);
     glPolyFmt(POLY_ALPHA(31) | cull_models | POLY_ID(1));
     draw_player();
+    draw_objects();
     update_occlusion();
     enemy_draw((have_masks ? 4 * masks.header->num_quads : 0) + 4 * effect_count(),
                (have_masks ? masks.header->num_quads : 0) + effect_count());
@@ -585,6 +781,7 @@ static void fade(int dir)
         render_frame();
         swiWaitForVBlank();
         music_frame();
+        voice_frame();
     }
 }
 
@@ -785,6 +982,87 @@ void game_set_player_pos(int32_t x, int32_t y, int32_t z)
 
 void game_set_player_dir(int16_t dir_re2) { player.dir = dir_re2 * 8; }
 
+void game_voice(int kind, int n)
+{
+    if (kind == 0)
+        voice_play(cur_stage, n); // the common table (kind 1) is not converted yet
+}
+
+int game_voice_playing(void) { return voice_playing(); }
+
+int game_player_member(int member, int *value)
+{
+    switch (member) {
+    case 0x0B: *value = player.x; return 1;
+    case 0x0C: *value = player.y; return 1;
+    case 0x0D: *value = player.z; return 1;
+    case 0x0F: *value = (player.dir / 8) & 0xFFF; return 1;
+    }
+    return 0;
+}
+
+void game_player_member_set(int member, int value)
+{
+    switch (member) {
+    case 0x0B: player.x = (int16_t)value; break;
+    case 0x0C: player.y = (int16_t)value; break;
+    case 0x0D: player.z = (int16_t)value; break;
+    case 0x0F: player.dir = ((int16_t)value * 8) & 32767; break;
+    }
+}
+
+// Leon as plc.c moves him: the room's set (mode 0) and his weapon set
+// (walking = move 0, standing = move 2: 0x800116bc / 0x800116c8)
+static PlcBody player_body(void)
+{
+    PlcBody b = { .x = player.x, .z = player.z, .dir = player.dir, .set = player.set,
+                  .anim = player.anim, .key = player.key, .room_set = rbj.data ? &rbj : NULL,
+                  .own_set = &leon, .own_first = PLW_FIRST, .walk_anim = PLW_FIRST + 0,
+                  .idle_anim = PLW_FIRST + 2, .table = 16 };
+    return b;
+}
+
+static void player_body_back(const PlcBody *b)
+{
+    player.x = b->x;
+    player.z = b->z;
+    player.dir = b->dir;
+    player.set = b->set;
+    player.anim = b->anim;
+    player.key = b->key;
+}
+
+void game_plc(int work_type, int index, const uint8_t *ins)
+{
+    if (work_type == 3) {
+        enemy_plc(index, ins);
+        return;
+    }
+    if (work_type != 1 || player.state >= ST_GRABBED)
+        return;
+    PlcBody b = player_body();
+    plc_command(&player.plc, &b, ins);
+    player_body_back(&b);
+    if (player.plc.active) {
+        player.state = ST_SCRIPT;
+    } else if (player.state == ST_SCRIPT) {
+        player.state = ST_IDLE; // plc_ret
+        set_anim(ANIM_IDLE);
+    }
+}
+
+// one game tick of a scripted Leon
+static void script_move_tick(void)
+{
+    PlcBody b = player_body();
+    plc_tick(&player.plc, &b);
+    player_body_back(&b);
+    if (b.footstep)
+        sound_play(room_bank, floor_sound(), 100, 64);
+    update_height();
+    check_camera_switch();
+}
+
 void game_spawn_enemy(int slot, int type, int flags, int voice, int x, int y, int z, int dir_re2)
 {
     enemy_spawn(slot, type, flags, voice, x, y, z, dir_re2);
@@ -941,7 +1219,7 @@ int game_sight_blocked(int32_t x0, int32_t y0, int32_t z0, int32_t x1, int32_t y
 // artists expected in front, and zombies pressing against a wall from the
 // other side can stand nearer than a wall's mask (room 102, camera 1: the
 // courtyard zombies at the gate, masks at depth 9920, zombies at ~9000).
-// Hidden: an enemy the camera would see only through a sight-blocking wall
+// Hidden: an enemy the camera would see only through a tall sight-blocking wall
 // that does not also stand between the camera and Leon (many cameras look
 // through the room's outer walls; those walls then count for nobody). Only
 // solid walls count, that collide with everything (flag 0xFC00): a gate
@@ -949,6 +1227,21 @@ int game_sight_blocked(int32_t x0, int32_t y0, int32_t z0, int32_t x1, int32_t y
 // fence) is see-through.
 #define MAX_SIGHT_BOXES 64
 #define SOLID_WALL 0xFC00
+#define TALL_WALL 3600      // counters and shelves (1800) never hide a whole person
+
+// an enemy inside a wall box (room 101: zombies left in the shop window when
+// the script closes it again) is not behind it
+static int stands_in(int i, int32_t x, int32_t z)
+{
+    const RoomBox *b = &room.boxes[i];
+    return x > b->x - 400 && x < b->x + b->w + 400 && z > b->z - 400 && z < b->z + b->d + 400;
+}
+
+static int tall_wall(int i)
+{
+    const RoomBox *b = &room.boxes[i];
+    return (b->type >> 11) * 100 + ((b->type >> 6) & 31) * 1800 >= TALL_WALL;
+}
 static uint64_t walls_before_leon;  // set per frame by update_occlusion()
 
 static void update_occlusion(void)
@@ -959,7 +1252,7 @@ static void update_occlusion(void)
     for (int h = 0; h < 2; h++) {
         const float leon[3] = { (float)player.x, (float)(player.y - (h ? 1700 : 300)), (float)player.z };
         for (int i = 0; i < room.header->num_boxes && i < MAX_SIGHT_BOXES; i++)
-            if (sight_box_hit_flags(i, eye, leon, SOLID_WALL))
+            if (tall_wall(i) && sight_box_hit_flags(i, eye, leon, SOLID_WALL))
                 walls_before_leon |= 1ull << i;
     }
 }
@@ -972,7 +1265,8 @@ int camera_occluded(int32_t x, int32_t y, int32_t z)
         const float p[3] = { (float)x, (float)(y - (h ? 2000 : 100)), (float)z };
         int hit = 0;
         for (int i = 0; i < room.header->num_boxes && i < MAX_SIGHT_BOXES && !hit; i++)
-            hit = !(walls_before_leon >> i & 1) && sight_box_hit_flags(i, eye, p, SOLID_WALL);
+            hit = !(walls_before_leon >> i & 1) && tall_wall(i) && !stands_in(i, x, z) &&
+                  sight_box_hit_flags(i, eye, p, SOLID_WALL);
         if (!hit)
             return 0;
     }
@@ -1040,6 +1334,8 @@ static void new_game(void)
     if (!room.data)
         fatal("room/room1000.bin missing");
     place_player(START_X, 0, START_Z, START_DIR, START_CAM);
+    objects_ready = 1;
+    upload_objects();
     fade(-1);
 }
 
@@ -1050,6 +1346,8 @@ static void warp_to(int index)
     enter_room(r->stage, r->room, -1);
     const RoomHeader *h = room.header;
     place_player(h->spawn[0], h->spawn[1], h->spawn[2], h->spawn_dir, h->start_camera);
+    objects_ready = 1;
+    upload_objects();
     fade(-1);
 }
 
@@ -1101,11 +1399,14 @@ static void use_door(const Aot *a)
         while (door_frame()) {
             swiWaitForVBlank();
             music_frame();
+            voice_frame();
         }
         door_end();
         setBrightness(1, -16);
         bgShow(bg_id);
     }
+    objects_ready = 1; // after the door: its texture needs room too
+    upload_objects();
     fade(-1);
 }
 
@@ -1125,8 +1426,10 @@ static void trigger(Aot *a)
         }
         flag_set(FLAGS_ITEM_PICKED, picked, 1);
         a->active = 0;
+        game_object_hide(a->data[6]);
         snprintf(text, sizeof(text), "You picked up the %s.", item_name(item));
         game_show_message(text);
+        menu_picture(item);
         break;
     }
     case SCE_MESSAGE: {
@@ -1342,7 +1645,9 @@ static int update_aim(uint32_t held, uint32_t down)
 static void update_player_frame(uint32_t held, uint32_t down)
 {
     if (player.state >= ST_CLIMB)
-        return; // special move in progress: no control
+        return; // special move or the room script in progress: no control
+    if (flag_get(2, 7))
+        held = down = 0; // a cutscene runs (the scripts set flag 2:7 around them)
     update_weapon_model();
     if (update_aim(held, down))
         return;
@@ -1478,7 +1783,7 @@ static void try_special_move(uint32_t pressed)
 {
     if (!(pressed & KEY_A) || player.state >= ST_CLIMB)
         return;
-    if (!rbj.data)
+    if (!rbj_moves)
         return; // this room has no climb animations
     const RoomBox *b = box_in_front(SHAPE_CLIMB_UP);
     if (b) {
@@ -1507,6 +1812,10 @@ static void update_player_tick(void)
     PlayerState st = player.state;
     if (st >= ST_GRABBED)
         return; // enemy.c moves him
+    if (st == ST_SCRIPT) {
+        script_move_tick();
+        return;
+    }
     if (st >= ST_CLIMB) {
         special_move_tick();
         return;
@@ -1632,13 +1941,15 @@ static void update_menu(uint32_t down)
 int main(void)
 {
     videoSetMode(MODE_5_3D);
-    vramSetBankA(VRAM_A_MAIN_BG_0x06000000);
     // Default slots only: libnds derives the texture slot from the bank
-    // number (B = slot 1, D = slot 3) when it uploads.
+    // number (A = slot 0, D = slot 3) when it uploads. 512 KB of textures:
+    // Leon, the masks, the effects and up to four enemy types at once.
+    vramSetBankA(VRAM_A_TEXTURE);
     vramSetBankB(VRAM_B_TEXTURE);
-    vramSetBankC(VRAM_C_TEXTURE);  // enemy textures
+    vramSetBankC(VRAM_C_TEXTURE);
     vramSetBankD(VRAM_D_TEXTURE);
-    vramSetBankE(VRAM_E_TEX_PALETTE);
+    vramSetBankE(VRAM_E_MAIN_BG);          // the background bitmap
+    vramSetBankG(VRAM_G_TEX_PALETTE_SLOT0); // 16 KB: 32 palettes of 256 colours
     // sub screen text on VRAM H (32 KB): font tiles at 0, map at 8 KB
     videoSetModeSub(MODE_0_2D);
     vramSetBankH(VRAM_H_SUB_BG);
@@ -1648,7 +1959,7 @@ int main(void)
         fatal("NitroFS init failed");
     sound_init();
 
-    bg_id = bgInit(3, BgType_Bmp8, BgSize_B8_256x256, BG_BASE_FRONT, 0);
+    bg_id = bgInit(3, BgType_Bmp8, BgSize_B8_256x256, 0, 0);
     bgSetPriority(bg_id, 1);
     bgSetPriority(0, 0);
     BG_PALETTE[0] = 0;
@@ -1673,6 +1984,12 @@ int main(void)
     menu_init();
     voice_bank = sound_bank_load("nitro:/sound/core00.bin");
     enemy_pairs = asset_load("nitro:/sound/enem_pairs.bin", NULL);
+    // the opening (Leon meets Claire, the tanker crash); START skips it,
+    // holding SELECT while the game starts leaves it out (debugging)
+    scanKeys();
+    if (!(keysHeld() & KEY_SELECT) && !movie_play("opn1"))
+        movie_play("opn2");
+    movie_end();
     setBrightness(1, -16);
     new_game();
 
@@ -1714,7 +2031,8 @@ int main(void)
                 update_pose();
                 effect_tick();
                 player.shot = 0;
-                if (player.state < ST_GRABBED && player.state != ST_AIM && player.state != ST_FIRE)
+                if (player.state < ST_SCRIPT && player.state != ST_AIM && player.state != ST_FIRE &&
+                    !flag_get(2, 7))
                     check_aots(pending_keys);
                 if (!near_aot && !message_text)
                     try_special_move(pending_keys);
@@ -1727,6 +2045,8 @@ int main(void)
         render_frame();
         swiWaitForVBlank();
         music_frame();
+        voice_frame();
+        music_duck(voice_playing());
         if (game_over)
             new_game();
     }

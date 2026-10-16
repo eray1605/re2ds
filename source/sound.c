@@ -1,5 +1,6 @@
 // re2ds - sound banks converted from PS1 VABs.
 #include <nds.h>
+#include <stdio.h>
 #include <stdlib.h>
 
 #include "assets.h"
@@ -54,4 +55,46 @@ int sound_frames(const void *bank, int note)
 {
     const SoundEntry *e = find(bank, note);
     return e ? (int)(e->size / 2 * 60 / e->rate) : 0;
+}
+
+// ---------------------------------------------------------------- voices
+#define VOICE_MAGIC 0x31435652 // "RVC1": u32 rate, u32 samples, IMA-ADPCM
+static uint32_t *voice_data;
+static int voice_channel = -1, voice_left;
+
+void voice_stop(void)
+{
+    if (voice_channel >= 0)
+        soundKill(voice_channel);
+    voice_channel = -1;
+    voice_left = 0;
+    asset_free(voice_data);
+    voice_data = NULL;
+}
+
+void voice_play(int stage, int clip)
+{
+    char path[40];
+    uint32_t size;
+    voice_stop();
+    snprintf(path, sizeof(path), "nitro:/voice/s%d_%02d.bin", stage, clip);
+    voice_data = asset_load(path, &size);
+    if (!voice_data || size < 16 || voice_data[0] != VOICE_MAGIC) {
+        asset_free(voice_data);
+        voice_data = NULL;
+        return;
+    }
+    uint32_t rate = voice_data[1], samples = voice_data[2];
+    DC_FlushRange(voice_data, size);
+    voice_channel = soundPlaySample(voice_data + 3, SoundFormat_ADPCM, (size - 12) & ~3, rate, 127, 64,
+                                    false, 0);
+    voice_left = (int)((uint64_t)samples * 60 / rate) + 2;
+}
+
+int voice_playing(void) { return voice_left > 0; }
+
+void voice_frame(void)
+{
+    if (voice_left > 0 && --voice_left == 0)
+        voice_stop();
 }

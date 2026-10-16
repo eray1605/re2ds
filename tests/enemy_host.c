@@ -72,6 +72,15 @@ void game_player_pose(const Model *m, int a, int k, int32_t x, int32_t z, int16_
 void game_player_died(void) { host_dead = 1; printf("  died\n"); }
 void game_blood(int k, int32_t x, int32_t y, int32_t z, int16_t d, int sp, int32_t f) { (void)x; (void)z; (void)d; (void)sp; (void)f; if (getenv("TRACE")) printf("  blood %d at y %d\n", k, (int)y); }
 int game_enemy_member(int s, int m, int *v) { return enemy_member_get(s, m, v); }
+int game_player_member(int m, int *v) { (void)m; (void)v; return 0; }
+void game_player_member_set(int m, int v) { (void)m; (void)v; }
+void game_voice(int k, int n) { (void)k; (void)n; }
+int game_voice_playing(void) { return 0; }
+void game_object_set(const uint8_t *ins) { (void)ins; }
+void game_object_hide(int model) { (void)model; }
+int game_object_member(int n, int m, int *v) { (void)n; (void)m; (void)v; return 0; }
+void game_object_member_set(int n, int m, int v) { (void)n; (void)m; (void)v; }
+void game_plc(int w, int i, const uint8_t *ins) { if (w == 3) enemy_plc(i, ins); }
 void game_enemy_member_set(int s, int m, int v) { printf("  member_set enemy %d member %d = %04x\n", s, m, v & 0xFFFF); enemy_member_set(s, m, v); }
 int game_sight_blocked(int32_t a, int32_t b, int32_t c, int32_t d, int32_t e, int32_t f) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; return 0; }
 int main(int argc, char **argv)
