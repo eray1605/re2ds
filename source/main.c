@@ -163,7 +163,33 @@ static int health_level(void) { return player.hp < 21 ? 2 : player.hp < 101 ? 1 
 static void *voice_bank;            // Leon's voice (CORE00, PS1 bank 4)
 static void *enemy_bank;            // the room's enemy sounds (ENEMSE set, bank 3)
 static uint8_t *enemy_pairs;        // voice kind pairs per set (enemse2ds.py)
-static int game_over;               // Leon's death animation is over
+// Leon's death (COMMON/BIN/DIEDEMO.BIN, loaded at 0x80190000; its states are
+// in table 0x80193560 and run once per game tick):
+//   wait     a delay by killer (table 0x8019338c: zombies 95 ticks)
+//   flash    the screen fades to white, faster and faster (0x801902fc)
+//   orbit    black background; a free camera 3000 away and 1000 above Leon's
+//            hip circles him and closes in (0x80191200, parameters per
+//            killer in 0x801933ac, the zombie row used here)
+//   picture  DIED00.DIE behind him, his light flashes red (0x80190e88)
+//   fade     the camera rises and spins, the light dies, the screen fades
+//            out (0x80191080); the PS1 then goes to the title, here a new
+//            game starts
+// The PS1 draws the picture as a 16 x 16 grid that ripples; here it fades in.
+enum { DIE_OFF, DIE_WAIT, DIE_FLASH, DIE_ORBIT, DIE_PICTURE, DIE_FADE };
+#define DIE_DELAY 95
+#define DIE_ORBIT_TICKS 91          // row field 20
+#define DIE_SCREEN 290              // projection distance of the free camera (not traced)
+static struct {
+    int step, t;
+    int32_t flash, flash_v, flash_a; // 0x80193706 / 04 / 00
+    int32_t radius, shrink;         // 0x80193728 / 30
+    int angle, spin;                // 0x8019372c / 2e, 4096 = 360 degrees
+    int32_t rise, rise_acc;         // 0x80193700 / 36: eye height speed (-Y is up)
+    int32_t eye[3], at[3];          // 0x8019370c, 0x80193718
+    int ambient, light[3];          // the room light the PS1 changes (obj + 4, + 10)
+} die;
+static RoomCamera die_cam;          // the free camera while die.step >= DIE_ORBIT
+static uint16_t die_palette[256];
 
 static void render_frame(void);
 static int floor_sound(void);
@@ -567,9 +593,14 @@ void setup_camera(const int32_t from[3], const int32_t to[3], int screen)
 // Distance along the view direction if (x, y, z) is within the current
 // camera's view (with a margin in world units), else -1. Used to skip
 // enemies that are off screen.
+static const RoomCamera *view_camera(void)
+{
+    return die.step >= DIE_ORBIT ? &die_cam : &room.cameras[cur_cam];
+}
+
 int camera_sees(int32_t x, int32_t y, int32_t z, int32_t margin)
 {
-    const RoomCamera *c = &room.cameras[cur_cam];
+    const RoomCamera *c = view_camera();
     float f[3], r[3], d[3], len, v[3];
     for (int k = 0; k < 3; k++)
         f[k] = (float)(c->to[k] - c->from[k]);
@@ -750,20 +781,198 @@ static void calibrate_culling(void)
     swiWaitForVBlank();
 }
 
+// ---------------------------------------------------------------- death
+// Leon's hip (bone 0): T(pos) * Ry(dir) * root offset
+static void die_target(int32_t t[3])
+{
+    int32_t c = cosLerp(player.dir), s = sinLerp(player.dir);
+    t[0] = player.x + ((c * pose_ofs[0] + s * pose_ofs[2]) >> 12);
+    t[1] = player.y + pose_ofs[1];
+    t[2] = player.z + ((-s * pose_ofs[0] + c * pose_ofs[2]) >> 12);
+}
+
+// FUN_80191200, once per tick from the orbit on
+static void die_camera_tick(void)
+{
+    int32_t t[3];
+    die_target(t);
+    die.radius -= die.shrink;
+    die.eye[1] -= die.rise;
+    die.rise += die.rise_acc;
+    die.eye[0] = t[0] + ((sinLerp(die.angle * 8) * die.radius) >> 12);
+    die.eye[2] = t[2] - ((cosLerp(die.angle * 8) * die.radius) >> 12);
+    die.angle = (die.angle - die.spin) & 0xFFF;
+    die.at[0] += (t[0] - die.at[0]) / 30;
+    die.at[2] += (t[2] - die.at[2]) / 30;
+    die.at[1] += (t[1] - (die.at[1] + 300)) / 5;
+    for (int k = 0; k < 3; k++) {
+        die_cam.from[k] = die.eye[k];
+        die_cam.to[k] = die.at[k];
+    }
+    die_cam.screen = DIE_SCREEN;
+}
+
+// FUN_80190644 with the zombie row of 0x801933ac: radius 3000 shrinking by
+// 8, eye 1000 above the hip sinking by 5, turning by 2 from facing + 600
+static void die_orbit_start(void)
+{
+    int32_t t[3];
+    die_target(t);
+    die.radius = 3000;
+    die.shrink = 8;
+    die.angle = (player.dir / 8 + 600) & 0xFFF;
+    die.spin = 2;
+    die.eye[1] = t[1] - 1000;
+    die.rise = -5;
+    die.rise_acc = 0;
+    die.at[0] = t[0];
+    die.at[1] = t[1] - 300;
+    die.at[2] = t[2];
+    die_camera_tick();
+}
+
+static void die_show_picture(void)
+{
+    BgHeader *bg = asset_load("nitro:/die/died00.bin", NULL);
+    if (!bg || bg->magic != BG_MAGIC) {
+        asset_free(bg);
+        return;
+    }
+    decompress(bg + 1, bg_ram, LZ77);
+    memcpy(die_palette, bg->palette, sizeof(die_palette));
+    asset_free(bg);
+    for (int i = 1; i < 256; i++)
+        BG_PALETTE[i] = 0;
+    DC_FlushRange(bg_ram, BG_BYTES);
+    dmaCopy(bg_ram, BG_GFX, BG_BYTES);
+    bgShow(bg_id);
+}
+
+// the picture's palette at level / 16
+static void die_picture_level(int level)
+{
+    for (int i = 1; i < 256; i++) {
+        uint16_t c = die_palette[i];
+        int r = (c & 31) * level / 16, g = (c >> 5 & 31) * level / 16, b = (c >> 10 & 31) * level / 16;
+        BG_PALETTE[i] = RGB15(r, g, b);
+    }
+}
+
+static void new_game(void);
+
+// one game tick of the death sequence
+static void die_tick(void)
+{
+    if (die.step == DIE_OFF) {
+        if (player.state != ST_DEAD)
+            return;
+        memset(&die, 0, sizeof(die));
+        die.step = DIE_WAIT;
+        die.ambient = 60;
+        die.light[0] = die.light[1] = die.light[2] = 195;
+    }
+    die.t++;
+    switch (die.step) {
+    case DIE_WAIT:
+        if (die.t > DIE_DELAY) {
+            die.step = DIE_FLASH;
+            die.flash = 0x400;
+            die.t = 0;
+        }
+        break;
+    case DIE_FLASH: // 0x80193706 += v, v += a, a += 24 until it saturates
+        die.flash_v += die.flash_a;
+        die.flash_a += 24;
+        die.flash += die.flash_v;
+        if (die.flash >= 32767) {
+            die.step = DIE_ORBIT;
+            die.t = 0;
+            bgHide(bg_id);
+            die_orbit_start();
+            setBrightness(1, 0);
+        } else {
+            setBrightness(1, die.flash * 16 / 32767);
+        }
+        break;
+    case DIE_ORBIT:
+        die_camera_tick();
+        if (die.t > DIE_ORBIT_TICKS) {
+            die.step = DIE_PICTURE;
+            die.t = 0;
+            die.shrink = die.spin = die.rise = 0;
+            die_show_picture();
+        }
+        break;
+    case DIE_PICTURE:
+        if (die.t <= 32)
+            die_picture_level(die.t / 2);
+        if (die.t >= 6 && die.t < 10) { // red flash, then towards grey
+            die.light[0] = 255;
+            die.light[1] = die.light[2] = 0;
+        } else if (die.t >= 10 && die.t <= 20) {
+            die.light[0] -= 12;
+            die.light[1] += 13;
+            die.light[2] += 13;
+        }
+        die_camera_tick();
+        if (die.t >= 170) {
+            die.step = DIE_FADE;
+            die.t = 0;
+            die.rise = 10;
+            die.rise_acc = 2;
+            die.spin = 16;
+        }
+        break;
+    case DIE_FADE:
+        die_camera_tick();
+        if (die.ambient > 0)
+            die.ambient--;
+        for (int k = 0; k < 3; k++)
+            die.light[k] = die.light[k] > 4 ? die.light[k] - 4 : 0;
+        if (die.t >= 110)
+            setBrightness(1, -16 * (die.t - 110) / 53);
+        if (die.t >= 163) {
+            setBrightness(1, -16);
+            die.step = DIE_OFF;
+            bgShow(bg_id);
+            new_game();
+        }
+        break;
+    }
+}
+
+// the vertex colour models are lit with (textures are modulated by it)
+static void model_colour(void)
+{
+    if (die.step < DIE_PICTURE) {
+        glColor3b(255, 255, 255);
+        return;
+    }
+    int c[3];
+    for (int k = 0; k < 3; k++) {
+        c[k] = die.ambient + die.light[k];
+        if (c[k] > 255)
+            c[k] = 255;
+    }
+    glColor3b(c[0], c[1], c[2]);
+}
+
 static void render_frame(void)
 {
-    setup_projection(&room.cameras[cur_cam]);
-    // Textures are modulated with the vertex colour: keep it white.
-    glColor3b(255, 255, 255);
+    const RoomCamera *cam = view_camera();
+    setup_projection(cam);
+    // Textures are modulated with the vertex colour: white but for the death.
+    model_colour();
     glPolyFmt(POLY_ALPHA(31) | cull_models | POLY_ID(1));
     draw_player();
     draw_objects();
     update_occlusion();
     enemy_draw((have_masks ? 4 * masks.header->num_quads : 0) + 4 * effect_count(),
                (have_masks ? masks.header->num_quads : 0) + effect_count());
-    effect_draw(room.cameras[cur_cam].from, room.cameras[cur_cam].to);
+    effect_draw(cam->from, cam->to);
     glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(2));
-    draw_masks();
+    if (die.step < DIE_ORBIT)
+        draw_masks();
     while (GFX_BUSY)
         ;
     gx_vertices_last = GFX_VERTEX_RAM_USAGE;
@@ -891,7 +1100,7 @@ static int camera_has_zones(int cam)
 
 static void check_camera_switch(void)
 {
-    if (!cut_auto_enabled())
+    if (!cut_auto_enabled() || die.step >= DIE_ORBIT)
         return;
     int floor = player_floor();
     for (int i = 0; i < room.header->num_switches; i++) {
@@ -1125,7 +1334,7 @@ void game_player_pose(const Model *set, int anim, int key, int32_t x, int32_t z,
 
 void game_player_died(void)
 {
-    game_over = 1;
+    // the death sequence (die_tick) started when Leon was killed
 }
 
 void game_bgm_control(int id, int op, int type, int left, int right)
@@ -1259,6 +1468,8 @@ static void update_occlusion(void)
 
 int camera_occluded(int32_t x, int32_t y, int32_t z)
 {
+    if (die.step >= DIE_ORBIT)
+        return 0; // the free camera is not where the room's walls were sorted for
     const RoomCamera *c = &room.cameras[cur_cam];
     const float eye[3] = { (float)c->from[0], (float)c->from[1], (float)c->from[2] };
     for (int h = 0; h < 2; h++) { // hidden only if feet and head (2000 up: above 1800-high boxes) are
@@ -1318,9 +1529,7 @@ static void enter_room(int stage, int id, int arrival_cam)
 // the title; here the game simply starts over)
 static void new_game(void)
 {
-    if (game_over)
-        fade(1);
-    game_over = 0;
+    memset(&die, 0, sizeof(die));
     player.state = ST_IDLE;
     player.hp = PLAYER_HP;
     player.saved_once = 0;
@@ -2029,6 +2238,7 @@ int main(void)
                 };
                 enemy_tick(&target);
                 update_pose();
+                die_tick();
                 effect_tick();
                 player.shot = 0;
                 if (player.state < ST_SCRIPT && player.state != ST_AIM && player.state != ST_FIRE &&
@@ -2047,8 +2257,6 @@ int main(void)
         music_frame();
         voice_frame();
         music_duck(voice_playing());
-        if (game_over)
-            new_game();
     }
     return 0;
 }

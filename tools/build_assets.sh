@@ -83,6 +83,10 @@ mkdir -p build/ds/effect
 python3 -I tools/esp2ds.py "$DISC/COMMON/DATA/CORE00.ESP" "$DISC/COMMON/DATA/CORE01.TIM" \
     build/ds/effect/core.bin > /dev/null
 
+# "YOU DIED" (Leon)
+mkdir -p build/ds/die
+python3 -I tools/die2ds.py "$DISC/COMMON/DATA/DIED00.DIE" build/ds/die/died00.bin
+
 # the opening movies (Leon meets Claire): need the STRs as raw sectors,
 # see tools/extract_str.py; skipped without them
 mkdir -p build/ds/movie
@@ -92,5 +96,5 @@ for m in OPN1STL:opn1 OPN2NDL:opn2; do
     fi
 done
 
-cp -R build/ds/bg build/ds/room build/ds/model build/ds/mask build/ds/sound build/ds/door build/ds/effect build/ds/music build/ds/menu build/ds/movie nitrofiles/
+cp -R build/ds/bg build/ds/room build/ds/model build/ds/mask build/ds/sound build/ds/door build/ds/effect build/ds/music build/ds/menu build/ds/movie build/ds/die nitrofiles/
 du -sh nitrofiles nitrofiles/*
