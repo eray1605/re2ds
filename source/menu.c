@@ -436,6 +436,48 @@ static const uint8_t mixes[][3] = {
     { 0x2A, ITEM_BLUE, 0x2E }, { 0x2B, ITEM_RED, 0x2E },
 };
 
+// the ammunition slot for the weapon in hand, -1 if none (FUN_80065708)
+static int spare_ammo(int *capacity)
+{
+    if (inventory_equipped < 0)
+        return -1;
+    int weapon = inventory[inventory_equipped].item;
+    for (unsigned i = 0; i < sizeof(loads) / sizeof(loads[0]); i++) {
+        if (loads[i].weapon != weapon)
+            continue;
+        for (int s = 0; s < INV_SLOTS; s++)
+            if (inventory[s].item == loads[i].ammo && inventory[s].count) {
+                *capacity = loads[i].capacity;
+                return s;
+            }
+    }
+    return -1;
+}
+
+int inventory_spare_ammo(void)
+{
+    int capacity;
+    return spare_ammo(&capacity) >= 0;
+}
+
+// FUN_80065780: fills the weapon in hand from its ammunition
+void inventory_reload(void)
+{
+    int capacity, s = spare_ammo(&capacity);
+    if (s < 0)
+        return;
+    InvSlot *w = &inventory[inventory_equipped], *m = &inventory[s];
+    int take = capacity - w->count;
+    if (take > m->count)
+        take = m->count;
+    if (take <= 0)
+        return;
+    w->count += take;
+    m->count -= take;
+    if (!m->count)
+        m->item = 0;
+}
+
 static int combine(int a, int b)
 {
     InvSlot *x = &inventory[a], *y = &inventory[b];

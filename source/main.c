@@ -85,7 +85,7 @@ static const uint8_t rbj_move_keys[4] = { 50, 15, 20, 20 };
 #define BG_BYTES (256 * 256)
 static uint8_t bg_ram[BG_BYTES] __attribute__((aligned(32)));
 
-typedef enum { ST_IDLE, ST_WALK, ST_RUN, ST_BACK, ST_TURN, ST_AIM, ST_FIRE, ST_CLIMB, ST_JUMP, ST_FALL, ST_LAND,
+typedef enum { ST_IDLE, ST_WALK, ST_RUN, ST_BACK, ST_TURN, ST_AIM, ST_FIRE, ST_RELOAD, ST_CLIMB, ST_JUMP, ST_FALL, ST_LAND,
                ST_SCRIPT, ST_GRABBED, ST_DEAD } PlayerState; // script: plc.c; held / killed: enemy.c
 
 typedef struct {
@@ -1714,18 +1714,29 @@ static const uint8_t plw_fire[3] = { 10, 12, 14 }, plw_hold[3] = { 11, 13, 15 };
 // 1 fires the next one, so the rate is the animation length (VP70: 23 keys).
 // Releasing R lowers the weapon only after keyframe lower_key (table
 // 0x8009eed8, 3rd byte & 0x7f).
+// Reloading (phase 4, 0x8004237c) plays PLW move 16; its keyframe flags
+// (EDD, u32 entry | flags << 12) start a sound of the weapon bank (0x100000,
+// number in 0xf0000) and load the magazine (0x400000, FUN_80065780): read from
+// PL00W02 / W04.PLW (tools: pld2json.parse_edd).
+// Shots: the frame handler (0x8009f0bc[weapon], VP70 0x80040b94) spawns the
+// fire at the muzzle on keyframe 1 (effect 1, 138 / 615 / 8 from the hand)
+// and the casing on 3 (effect 2, 350 / 40 / -15, thrown at facing + 1300).
 typedef struct {
     uint8_t item;
     uint16_t range;           // 0 = any
     uint8_t damage[3];
     uint8_t lower_key;
+    uint8_t reload_key[2], reload_sound[2]; // the second key loads
 } Weapon;
 static const Weapon weapons[] = {
-    { 0x01, 1500, { 3, 0, 0 }, 50 },      // knife
-    { 0x02, 0, { 16, 15, 14 }, 8 },       // H&K VP70
-    { 0x03, 0, { 16, 15, 14 }, 8 },       // Browning
-    { 0x04, 0, { 16, 15, 14 }, 15 },      // custom handgun
+    { 0x01, 1500, { 3, 0, 0 }, 50, { 0, 0 }, { 0, 0 } },      // knife
+    { 0x02, 0, { 16, 15, 14 }, 8, { 7, 22 }, { 4, 3 } },      // H&K VP70
+    { 0x03, 0, { 16, 15, 14 }, 8, { 7, 22 }, { 4, 3 } },      // Browning (no move 16 in its PLW)
+    { 0x04, 0, { 16, 15, 14 }, 15, { 7, 23 }, { 3, 3 } },     // custom handgun
 };
+enum { PLW_RELOAD = 16 };
+#define SND_EMPTY 1               // ARMS sound 1: the click (FUN_80057364(0x1010001))
+#define HAND_BONE 11
 static int leon_weapon = -1;      // item whose model / sound bank are loaded
 static void *weapon_bank;         // ARMSnn (PS1 bank 1): the shot is sound 0
 
@@ -1792,6 +1803,83 @@ static void update_weapon_model(void)
         player.anim = ANIM_IDLE;
 }
 
+// A point in the frame of one of Leon's bones, in the world: the pose as
+// drawn, M = T(pos) * Ry(dir) * ... * M_parent * T(bone) * Rx * Ry * Rz
+static void leon_point(int bone, const int32_t local[3], int32_t out[3])
+{
+    float p[3] = { (float)local[0], (float)local[1], (float)local[2] };
+    for (int b = bone; b >= 0 && b < leon.header->num_bones; b = leon.bones[b].parent) {
+        const int32_t *r = pose_rot[b < POSE_MAX_BONES ? b : 0];
+        float a, c, s, t;
+        a = r[2] * (6.2831853f / 32768.0f), c = cosf(a), s = sinf(a); // Rz
+        t = c * p[0] - s * p[1]; p[1] = s * p[0] + c * p[1]; p[0] = t;
+        a = r[1] * (6.2831853f / 32768.0f), c = cosf(a), s = sinf(a); // Ry
+        t = c * p[0] + s * p[2]; p[2] = -s * p[0] + c * p[2]; p[0] = t;
+        a = r[0] * (6.2831853f / 32768.0f), c = cosf(a), s = sinf(a); // Rx
+        t = c * p[1] - s * p[2]; p[2] = s * p[1] + c * p[2]; p[1] = t;
+        const ModelBone *bn = &leon.bones[b];
+        for (int k = 0; k < 3; k++)
+            p[k] += leon.bones[b].parent < 0 ? (float)pose_ofs[k] : (float)bn->pos[k];
+    }
+    float a = player.dir * (6.2831853f / 32768.0f), c = cosf(a), s = sinf(a);
+    out[0] = player.x + (int32_t)(c * p[0] + s * p[2]);
+    out[1] = player.y + (int32_t)p[1];
+    out[2] = player.z + (int32_t)(-s * p[0] + c * p[2]);
+}
+
+// keyframe effects of a shot (VP70 frame handler 0x80040b94)
+static void shot_effects(void)
+{
+    static const int32_t muzzle[3] = { 138, 615, 8 }, port[3] = { 350, 40, -15 };
+    int32_t p[3];
+    if (player.key == 1) {
+        leon_point(HAND_BONE, muzzle, p);
+        effect_spawn(1, 0, p[0], p[1], p[2], 0, 0, 0, 0, player.y, 255, 230, 140);
+    } else if (player.key == 3) {
+        leon_point(HAND_BONE, port, p);
+        int16_t dir = player.dir + 1300 * 8;
+        effect_spawn(2, 0, p[0], p[1], p[2], (40 * cosLerp(dir)) >> 12, -40, -((40 * sinLerp(dir)) >> 12), 1,
+                     player.y, 230, 180, 80);
+    }
+}
+
+// phase 4 (0x8004237c): plays move 16, sounds and loading on its keyframes;
+// back to aiming at the end
+static void start_reload(void)
+{
+    player.state = ST_RELOAD;
+    player.set = &leon;
+    player.anim = PLW_FIRST + PLW_RELOAD;
+    player.key = 0;
+}
+
+static void reload_tick(void)
+{
+    const Weapon *w = weapon_in_hand();
+    if (!w || PLW_FIRST + PLW_RELOAD >= leon.header->num_anims) { // no move for it: at once
+        if (w)
+            sound_play(weapon_bank, w->reload_sound[1], 127, 64);
+        inventory_reload();
+        player.state = ST_AIM;
+        return;
+    }
+    for (int k = 0; k < 2; k++)
+        if (player.key == w->reload_key[k]) {
+            sound_play(weapon_bank, w->reload_sound[k], 127, 64);
+            if (k == 1)
+                inventory_reload();
+        }
+    const ModelAnim *a = &leon.anims[player.anim];
+    if (player.key + 1 < a->count) {
+        player.key++;
+    } else {
+        player.state = ST_AIM;
+        player.aim_raised = 1;
+        player.anim = PLW_FIRST + plw_hold[player.aim_posture];
+        player.key = 0;
+    }
+}
+
 static void fire(void)
 {
     const Weapon *w = weapon_in_hand();
@@ -1816,6 +1904,8 @@ static void fire(void)
 static int update_aim(uint32_t held, uint32_t down)
 {
     const Weapon *w = weapon_in_hand();
+    if (player.state == ST_RELOAD)
+        return 1; // the reload plays to its end (phase 4 checks no buttons)
     if (!w || (!(held & KEY_R) && !(player.state == ST_FIRE && player.key <= w->lower_key))) {
         if (player.state == ST_AIM || player.state == ST_FIRE)
             player.state = ST_IDLE;
@@ -1845,9 +1935,18 @@ static int update_aim(uint32_t held, uint32_t down)
     }
     if (player.state == ST_AIM && player.aim_raised)
         player.anim = PLW_FIRST + plw_hold[player.aim_posture], player.key = 0;
-    (void)down;
-    if ((held & KEY_A) && (held & KEY_R) && player.state == ST_AIM && player.aim_raised)
-        fire();
+    // phase 1 (0x80040128): a loaded weapon fires; an empty one reloads on a
+    // new press if there is ammunition, else it clicks
+    if ((held & KEY_A) && (held & KEY_R) && player.state == ST_AIM && player.aim_raised) {
+        if (w->item == 0x01 || inventory[inventory_equipped].count > 0)
+            fire();
+        else if (!(down & KEY_A))
+            ;
+        else if (inventory_spare_ammo())
+            start_reload();
+        else
+            sound_play(weapon_bank, SND_EMPTY, 127, 64);
+    }
     return 1;
 }
 
@@ -2029,10 +2128,17 @@ static void update_player_tick(void)
         special_move_tick();
         return;
     }
+    if (st == ST_RELOAD) {
+        reload_tick();
+        return;
+    }
     if (st == ST_AIM || st == ST_FIRE) {
         const ModelAnim *wa = &leon.anims[player.anim];
-        if (player.key + 1 < wa->count)
+        if (player.key + 1 < wa->count) {
             player.key++;
+            if (st == ST_FIRE && inventory_equipped >= 0 && inventory[inventory_equipped].item != 0x01)
+                shot_effects();
+        }
         else if (st == ST_AIM)
             player.aim_raised = 1;
         else
@@ -2241,7 +2347,7 @@ int main(void)
                 die_tick();
                 effect_tick();
                 player.shot = 0;
-                if (player.state < ST_SCRIPT && player.state != ST_AIM && player.state != ST_FIRE &&
+                if (player.state < ST_SCRIPT && player.state != ST_AIM && player.state != ST_FIRE && player.state != ST_RELOAD &&
                     !flag_get(2, 7))
                     check_aots(pending_keys);
                 if (!near_aot && !message_text)

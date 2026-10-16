@@ -30,6 +30,8 @@ typedef struct {
     uint8_t anim;
     uint16_t frame, timer;
     int32_t x, y, z, vx, vy, vz, floor;
+    uint8_t gravity;
+    uint8_t r, g, b;            // vertex colour: the texture is a grey ramp
 } Sprite;
 
 static uint8_t *data;
@@ -78,9 +80,10 @@ static int find_anim(int effect, int sub)
     return -1;
 }
 
-void effect_blood(int kind, int32_t x, int32_t y, int32_t z, int16_t dir, int speed, int32_t floor_y)
+void effect_spawn(int effect, int sub, int32_t x, int32_t y, int32_t z, int32_t vx, int32_t vy, int32_t vz,
+                  int gravity, int32_t floor_y, uint8_t r, uint8_t g, uint8_t b)
 {
-    int a = data ? find_anim(0, kind) : -1;
+    int a = data ? find_anim(effect, sub) : -1;
     if (a < 0)
         return;
     for (int i = 0; i < MAX_SPRITES; i++) {
@@ -95,12 +98,22 @@ void effect_blood(int kind, int32_t x, int32_t y, int32_t z, int16_t dir, int sp
         s->x = x;
         s->y = y;
         s->z = z;
-        s->vx = (speed * cosLerp(dir)) >> 12;
-        s->vz = -((speed * sinLerp(dir)) >> 12);
-        s->vy = -speed / 2;
+        s->vx = vx;
+        s->vy = vy;
+        s->vz = vz;
+        s->gravity = gravity;
         s->floor = floor_y;
+        s->r = r;
+        s->g = g;
+        s->b = b;
         return;
     }
+}
+
+void effect_blood(int kind, int32_t x, int32_t y, int32_t z, int16_t dir, int speed, int32_t floor_y)
+{
+    effect_spawn(0, kind, x, y, z, (speed * cosLerp(dir)) >> 12, -speed / 2, -((speed * sinLerp(dir)) >> 12), 1,
+                 floor_y, 200, 16, 12);
 }
 
 void effect_tick(void)
@@ -112,7 +125,8 @@ void effect_tick(void)
         s->x += s->vx;
         s->z += s->vz;
         s->y += s->vy;
-        s->vy += GRAVITY;
+        if (s->gravity)
+            s->vy += GRAVITY;
         if (s->y >= s->floor) { // lands
             s->y = s->floor;
             s->vx = s->vz = s->vy = 0;
@@ -180,6 +194,7 @@ void effect_draw(const int32_t cam_from[3], const int32_t cam_to[3])
         int16_t ux = (int16_t)(u[0] * h), uy = (int16_t)(u[1] * h), uz = (int16_t)(u[2] * h);
         glPushMatrix();
         glTranslatef32(s->x + nearer[0], s->y + nearer[1], s->z + nearer[2]);
+        glColor3b(s->r, s->g, s->b);
         glBegin(GL_QUADS);
         glTexCoord2t16(inttot16(fr->u), inttot16(fr->v));
         glVertex3v16(-rx + ux, uy, -rz + uz);
@@ -192,4 +207,5 @@ void effect_draw(const int32_t cam_from[3], const int32_t cam_to[3])
         glEnd();
         glPopMatrix(1);
     }
+    glColor3b(255, 255, 255);
 }

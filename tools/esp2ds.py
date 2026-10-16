@@ -12,8 +12,9 @@ effect has three: a big splash, a smaller one, drops).
 CORE01.TIM has no TIM header: 512 x 256 texels at 4 bpp. The effects of
 CORE00.ESP use its right half (labels "CHI" = blood, "GUN"); the left half
 (smoke and fire) belongs to other banks. The palettes are not in these
-files (the PS1 has them in VRAM already); the blood ramp used here is dark
-red over the 16 brightness steps the sprites are drawn in.
+files (the PS1 has them in VRAM already): the sprites get a grey ramp over
+their 16 brightness steps, and the engine colours each one (blood dark red,
+muzzle flash yellow, casings brass) with the vertex colour.
 
 Output effect/core.bin:
   u32 "RES1", u16 anim count, u16 frame count
@@ -29,12 +30,11 @@ import sys
 MAGIC = 0x31534552  # "RES1"
 
 
-def blood_palette():
+def grey_palette():
     pal = [0]
     for i in range(1, 16):
-        r = min(31, 10 + i * 21 // 15)
-        g = max(0, (i - 11) * 2)
-        pal.append(r | g << 5 | (g // 2) << 10)
+        v = 8 + i * 23 // 15
+        pal.append(v | v << 5 | v << 10)
     return pal
 
 
@@ -67,7 +67,7 @@ def main():
     out = struct.pack("<IHH", MAGIC, len(anims), len(frames))
     out += b"".join(struct.pack("<BBHHH", e, s, f, c, 0) for e, s, f, c in anims)
     out += b"".join(struct.pack("<BBBbbBH", *f, 0) for f in frames)
-    out += struct.pack("<16H", *blood_palette()) + tex
+    out += struct.pack("<16H", *grey_palette()) + tex
     open(sys.argv[3], "wb").write(out)
     print(f"{sys.argv[3]}: {len(anims)} animations, {len(frames)} frames")
 

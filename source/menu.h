@@ -19,6 +19,9 @@ int menu_message_open(void);
 // show the item's picture (as on the PS1 when picking it up) until the
 // message closes or, without a message, until the next input
 void menu_picture(int item);
+// ammunition for the weapon in hand in the inventory; load it (the reload)
+int inventory_spare_ammo(void);
+void inventory_reload(void);
 // debug mode: the lower screen shows the text console instead
 void menu_debug(int on);
 int menu_debug_on(void);

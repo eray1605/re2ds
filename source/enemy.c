@@ -1353,12 +1353,18 @@ int enemy_grabbing(void) { return grab.enemy >= 0; }
 
 static int alive(const Enemy *e) { return present(e) && e->state < ST_DYING && !is_person(e); }
 
+// A zombie on the ground (status obj+0x10e bit 0x2000: set when it is
+// knocked down or spawns lying, cleared when it gets up) is a target only
+// if no standing one is in sight.
+static int on_ground(const Enemy *e) { return e->state == ST_DOWN || e->state == ST_LYING; }
+
 // Nearest living enemy Leon can see within range (0 = any), for the
-// auto-aim when he raises a weapon (FUN_8003ed74). -1 if none.
+// auto-aim when he raises a weapon (FUN_8003ed74): standing ones first, those
+// on the ground only if there is none. -1 if none.
 int enemy_aim_target(int32_t x, int32_t y, int32_t z, int range, int32_t *tx, int32_t *tz)
 {
-    int best = -1;
-    int64_t best_d = 0;
+    int best = -1, low = -1;
+    int64_t best_d = 0, low_d = 0;
     for (int i = 0; i < MAX_ENEMIES; i++) {
         const Enemy *e = &enemies[i];
         if (!alive(e))
@@ -1368,11 +1374,18 @@ int enemy_aim_target(int32_t x, int32_t y, int32_t z, int range, int32_t *tx, in
             continue;
         if (game_sight_blocked(x, y + EYE_PLAYER, z, e->x, e->y + EYE_ENEMY, e->z))
             continue;
-        if (best < 0 || d < best_d) {
+        if (on_ground(e)) {
+            if (low < 0 || d < low_d) {
+                low = i;
+                low_d = d;
+            }
+        } else if (best < 0 || d < best_d) {
             best = i;
             best_d = d;
         }
     }
+    if (best < 0)
+        best = low;
     if (best >= 0) {
         *tx = enemies[best].x;
         *tz = enemies[best].z;
