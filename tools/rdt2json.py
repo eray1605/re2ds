@@ -130,26 +130,35 @@ def read_collision(data, offset):
     return {"ceiling": {"x": cx, "z": cz, "y": cy, "w": cw, "d": cd}, "boxes": boxes}
 
 
+# Block opcodes with a u16 length at +2: if, for, while, do, switch (the block
+# ends that many bytes after the instruction) and else (counted from itself).
+BLOCK_AFTER = {6, 13, 15, 17, 19}
+OP_ELSE = 7
+
+
+def block_reach(op, pos, data):
+    """End of the block op at pos opens (0 if none), as source/script.c."""
+    if op in BLOCK_AFTER:
+        return pos + SCD_SIZES[op] + struct.unpack_from("<H", data, pos + 2)[0]
+    if op == OP_ELSE:
+        return pos + struct.unpack_from("<H", data, pos + 2)[0]
+    return 0
+
+
 def script_instructions(data, offset):
     """Yield (opcode, position) for every instruction of an SCD block.
 
     The block starts with a table of u16 function offsets (the first one is
-    also the table size). Functions end at EVT_END; unknown opcodes stop the
-    walk of that function.
+    also the table size). A function ends at an EVT_END outside every if /
+    loop block - one inside a block only ends it when the condition holds
+    (room 207's init: "if flag 1:6, evt_end", then the doors). Unknown
+    opcodes stop the walk of that function.
     """
     first = struct.unpack_from("<H", data, offset)[0]
     funcs = [struct.unpack_from("<H", data, offset + i)[0] for i in range(0, first, 2)]
     for start in funcs:
-        pos = offset + start
-        while pos < len(data):
-            op = data[pos]
-            size = SCD_SIZES.get(op)
-            if size is None:
-                break
-            yield op, pos
-            pos += size
-            if op == OP_EVT_END:
-                break
+        for op, pos in script_instructions_from(data, offset + start):
+            yield op, pos - SCD_SIZES[op]
 
 
 def script_block(data, offset):
@@ -166,11 +175,13 @@ def script_block(data, offset):
 
 def script_instructions_from(data, pos):
     """Walk one function from pos; yields (opcode, position after it)."""
+    reach = 0
     while pos < len(data) and data[pos] in SCD_SIZES:
         op = data[pos]
+        reach = max(reach, block_reach(op, pos, data))
         pos += SCD_SIZES[op]
         yield op, pos
-        if op == OP_EVT_END:
+        if op == OP_EVT_END and pos >= reach:
             break
 
 

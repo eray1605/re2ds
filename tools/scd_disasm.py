@@ -14,7 +14,7 @@ import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from rdt2json import SCD_SIZES, read_header  # noqa: E402
+from rdt2json import SCD_SIZES, read_header, script_instructions_from  # noqa: E402
 
 NAMES = {
     0: "nop", 1: "evt_end", 2: "evt_next", 3: "evt_chain", 4: "evt_exec", 5: "evt_kill",
@@ -49,11 +49,8 @@ def functions(data, offset):
     out = []
     for start in starts:
         pos = start
-        while pos < len(data) and data[pos] in SCD_SIZES:
-            op = data[pos]
-            pos += SCD_SIZES[op]
-            if op == 1:
-                break
+        for _, pos in script_instructions_from(data, start):
+            pass
         out.append((start, pos))
     return out
 

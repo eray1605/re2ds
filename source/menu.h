@@ -6,6 +6,8 @@
 
 #include <stdint.h>
 
+#include "script.h" // InvSlot
+
 void menu_init(void);
 const char *item_name(int item);     // "" if unknown
 // once per DS frame. hp: Leon's health. Returns 1 while the menu has the
@@ -21,6 +23,9 @@ int menu_message_open(void);
 // calling frame_fn once per DS frame so the upper screen keeps going.
 int menu_choose(const char *title, const char *const *lines, int count, int start, int can_cancel,
                 void (*frame_fn)(void));
+// The item box: Leon's slots and box[box_slots]; A picks an item, A on
+// another slot swaps them, B closes. Runs like menu_choose.
+void menu_item_box(InvSlot *box, int box_slots, void (*frame_fn)(void));
 // show the item's picture (as on the PS1 when picking it up) until the
 // message closes or, without a message, until the next input
 void menu_picture(int item);
