@@ -113,6 +113,18 @@ program.
    ```
    Close and reopen the Ubuntu terminal, or set the paths yourself:
    `export DEVKITPRO=/opt/devkitpro DEVKITARM=/opt/devkitpro/devkitARM`.
+
+   **If `wget` answers `403 Forbidden`:** devkitpro.org sits behind Cloudflare, which blocks
+   some networks completely (then `dkp-pacman` cannot load its packages either). Use
+   devkitPro's official Docker image instead; it comes from Docker Hub and already has
+   devkitARM, libnds (`nds-dev`) and the NDS portlibs:
+   ```bash
+   sudo apt install -y docker.io
+   sudo service docker start
+   sudo docker pull devkitpro/devkitarm
+   ```
+   Then build with the Docker line in [3. Build and run](#3-build-and-run) instead of plain
+   `make`. Everything else (Python, FFmpeg, the asset conversion) runs in Ubuntu as described.
 4. **Get the code** into your Linux home folder (much faster than a folder under `/mnt/c`):
    ```bash
    cd ~
@@ -157,6 +169,13 @@ the movies take the longest). Single rooms can be converted again with
 export DEVKITPRO=/opt/devkitpro DEVKITARM=/opt/devkitpro/devkitARM
 make                 # → re2ds.nds
 ./start.command      # builds if needed and starts melonDS
+```
+
+Without a local devkitPro (see the `403 Forbidden` note under Windows), build in devkitPro's
+Docker image from the repository folder; `re2ds.nds` lands next to the Makefile as usual:
+
+```bash
+sudo docker run --rm -v "$PWD":/re2ds -w /re2ds -u "$(id -u):$(id -g)" devkitpro/devkitarm make
 ```
 
 ## Controls
