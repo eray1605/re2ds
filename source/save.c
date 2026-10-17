@@ -3,6 +3,7 @@
 // File: u32 "RSV1", u16 version, u16 slot count, u32 slot size, then the
 // slots as SaveSlot. Written whole every time (about 30 KB).
 #include <fat.h>
+#include <stddef.h>
 #include <nds.h>
 #include <stdio.h>
 #include <string.h>
@@ -10,7 +11,9 @@
 #include "save.h"
 
 #define SAVE_MAGIC 0x31565352  // "RSV1"
-#define SAVE_VERSION 1
+#define SAVE_VERSION 2
+// version 1 slots ended before bgm_saved (padded to the struct's 4-byte alignment)
+#define SLOT_V1_SIZE ((offsetof(SaveSlot, bgm_saved) + 3) & ~(size_t)3)
 
 typedef struct {
     uint32_t magic;
@@ -59,9 +62,17 @@ int save_read(SaveSlot slots[SAVE_SLOTS])
     if (!f)
         return 0;
     SaveHeader h;
-    int ok = fread(&h, sizeof(h), 1, f) == 1 && h.magic == SAVE_MAGIC && h.version == SAVE_VERSION &&
-             h.slot_size == sizeof(SaveSlot) && h.slots == SAVE_SLOTS &&
-             fread(slots, sizeof(SaveSlot), SAVE_SLOTS, f) == SAVE_SLOTS;
+    int ok = fread(&h, sizeof(h), 1, f) == 1 && h.magic == SAVE_MAGIC && h.slots == SAVE_SLOTS;
+    if (ok && h.version == SAVE_VERSION && h.slot_size == sizeof(SaveSlot)) {
+        ok = fread(slots, sizeof(SaveSlot), SAVE_SLOTS, f) == SAVE_SLOTS;
+    } else if (ok && h.version == 1 && h.slot_size == SLOT_V1_SIZE) {
+        for (int i = 0; i < SAVE_SLOTS && ok; i++) {
+            ok = fread(&slots[i], SLOT_V1_SIZE, 1, f) == 1;
+            slots[i].bgm_saved = 0; // was padding: the starting music table
+        }
+    } else {
+        ok = 0;
+    }
     fclose(f);
     if (!ok)
         memset(slots, 0, sizeof(SaveSlot) * SAVE_SLOTS);

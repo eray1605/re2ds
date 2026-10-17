@@ -139,7 +139,12 @@ In melonDS's default keyboard mapping START is Enter and SELECT is Backspace (ch
 
 Saving needs an SD card: on a flashcart or a DSi it is the card the ROM runs from
 (`fat:/re2ds.sav` or `sd:/re2ds.sav`). In melonDS enable *Config → Emu settings → DLDI →
-Enable DLDI (for homebrew)* with an SD card image or folder.
+Enable DLDI (for homebrew)* with an SD card image of **1 GB** and *Sync SD to folder* with the
+folder `~/Documents/re2ds-sd`
+(or set `RE2DS_SD` to another one). With DLDI on, the DS cannot read the game data from the
+cartridge any more and melonDS passes no ROM path, so the game reads `re2ds.nds` from the SD
+card root: `start.command` copies it into that folder whenever the ROM changed. melonDS keeps
+the ROM there padded to 512 MB, so a 512 MB image leaves no room for `re2ds.sav`.
 
 ## Tests
 

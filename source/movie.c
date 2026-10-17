@@ -4,10 +4,14 @@
 // unpacked in RAM and copied to the BG3 bitmap (VRAM E) in the vblank.
 // Sound: one block of 16-bit mono PCM after the frames, streamed into a ring
 // buffer the ARM7 loops over. The ARM7's position is not visible here, so
-// both are paced by counted vblanks (59.8261 Hz): the picture shows frame
-// n at vblank n * 59.8261 / fps, the ring is kept filled ahead of where the
-// sound must be.
+// both are paced by a 1 kHz tick task started with the sound (calico's tick
+// counter itself stands still while no tick task runs):
+// the picture shows the frame due by then, the ring is kept filled about a
+// second ahead of where the sound must be. (Counting loop passes as vblanks
+// ran slow whenever reading a frame took longer than a vblank - from the SD
+// card it often does - and the sound then replayed old parts of the ring.)
 #include <nds.h>
+#include <malloc.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,9 +19,9 @@
 #include "movie.h"
 
 #define MOVIE_MAGIC 0x31564D52  // "RMV1"
-#define RING 16384               // samples (32 KB, about 0.74 s)
-#define LEAD 8192                // samples kept queued ahead of the sound
-#define VBLANK_MILLIHZ 59826     // DS refresh: 59.8261 Hz
+#define RING 32768               // samples (64 KB, about 1.5 s)
+#define LEAD 22050               // samples kept queued ahead of the sound
+#define CLOCK_HZ 1000            // the movie clock counts milliseconds
 #define LETTERBOX 32             // rows above the 256 x 128 picture
 
 typedef struct {
@@ -26,9 +30,27 @@ typedef struct {
     uint32_t rate, audio_offset, audio_samples, max_lz;
 } MovieHeader;
 
-static int16_t ring[RING] __attribute__((aligned(32)));
 static uint8_t picture[256 * 128] __attribute__((aligned(32)));
 static uint16_t palette[256];
+
+static TickTask clock_task;
+static volatile uint32_t clock_ms;
+
+static void clock_tick(TickTask *t)
+{
+    (void)t;
+    clock_ms++;
+}
+
+static void clock_start(void)
+{
+    clock_ms = 0;
+    tickTaskStart(&clock_task, clock_tick, ticksFromHz(CLOCK_HZ), ticksFromHz(CLOCK_HZ));
+}
+
+static uint32_t clock_ticks(void) { return clock_ms; }
+
+static void clock_stop(void) { tickTaskStop(&clock_task); }
 
 static void clear_screen(void)
 {
@@ -49,7 +71,11 @@ int movie_play(const char *name)
         return 1;
     }
     uint8_t *lz = malloc(h.max_lz);
-    if (!lz) {
+    // the sound ring only while a movie plays (64 KB; RAM is short)
+    int16_t *ring = memalign(32, RING * 2);
+    if (!lz || !ring) {
+        free(lz);
+        free(ring);
         fclose(fv);
         fclose(fa);
         return 1;
@@ -64,17 +90,18 @@ int movie_play(const char *name)
 
     // sound: fill the ring, then start it looping
     uint32_t written = 0; // samples queued in total
-    memset(ring, 0, sizeof(ring));
+    memset(ring, 0, RING * 2);
     int channel = -1;
     int skipped = 0, shown = -1, decoded = -1;
-    for (uint32_t vb = 0;; vb++) {
-        // samples the sound has reached by now
-        uint32_t played = (uint32_t)((uint64_t)vb * h.rate * 1000 / VBLANK_MILLIHZ);
+    for (int first = 1;; first = 0) {
+        // the time since the sound started; samples it has reached by now
+        uint32_t t = first ? 0 : clock_ticks();
+        uint32_t played = (uint32_t)((uint64_t)t * h.rate / CLOCK_HZ);
         while (written < h.audio_samples && written < played + LEAD) {
             int pos = written % RING;
             int n = RING - pos;
-            if (n > 1024)
-                n = 1024;
+            if (n > 4096)
+                n = 4096;
             if (written + n > h.audio_samples)
                 n = h.audio_samples - written;
             if (fread(ring + pos, 2, n, fa) != (size_t)n)
@@ -84,11 +111,13 @@ int movie_play(const char *name)
             if (!n)
                 break;
         }
-        if (channel < 0)
-            channel = soundPlaySample(ring, SoundFormat_16Bit, sizeof(ring), h.rate, 127, 64, true, 0);
+        if (channel < 0) {
+            channel = soundPlaySample(ring, SoundFormat_16Bit, RING * 2, h.rate, 127, 64, true, 0);
+            clock_start();
+        }
 
         // the frame due now (frames fall behind: skip, but keep reading)
-        int due = (int)((uint64_t)vb * h.fps * 1000 / VBLANK_MILLIHZ);
+        int due = (int)((uint64_t)t * h.fps / CLOCK_HZ);
         if (due >= h.frames)
             break;
         while (decoded < due) {
@@ -119,9 +148,11 @@ int movie_play(const char *name)
             shown = decoded;
         }
     }
+    clock_stop();
     if (channel >= 0)
         soundKill(channel);
     free(lz);
+    free(ring);
     fclose(fv);
     fclose(fa);
     swiWaitForVBlank();
