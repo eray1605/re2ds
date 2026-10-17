@@ -1,151 +1,199 @@
-# re2ds – Resident Evil 2 auf dem Nintendo DS (Prototyp)
+# re2ds – Resident Evil 2 (PS1) on the Nintendo DS
 
-Stand: **alle 125 Räume von Disc 1 (Leon) begehbar** – vorgerenderte Hintergründe, Masken,
-Leon als 3D-Modell mit Tank-Steuerung, Türen und Raumwechsel. Plan bis zum kompletten Spiel:
-[ROADMAP.md](ROADMAP.md).
+re2ds is a native Nintendo DS engine for **Resident Evil 2** (PS1, PAL disc 1, Leon,
+SLES-00972). It is not an emulator: converters turn the data of *your own* disc into DS
+formats, and a C engine (devkitARM + libnds) plays them with the game's original rules,
+reverse engineered from the PS1 executable.
 
-Die Spieldaten kommen aus der eigenen PS1-Disc und werden **nicht** mitgeliefert. Alles unter
-`build/` ist aus der Disc erzeugt und wird nicht eingecheckt.
+![re2ds running on a Nintendo DSi XL: Leon in the alley behind the gun shop, the status screen on the lower screen](docs/images/dsi-xl.jpg)
 
-Analyse-Notizen zur Original-Engine: [../re2ds-notes](../re2ds-notes).
+*Running on real hardware (Nintendo DSi XL).*
 
-## Konverter (Stand)
+> **No game data is included, and none may be shared.** Everything under `build/` and
+> `nitrofiles/` and the ROM `re2ds.nds` contain Capcom's data: they are generated locally
+> from your own disc, are ignored by git, and must never be committed or distributed.
 
-| Werkzeug | Eingabe | Ausgabe | Status |
-|----------|---------|---------|--------|
-| `tools/bss2ppm` (C, nutzt FFmpegs MDEC-Decoder) | `COMMON/BSS/ROOMsrr.BSS` | 320×240-Hintergrund pro Kamera | ✔ funktioniert, Raum 100: 9 Kameras |
-| `tools/rdt2json.py` | `PL0/RDT/ROOMsrrp.RDT` | Kameras, Kamerawechsel, Kollision, Türen (aus den Raumskripten) als JSON | ✔ alle 125 Räume, 267 Türen, alle Ziele vorhanden |
-| `tools/check_projection.py` | JSON + Hintergründe | Kollisionsboxen in die Hintergründe projiziert | ✔ Kamera-Konvention bestätigt |
-| `tools/pld2json.py` | `PL0/PLD/PL00.PLD` (+ `--plw PL00W00.PLW`) | Mesh, Skelett, Animationen als JSON, Textur als PNG | ✔ Leon: 15 Knochen, 187 Dreiecke + 267 Vierecke, 10 + 17 Animationen |
-| `tools/preview_model.py`, `tools/preview_anims.py` | JSON + Textur | Vorschau (vorn/seitlich), Animations-Übersicht | ✔ |
-| `tools/bg2ds.py` | `bss2ppm`-Ausgabe | `build/ds/bg/<raum>_camNN.bin`: 256×192, 8 Bit + eigene Palette, LZ77 (~46 KB) | ✔ optisch wie 16 Bit |
-| `tools/lz77.c` | beliebige Datei | LZ77 im DS-BIOS-Format (VRAM-sicher) | ✔ |
-| `tools/room2ds.py` | `rdt2json`-Ausgabe | `build/ds/room/<raum>.bin`: Kameras, Zonen (mit Sichtbereich-Flag), Kollision, Türen, Debug-Startpunkt | ✔ |
-| `tools/model2ds.py` | `pld2json`-Ausgabe + PLD | `build/ds/model/leon.bin` (Display Lists, Skelett, Keyframes, Animationen), `leon_tex.bin` (3 × 128×256, 8 Bit) | ✔ 88 KB + 97 KB |
-| `tools/bssmask.py` | `COMMON/BSS/ROOMsrr.BSS` | Masken-Atlas pro Kamera (TIM + PNG) | ✔ Raum 100: 7 von 9 Kameras, Größen stimmen exakt |
-| `tools/mask2ds.py` | `rdt2json`-Ausgabe + Masken-TIMs | `build/ds/mask/<raum>_camNN.bin`: Atlas (256×2ⁿ, 8 Bit, Index 0 transparent) + Welt-Vierecke, LZ77 | ✔ auch schmale Atlanten |
-| `tools/tim2png.py` | beliebige Datei | TIM-Bilder als PNG | ✔ |
-| `tools/ds_preview.py` | **nur** `build/ds/` | DS-Bild 256×192 mit Hintergrund, Leon und Masken | ✔ prüft die Formate |
+## Status
 
-Die DS-Formate sind in [source/formats.h](source/formats.h) beschrieben (gilt für Konverter und Engine).
+Playable from the opening movie through Leon's disc 1 rooms:
 
-## Erkenntnisse
+- **World:** all 125 rooms of disc 1 – pre-rendered backgrounds with depth masks, camera
+  switches, collision, floors / stairs / slopes, doors with their 3D door animations, locks
+  and keys, room objects (items lying around, gates).
+- **Leon:** tank controls, walk / run / turn with the original turn rates and health
+  animations, pose blending, climbing / jumping down, aiming with auto-aim (standing enemies
+  before those on the ground), firing with muzzle flash and casings, reloading, the empty
+  click, the knife.
+- **Enemies:** zombies with the original AI (lurking, chasing over path zones, grab and bite,
+  struggling free, hit reactions, falling, dying, eating), people moved by the room scripts
+  (Kendo).
+- **Scripts:** a SCD bytecode interpreter covering every opcode used on disc 1: flags,
+  threads, AOTs, items, messages, cutscenes (`plc_*`), camera cuts, voices, effects.
+- **Status screen** on the lower screen: inventory, equip, check with the item pictures,
+  combine (loading weapons, mixing herbs), menu sounds.
+- **Sound:** sound effects per room, footsteps, music (the PS1 sequences on a DS sequencer),
+  voice clips (XA) for all stages, the opening movies with sound.
+- **Effects:** blood, muzzle fire, smoke, fires, glass shards (the PS1's ESP sprites with
+  their real palettes).
+- **Death:** the PS1's death sequence (white flash, circling camera, YOU DIED).
 
-- **Hintergründe und Masken:** Jeder 64-KB-Block eines `.BSS` gehört zu einer Kamera
-  (gefunden über den Hintergrund-Lader `0x8002b240` in `SLES_009.72`):
-  ```
-  0x0000   MDEC-Bild „BS v3“, 320×240 (Hintergrund)
-  h        u32 entpackte Größe, u16 0xFFFF, LZ-Datenstrom  → Masken-TIM (8 Bit, 256×N)
-  o − 8    u32 h        (Zeiger auf den Masken-Block, liest der Lader)
-  o − 4    u32 ≠ 0      (Kamera hat Masken)
-  ```
-  Entpacker (handgeschriebener Assembler, `0x80010000`–`0x800104b0`, als Zustandsmaschine
-  über 1-KB-Stücke im Scratchpad):
-  ```
-  c = Byte;  c == 0xFF            → Ende
-  c & 0x10 == 0  → Kopie:   b = Byte; Abstand = ((c >> 5) << 8 | b) − 2048
-                            Länge = (c & 0x0F) + 3   (bei 0x0F: + nächstes Byte)
-  sonst          → Literale: Anzahl = 32 − (c & 0x1F)  (bei 16: + nächstes Byte)
-  ```
-  Der Masken-Atlas enthält ausgeschnittene Stücke des Hintergrunds; PS1-Farbe `0x0000` ist
-  transparent. Das Längenfeld dieser TIMs zählt nur die Pixel (ohne 12-Byte-Kopf).
-  Die Masken-Rechtecke stehen im RDT (PRI-Liste pro Kamera, `mask_offset`); Tiefe × 32 =
-  Abstand entlang der Blickrichtung (wie OpenBiohazard2 `render/camera.go`).
-- **Kamera-Konvention** (verifiziert mit Raum 100, Kamera 2):
-  ```
-  forward = normalize(to - from)
-  right   = normalize(cross(forward, (0, -1, 0)))   // RE2: -Y ist oben
-  down    = cross(forward, right)
-  screen  = (RID.distance >> 7)                     // ≈ 207,8 → 60° vertikal
-  sx = 160 + screen * dot(p - from, right) / dot(p - from, forward)
-  sy = 120 + screen * dot(p - from, down)  / dot(p - from, forward)
-  ```
-  Für den DS (256×192) einfach mit 0,8 skalieren: `screen * 0.8`, Mitte (128, 96).
-- **Leon (`PL00.PLD`)**: gleicher Aufbau wie am PC – EDD-Animationen, EMR-Skelett,
-  MD1-Mesh (15 Körperteile, je Dreiecke + Vierecke), TIM 8 Bit 384×256 mit 3 Paletten.
-  Die Textur enthält drei 128 px breite Seiten; Seite 3 sind die blutigen Varianten.
-  Vierecke werden als Streifen `(0,1,2) + (1,3,2)` gezeichnet.
-- **Skelett** (Knochen → Körperteil, aus Hierarchie und Positionen abgeleitet):
-  0 Rumpf, 1 Hüfte, 2–4 rechtes Bein (Ober-/Unterschenkel, Fuß), 5–7 linkes Bein,
-  8 Kopf, 9–11 rechter Arm (Ober-/Unterarm, Hand), 12–14 linker Arm.
-  Pose: `M = M_parent · T(rel_pos) · Rx · Ry · Rz`, Winkel 12 Bit (4096 = 360°).
-- **Animationen**: Die PLD enthält nur Sonderbewegungen (Sterben, Wegstoßen, Stolpern,
-  Aufheben, Gepackt-Werden …). Laufen/Rennen/Stehen stehen in der **Waffen-Datei `.PLW`**
-  (Animationsbank 7 in der Spielersteuerung). `PL00W00.PLW` (ohne Waffe):
+Still missing (see [ROADMAP.md](ROADMAP.md)): saving, the map and files, the other enemy
+types, the remaining movies, Claire's disc.
 
-  | PLW-Anim | Keyframes | Bedeutung |
-  |---------:|----------:|-----------|
-  | 0 / 3 / 6 | 30 / 34 / 45 | Gehen – Fine / Caution / Danger |
-  | 1 / 4 / 7 | 20 / 20 / 22 | Rennen – Fine / Caution / Danger |
-  | 2 / 5 / 8 | 50 / 30 / 30 | Stehen – Fine / Caution / Danger |
-  | 9  | 10 | Waffe heben (`0x70009` im Code) |
-  | 10–15 | 23–24 bzw. 1 | Zielen/Schießen hoch, gerade, runter (je Bewegung + Haltepose) |
-  | 16 | 32 | Waffe senken (vermutet) |
+## Repository layout
 
-  Das passt genau zu `player-control.md`: Gehen wählt Animation `0x70000 + {0,3,6}` je nach
-  Gesundheit.
+| Path | Contents |
+|------|----------|
+| `source/` | the DS engine (C). `formats.h` describes every DS data format. |
+| `tools/` | converters (Python 3, two small C tools) from the PS1 disc to `nitrofiles/` |
+| `tools/research/` | reverse engineering helpers: the EXE as an ELF for Ghidra/REA, symbol lists |
+| `tests/` | host tests that run the engine's script / enemy / cutscene code on a PC |
+| `docs/` | analysis notes of the original engine (addresses, tables, behaviour) |
+| `Makefile` | devkitPro ARM9 build with NitroFS |
+| `start.command` | builds the ROM and starts it in melonDS (macOS) |
 
-## Bauen und ausführen (Konverter)
+Main engine modules:
 
-```bash
-clang -O2 -o tools/bss2ppm tools/bss2ppm.c -I/opt/homebrew/include -L/opt/homebrew/lib -lavcodec -lavutil -lswscale
-./tools/bss2ppm <disc>/COMMON/BSS/ROOM100.BSS build/bg/room100
-python3 -I tools/rdt2json.py <disc>/PL0/RDT/ROOM1000.RDT build/room/room1000.json
-python3 -I tools/check_projection.py build/room/room1000.json build/bg/room100 build/check/room100
-python3 -I tools/pld2json.py <disc>/PL0/PLD/PL00.PLD build/leon/leon --plw <disc>/PL0/PLD/PL00W00.PLW
-python3 -I tools/preview_model.py build/leon/leon.json build/leon/leon_tex.png build/leon/leon.png 10 0
+| File | Role |
+|------|------|
+| `main.c` | game loop, rooms, cameras, Leon, rendering, weapons, death sequence |
+| `script.c` | the room script interpreter (SCD), flags, AOTs, inventory |
+| `enemy.c` | zombies and people, path zones, grabbing, hits |
+| `plc.c` | characters moved by the scripts (cutscenes) |
+| `door.c` | door animations (DO2 programs) |
+| `menu.c` | the status screen on the lower screen |
+| `effect.c`, `roomfx.c` | blood and casings; ESP effects of the core and the rooms |
+| `sound.c`, `music.c` | sound banks, voices, the music sequencer |
+| `movie.c` | movie player (FMV) |
+| `assets.c` | file loading from NitroFS |
 
-# DS-Formate
-python3 -I tools/bg2ds.py build/bg/room100 build/ds/bg build/ds/preview
-python3 -I tools/room2ds.py build/room/room1000.json build/ds/room/room1000.bin 2
-python3 -I tools/model2ds.py build/leon/leon.json <disc>/PL0/PLD/PL00.PLD build/ds/model/leon
-python3 -I tools/bssmask.py <disc>/COMMON/BSS/ROOM100.BSS build/mask/room100
-python3 -I tools/mask2ds.py build/room/room1000.json build/mask/room100 build/ds/mask/room100
-python3 -I tools/ds_preview.py build/ds room1000 room100 leon build/ds/preview/frame.png 10 0
-```
+## Building
 
-### Konventionen (in `ds_preview.py` geprüft)
+### Requirements
 
-- Weltkoordinaten = RE2-Spieleinheiten = DS-Festkomma 20.12 (4096 Einheiten = 1,0).
-  Leons Knochen-Vertices passen direkt in `VTX_16`.
-- Modelle schauen nach **+X** (Gehen bewegt die Wurzel um ~80 Einheiten/Frame entlang +X).
-  Drehung um Y wie PS1 `RotMatrixY`: Blickrichtung `(cos a, 0, −sin a)`.
-- Knochen-Pose: `M = M_parent · T(pos) · Rx · Ry · Rz`; die Wurzel nimmt die
-  Position aus dem Keyframe (`offset`, Hüfthöhe ≈ −1800).
-- DS-Projektion: Bildschirmabstand = `screen · 256/320`, Mitte (128, 96); Sichtfeld wie
-  am PS1 (60° vertikal), Seitenverhältnis 4:3 bleibt.
+- **devkitPro** with devkitARM and libnds (calico) – <https://devkitpro.org/wiki/Getting_Started>
+- **Python 3**
+- **FFmpeg** (the `ffmpeg` command and its libraries `libavcodec`, `libavutil`, `libswscale`):
+  backgrounds and movies are MDEC video. On macOS: `brew install ffmpeg`.
+- **clang** or gcc for the two small C tools
+- **melonDS** to play (or a flashcart)
 
-`<disc>` ist das mit `../re2ds-notes/tools/extract_psx_iso.py` entpackte Disc-Dateisystem.
+`tools/build_assets.sh` and `start.command` assume macOS with Homebrew paths; on Linux adjust
+the include / library paths of the `bss2ppm` build line and the melonDS call.
 
-## DS-Engine
+### 1. Extract your disc
 
-`source/main.c` + `source/assets.c`, Makefile nach devkitPro-Vorlage (libnds, NitroFS):
-
-- **Bildschirm oben:** BG3 = 8-Bit-Hintergrund der aktuellen Kamera, doppelt gepuffert in VRAM A
-  (Bild entpacken, dann Puffer und Palette im VBlank umschalten). BG0 = 3D-Ebene mit
-  transparentem Hintergrund (Leon + Masken-Vierecke, Tiefentest durch die Hardware).
-- **VRAM:** A = Haupt-BG (2 × 64 KB), B + D = Texturen (Leon 96 KB, Masken ≤ 64 KB),
-  E = Textur-Paletten, C = Textkonsole unten. Texturbänke nur in ihren Standard-Slots
-  (B = 1, D = 3): libnds berechnet die Texturadresse aus der Bank-Nummer, andere Zuordnungen
-  ergeben schwarze bzw. unsichtbare Texturen.
-- Texturdaten vor `glTexImage2D`/`glColorTableEXT` mit `DC_FlushRange` aus dem Cache schreiben
-  (die Uploads laufen per DMA).
-- **Spieltakt 25 Hz** wie die PAL-Disc (`VSync(2)` bei 50 Hz, siehe `player-control.md`):
-  ein Keyframe und ein Root-Motion-Schritt pro Takt, Drehen pro DS-Bild hochgerechnet.
-- **Steuerung:** Steuerkreuz hoch/runter = gehen/rückwärts, links/rechts = drehen, B = rennen,
-  A = Tür, SELECT = Raum-Menü (in jeden Raum springen).
-- **Kollision:** Kreis (Radius 400) gegen die Boxen des aktuellen Stockwerks, getrennt nach
-  X und Z (Gleiten). Ein Schritt ist nur blockiert, wenn er tiefer ins Hindernis führt –
-  Tür-Ausgänge liegen oft knapp an Wänden. Rampen und Treppen sind begehbar und heben Leon an.
-- **Türen:** AOTs aus den Raumskripten; automatisch beim Hineinlaufen oder mit A
-  (`AOT_SAT_MANUAL`). Überblendung über Schwarz, Leon steht danach an der Zielposition.
-  Schlösser werden noch ignoriert (brauchen den Skript-Interpreter).
-- **Kamerawechsel:** Zonen der aktuellen Kamera ohne Sichtbereich-Flag; beim Wechsel werden
-  Hintergrund und Masken neu geladen.
+You need a raw `MODE2/2352` image of disc 1 (PAL, SLES-00972), e.g. `Track 1.bin` from a
+`.bin/.cue` dump of your own disc.
 
 ```bash
-tools/build_assets.sh <disc>   # alle Räume parallel nach nitrofiles/ (~80 s, ~71 MB)
-./start.command                # baut re2ds.nds bei Bedarf (devkitPro) und startet melonDS
+python3 -I tools/extract_psx_iso.py "Resident Evil 2 (Europe) (Disc 1) (Track 1).bin" build/disc1
 ```
 
-`start.command` lässt sich auch im Finder per Doppelklick starten.
+Files with Form 2 sectors (XA voices, the audio of the movies) are written as raw sectors with
+a `.raw2352` suffix; the converters need them like that.
+
+### 2. Convert the data
+
+```bash
+tools/build_assets.sh build/disc1
+```
+
+This converts every room in parallel and fills `nitrofiles/` (about 290 MB, a few minutes;
+the movies take the longest). Single rooms can be converted again with
+`tools/convert_room.sh build/disc1 ROOM1010`.
+
+### 3. Build and run
+
+```bash
+export DEVKITPRO=/opt/devkitpro DEVKITARM=/opt/devkitpro/devkitARM
+make                 # → re2ds.nds
+./start.command      # builds if needed and starts melonDS
+```
+
+## Controls
+
+| Button | Action |
+|--------|--------|
+| D-pad | walk / turn (up = forward, down = backward) |
+| B | run (hold with up) |
+| A | action: doors, items, examine; fire while aiming |
+| R | aim (hold); up / down aims high / low |
+| START | status screen (inventory); skips the opening movie |
+| touch | select on the status screen |
+
+Debug:
+
+| Button | Action |
+|--------|--------|
+| SELECT | room menu: warp to any room (L/R ±10, A warp) |
+| hold SELECT while the game boots | leaves out the opening movie |
+| L + A at a door | opens any lock |
+
+In melonDS's default keyboard mapping START is Enter and SELECT is Backspace (check
+*Config → Input and hotkeys*).
+
+## Tests
+
+The host tests compile the engine's platform-independent parts for the PC:
+
+```bash
+# every room's scripts with stubbed engine hooks; reports unknown opcodes
+cc -O1 -g -fsanitize=undefined -Isource tests/script_host.c -o build/script_host
+build/script_host nitrofiles/room/room[0-9][0-9a-f][0-9a-f]0.bin
+
+# zombies against a scripted player
+cc -Itests/stubs -Isource tests/enemy_host.c source/script.c source/enemy.c source/plc.c -o build/enemy_host -lm
+build/enemy_host
+
+# a room event with Leon and the enemies moved by the script (here: Kendo in room 101)
+cc -Itests/stubs -Isource tests/cutscene_host.c source/script.c source/enemy.c source/plc.c -o build/cutscene_host -lm
+build/cutscene_host nitro:/room/room1010.bin 0x16 1200
+```
+
+`tools/scd_disasm.py ROOM1010.RDT` disassembles a room's scripts; `--check` validates the jump
+targets of all block opcodes over all rooms.
+
+## How the original works
+
+The engine follows the PS1 code wherever it has been analysed; source comments name the
+PS1 functions and tables they reproduce (`FUN_8003ed74`, `0x8009f560`, …). The notes in
+[docs/](docs/) collect what is known:
+
+- [player-control.md](docs/player-control.md) – input, the player state machine, turning,
+  aiming, firing, reloading
+- [enemy-zombie.md](docs/enemy-zombie.md) – the zombie AI
+- [enemy-others.md](docs/enemy-others.md) – dog, crow, licker, the enemy load table
+- [damage.md](docs/damage.md) – hit checks, damage tables, hit reactions, head shots
+- [engine-notes.md](docs/engine-notes.md) – scripts, cutscenes, voices, room objects, effects,
+  item pictures, movies, the death sequence
+
+To look at the code yourself, wrap the executable as an ELF (optionally with an overlay such as
+the zombie code or `DIEDEMO.BIN`) and open it in Ghidra:
+
+```bash
+python3 -I tools/research/psxexe_to_elf.py build/disc1/SLES_009.72 sles.elf tools/research/re2_symbols.txt
+```
+
+### Conventions
+
+- World coordinates are RE2 game units, used directly as DS 20.12 fixed point
+  (4096 units = 1.0); −Y is up.
+- Angles: RE2 uses 4096 per turn, the DS engine 32768 (× 8).
+- Models face +X; the model matrix is `T(pos) · Ry(dir)`, bones `M_parent · T(pos) · Rx · Ry · Rz`.
+- The PAL game logic runs at 25 Hz (`VSync(2)` at 50 Hz); the DS engine steps the game logic
+  at that rate and turns per DS frame scaled to it.
+- Camera: `lookAt(from, to)` with up = −Y, projected onto 320 × 240 at distance
+  `RID.distance >> 7`, scaled by 0.8 for 256 × 192.
+
+## Contributing
+
+- Keep the engine faithful to the original: when something is ported, say in a comment which
+  PS1 function or table it comes from, and mark guesses as such.
+- Write code and comments in English and match the style of the surrounding code.
+- Run the host tests before sending changes; they need your own converted data.
+- Never commit anything generated from the disc (`build/`, `nitrofiles/`, `*.nds`).
+
+Built on the file format work of [OpenBiohazard2](https://github.com/OpenBiohazard2/OpenBiohazard2)
+(a Go reimplementation of the PC version), whose script opcode table and readers were the
+starting point for several converters.
