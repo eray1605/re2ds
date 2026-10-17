@@ -73,88 +73,115 @@ Main engine modules:
 
 ## Building
 
-### Requirements
+The game data is not in this repository: you convert it from **your own disc 1** (PAL,
+SLES-00972) and build the ROM on your computer. Never share the ROM – it contains Capcom's
+data.
 
-- **devkitPro** with devkitARM and libnds (calico) – <https://devkitpro.org/wiki/Getting_Started>
-- **Python 3**
-- **FFmpeg** (the `ffmpeg` command and its libraries `libavcodec`, `libavutil`, `libswscale`):
-  backgrounds and movies are MDEC video. On macOS: `brew install ffmpeg`.
-- **clang** or gcc for the two small C tools
-- **melonDS** to play (or a flashcart)
+The steps are always the same:
 
-`tools/build_assets.sh` finds FFmpeg's libraries through `pkg-config` (or Homebrew's default
-paths) and runs on macOS, Linux and Windows (WSL). `start.command` (build and start melonDS)
-is macOS only. On Windows follow [Building on Windows](#building-on-windows-wsl) first, then
-steps 1–3 below in the Ubuntu terminal.
+1. install the tools (once),
+2. extract your disc image,
+3. convert the game data (once, a few minutes),
+4. build the ROM with `make`,
+5. play it in melonDS.
 
-### Building on Windows (WSL)
+You need a `.bin/.cue` dump of disc 1; only the `.bin` of **Track 1** is used.
 
-The tools are shell scripts and Python, so on Windows they run in **WSL** (Windows Subsystem
-for Linux, Ubuntu); devkitPro supports Linux as well. melonDS itself runs as a normal Windows
+### Windows
+
+Everything runs in **Ubuntu inside Windows (WSL)**. Only melonDS runs as a normal Windows
 program.
 
-1. **Install WSL with Ubuntu.** In PowerShell as administrator run `wsl --install` and
-   restart Windows. Ubuntu is then an app of its own: press the Windows key and type
-   *Ubuntu*, or type `wsl` in PowerShell (in Windows Terminal it is also in the ▾ menu next
-   to the tabs). The first start asks for a new Linux user name and password (not your
-   Windows password). If Ubuntu does not show up, `wsl -l -v` lists what is installed and
-   `wsl --install -d Ubuntu` installs it.
-2. **Get the code and install everything** in the Ubuntu terminal (it asks for your Linux
-   password):
-   ```bash
-   cd ~
-   git clone https://github.com/eray1605/re2ds.git
-   cd re2ds
-   tools/setup_wsl.sh
-   ```
-   The script installs the Ubuntu packages (compiler, Python, FFmpeg) and devkitPro
-   (devkitARM + libnds). If devkitpro.org is blocked for your network (`403 Forbidden` – it
-   sits behind Cloudflare), it takes devkitPro's official Docker image from Docker Hub
-   instead, and `make` then builds inside it by itself. Keep the code in your Linux home
-   folder: under `/mnt/c` everything is much slower.
-3. Continue with steps 1–3 below. Windows drives are under `/mnt/c`, `/mnt/d`, …, e.g. a disc
-   image in your Windows *Downloads* folder is
-   `"/mnt/c/Users/<you>/Downloads/Resident Evil 2 (Europe) (Disc 1) (Track 1).bin"`.
-4. **Play:** install melonDS for Windows (<https://melonds.kuribo64.net/>) and open
-   `\\wsl$\Ubuntu\home\<your Linux user>\re2ds\re2ds.nds` (or copy it to a Windows folder:
-   `cp re2ds.nds /mnt/c/Users/<you>/Desktop/`). For saving set up DLDI as described under
-   [Controls](#controls) with a folder such as `C:\Users\<you>\Documents\re2ds-sd`, and after
-   every build copy the ROM there as well, since the game reads its data from it:
-   `cp re2ds.nds /mnt/c/Users/<you>/Documents/re2ds-sd/` (melonDS must be closed).
+**1. Install WSL and Ubuntu (once).** Open PowerShell as administrator (right-click the Start
+button → *Terminal (Admin)*), run `wsl --install` and restart Windows. Then press the Windows
+key and type *Ubuntu* to open it. The first start asks for a new Linux user name and password
+(they do not have to match your Windows ones). If Ubuntu does not show up, run
+`wsl --install -d Ubuntu` in PowerShell.
 
-### 1. Extract your disc
-
-You need a raw `MODE2/2352` image of disc 1 (PAL, SLES-00972), e.g. `Track 1.bin` from a
-`.bin/.cue` dump of your own disc.
+**2. Get re2ds and install the tools (once).** In the Ubuntu window:
 
 ```bash
-python3 -I tools/extract_psx_iso.py "Resident Evil 2 (Europe) (Disc 1) (Track 1).bin" build/disc1
+cd ~
+git clone https://github.com/eray1605/re2ds.git
+cd re2ds
+tools/setup_wsl.sh
 ```
 
-Files with Form 2 sectors (XA voices, the audio of the movies) are written as raw sectors with
-a `.raw2352` suffix; the converters need them like that.
+The script asks for your Linux password and installs everything (compiler, Python, FFmpeg,
+devkitPro). If devkitpro.org is blocked for your network (`403 Forbidden`), it uses
+devkitPro's Docker image instead – nothing to do for you.
 
-### 2. Convert the data
+> **All following commands are typed in the Ubuntu window, in the `re2ds` folder.** In a new
+> Ubuntu window go there first with `cd ~/re2ds`.
+
+**3. Extract your disc.** You do **not** change into the folder of your `.bin` – stay in
+`re2ds` and type the full path of the file. In Ubuntu, `C:\` is `/mnt/c/` and `\` becomes
+`/`. Example for a file in your *Downloads* folder (put your Windows user name instead of
+`YourName`; keep the quotes, the name has spaces):
+
+```bash
+python3 -I tools/extract_psx_iso.py "/mnt/c/Users/YourName/Downloads/Resident Evil 2 (Europe) (Disc 1) (Track 1).bin" build/disc1
+```
+
+Tips: `ls /mnt/c/Users/` shows the Windows user names, and the **Tab** key completes a path
+while you type it.
+
+**4. Convert the game data** (a few minutes; fills `nitrofiles/`, about 290 MB):
 
 ```bash
 tools/build_assets.sh build/disc1
 ```
 
-This converts every room in parallel and fills `nitrofiles/` (about 290 MB, a few minutes;
-the movies take the longest). Single rooms can be converted again with
-`tools/convert_room.sh build/disc1 ROOM1010`.
-
-### 3. Build and run
+**5. Build the ROM:**
 
 ```bash
-make                 # → re2ds.nds
+make
+```
+
+This makes `re2ds.nds`. If the script set up Docker: after restarting Windows run
+`sudo service docker start` once before `make`.
+
+**6. Play.** Copy the ROM to your Windows desktop and open it in melonDS for Windows
+(<https://melonds.kuribo64.net/>):
+
+```bash
+cp re2ds.nds /mnt/c/Users/YourName/Desktop/
+```
+
+For saving see [Saving](#saving).
+
+### macOS and Linux
+
+Install the tools once:
+
+- **macOS:** devkitPro's installer (<https://devkitpro.org/wiki/Getting_Started>, then
+  `sudo dkp-pacman -S nds-dev`), and `brew install python ffmpeg`.
+- **Ubuntu / Debian:** `tools/setup_wsl.sh` works there as well.
+- Elsewhere: devkitPro with `nds-dev`, Python 3, FFmpeg with its libraries (`libavcodec`,
+  `libavutil`, `libswscale`), a C compiler and `pkg-config`.
+
+Then, in the `re2ds` folder:
+
+```bash
+python3 -I tools/extract_psx_iso.py "path/to/Resident Evil 2 (Europe) (Disc 1) (Track 1).bin" build/disc1
+tools/build_assets.sh build/disc1
+make
 ./start.command      # macOS: builds if needed and starts melonDS
 ```
 
-`make` finds devkitPro in `/opt/devkitpro` (or where `DEVKITARM` points). Without a local
-devkitPro it builds in devkitPro's Docker image (`devkitpro/devkitarm`, set up by
-`tools/setup_wsl.sh`); after a restart of Windows or WSL start Docker first with
-`sudo service docker start`.
+### After updating the code
+
+```bash
+git pull
+tools/build_assets.sh build/disc1   # only when the release notes say the data changed
+make
+```
+
+`make` finds devkitPro in `/opt/devkitpro` (or where `DEVKITARM` points) and otherwise builds
+in devkitPro's Docker image `devkitpro/devkitarm`. Single rooms can be converted again with
+`tools/convert_room.sh build/disc1 ROOM1010`. Files with Form 2 sectors (XA voices, the
+audio of the movies) are extracted as raw sectors with a `.raw2352` suffix; the converters
+need them like that.
 
 ## Controls
 
@@ -179,14 +206,21 @@ Debug:
 In melonDS's default keyboard mapping START is Enter and SELECT is Backspace (check
 *Config → Input and hotkeys*).
 
+## Saving
+
 Saving needs an SD card: on a flashcart or a DSi it is the card the ROM runs from
-(`fat:/re2ds.sav` or `sd:/re2ds.sav`). In melonDS enable *Config → Emu settings → DLDI →
-Enable DLDI (for homebrew)* with an SD card image of **1 GB** and *Sync SD to folder* with the
-folder `~/Documents/re2ds-sd`
-(or set `RE2DS_SD` to another one). With DLDI on, the DS cannot read the game data from the
-cartridge any more and melonDS passes no ROM path, so the game reads `re2ds.nds` from the SD
-card root: `start.command` copies it into that folder whenever the ROM changed. melonDS keeps
-the ROM there padded to 512 MB, so a 512 MB image leaves no room for `re2ds.sav`.
+(`re2ds.sav` next to it). In melonDS it is a virtual card:
+
+1. *Config → Emu settings → DLDI*: tick **Enable DLDI (for homebrew)**, set the SD card
+   image size to **1 GB** and tick **Sync SD to folder** with an empty folder, e.g.
+   `Documents/re2ds-sd`.
+2. Copy `re2ds.nds` into that folder after every build (melonDS closed). With DLDI on, the
+   game reads its data from that copy. On macOS `start.command` does this by itself
+   (folder `~/Documents/re2ds-sd`, or set `RE2DS_SD`); on Windows:
+   `cp re2ds.nds /mnt/c/Users/YourName/Documents/re2ds-sd/`.
+
+The save file `re2ds.sav` then appears in that folder. (A 512 MB image is too small: melonDS
+keeps the ROM there padded to 512 MB.)
 
 ## Tests
 
