@@ -21,6 +21,7 @@
 #include "enemy.h"
 #include "movie.h"
 #include "roomfx.h"
+#include "save.h"
 #include "plc.h"
 #include "effect.h"
 #include "music.h"
@@ -136,6 +137,9 @@ static uint32_t pending_keys;       // keys pressed since the last game tick
 static int game_tick_acc;           // accumulates GAME_HZ per DS frame
 static const char *message_text;    // open message, NULL = none
 static uint8_t lock_open[128];      // door locks opened (key id & 0x7F)
+static SaveSlot saves[SAVE_SLOTS];  // re2ds.sav as last read
+static uint16_t save_count;         // saves of this game so far
+static int last_slot;               // the slot saved to or loaded from
 
 static struct {
     int32_t x, y, z;
@@ -874,7 +878,7 @@ static void die_picture_level(int level)
     }
 }
 
-static void new_game(void);
+static void start_game(void);
 
 // one game tick of the death sequence
 static void die_tick(void)
@@ -957,7 +961,7 @@ static void die_tick(void)
             setBrightness(1, -16);
             die.step = DIE_OFF;
             bgShow(bg_id);
-            new_game();
+            start_game();
         }
         break;
     }
@@ -1553,6 +1557,9 @@ static void enter_room(int stage, int id, int arrival_cam)
 static void new_game(void)
 {
     memset(&die, 0, sizeof(die));
+    script_state_reset();
+    memset(lock_open, 0, sizeof(lock_open));
+    save_count = 0;
     player.state = ST_IDLE;
     player.hp = PLAYER_HP;
     player.saved_once = 0;
@@ -1569,6 +1576,144 @@ static void new_game(void)
     objects_ready = 1;
     upload_objects();
     fade(-1);
+}
+
+// ---------------------------------------------------------------- saving
+// A frame while a choice is open on the lower screen
+static void choice_frame(void)
+{
+    if (room.data)
+        render_frame();
+    swiWaitForVBlank();
+    music_frame();
+    voice_frame();
+}
+
+static int any_save(void)
+{
+    if (!save_read(saves))
+        return 0;
+    for (int i = 0; i < SAVE_SLOTS; i++)
+        if (saves[i].used)
+            return 1;
+    return 0;
+}
+
+// the lines of the slot list; empty slots only when saving
+static int pick_slot(const char *title, int saving)
+{
+    static char text[SAVE_SLOTS][40];
+    const char *lines[SAVE_SLOTS];
+    for (int i = 0; i < SAVE_SLOTS; i++) {
+        const SaveSlot *s = &saves[i];
+        if (s->used)
+            snprintf(text[i], sizeof(text[i]), "%2d LEON  ROOM %d%02X  SAVE %u", i + 1, s->stage, s->room,
+                     (unsigned)s->saves); // at most 28 characters
+        else
+            snprintf(text[i], sizeof(text[i]), "%2d --- NO DATA ---", i + 1);
+        lines[i] = text[i];
+    }
+    for (;;) {
+        int n = menu_choose(title, lines, SAVE_SLOTS, last_slot, 1, choice_frame);
+        if (n < 0 || saving || saves[n].used)
+            return n;
+    }
+}
+
+// a typewriter (AOT type 9): uses up an ink ribbon to save
+#define ITEM_INK_RIBBON 0x1E
+static void use_typewriter(void)
+{
+    int ribbon = -1;
+    for (int i = 0; i < INV_SLOTS; i++)
+        if (inventory[i].item == ITEM_INK_RIBBON && inventory[i].count)
+            ribbon = i;
+    int debug = ribbon < 0 && (keysHeld() & KEY_L); // debug: L + A saves without a ribbon
+    if (ribbon < 0 && !debug) {
+        game_show_message("It's an old typewriter. If I had an Ink Ribbon, I could save my progress...");
+        return;
+    }
+    static const char *const yes_no[] = { "YES", "NO" };
+    if (menu_choose("It's an old typewriter. You can save your progress with this. Will you use the "
+                    "Ink Ribbon?", yes_no, 2, 0, 1, choice_frame) != 0)
+        return;
+    if (!save_available()) {
+        game_show_message("There is no SD card: the game cannot be saved.");
+        return;
+    }
+    save_read(saves);
+    int n = pick_slot("Save to which file?", 1);
+    if (n < 0)
+        return;
+    SaveSlot *s = &saves[n];
+    memset(s, 0, sizeof(*s));
+    s->used = 1;
+    s->stage = cur_stage;
+    s->room = cur_room;
+    s->cam = cur_cam;
+    s->saves = ++save_count;
+    s->hp = player.hp;
+    s->x = player.x;
+    s->y = player.y;
+    s->z = player.z;
+    s->dir = player.dir;
+    s->equipped = inventory_equipped;
+    s->saved_once = player.saved_once;
+    if (ribbon >= 0 && --inventory[ribbon].count == 0) // the ribbon used is gone before the state is kept
+        inventory[ribbon].item = 0;
+    memcpy(s->inventory, inventory, sizeof(s->inventory));
+    memcpy(s->locks, lock_open, sizeof(s->locks));
+    script_state_get(s->script);
+    last_slot = n;
+    if (!save_write(saves)) {
+        if (ribbon >= 0) { // nothing saved: the ribbon is kept
+            inventory[ribbon].item = ITEM_INK_RIBBON;
+            inventory[ribbon].count++;
+        }
+        save_count--;
+        game_show_message("The game could not be saved.");
+        return;
+    }
+    game_show_message("Your progress was saved.");
+}
+
+static void load_game(int n)
+{
+    const SaveSlot *s = &saves[n];
+    memset(&die, 0, sizeof(die));
+    script_state_set(s->script);
+    memcpy(lock_open, s->locks, sizeof(lock_open));
+    memcpy(inventory, s->inventory, sizeof(inventory));
+    inventory_equipped = s->equipped;
+    save_count = s->saves;
+    last_slot = n;
+    player.state = ST_IDLE;
+    player.hp = s->hp;
+    player.saved_once = s->saved_once;
+    player.aim_target = -1;
+    enter_room(s->stage, s->room, -1);
+    if (!room.data)
+        fatal("the saved room is missing");
+    place_player(s->x, s->y, s->z, s->dir, s->cam);
+    objects_ready = 1;
+    upload_objects();
+    fade(-1);
+}
+
+// At the start and after Leon died: a new game, or one from re2ds.sav
+static void start_game(void)
+{
+    static const char *const choices[] = { "NEW GAME", "LOAD GAME" };
+    while (any_save()) {
+        if (menu_choose("RESIDENT EVIL 2", choices, 2, 1, 0, choice_frame) == 0)
+            break;
+        int n = pick_slot("Load which file?", 0);
+        if (n >= 0) {
+            load_game(n);
+            return;
+        }
+    }
+    new_game();
 }
 
 static void warp_to(int index)
@@ -1673,6 +1818,9 @@ static void trigger(Aot *a)
     case SCE_EVENT:
         if (a->data[2] == 0x18) // gosub
             script_start_event(a->data[3]);
+        break;
+    case SCE_SAVE:
+        use_typewriter();
         break;
     default:
         break;
@@ -1854,20 +2002,26 @@ static void leon_point(int bone, const int32_t local[3], int32_t out[3])
 // flash (CORE00 effect 1, 0x01000e00) and fire (effect 3 sub 2 with the next
 // palette, 0x030a0e00) at the muzzle, on key 3 smoke (0x03080900) and the
 // casing (0x02000700) at the ejection port
+// The gun effects at a quarter of the room effects' size (size 16 = 1024/4096):
+// the flash about 12 cm, the smoke a small puff instead of a cloud
+#define GUN_FX_SIZE 16
 static void shot_effects(void)
 {
     static const int32_t muzzle[3] = { 138, 615, 8 }, port[3] = { 350, 40, -15 };
     int32_t p[3];
     if (player.key == 1) {
         leon_point(HAND_BONE, muzzle, p);
-        roomfx_spawn(1, 0x00, p[0], p[1], p[2], 0, 0);
-        roomfx_spawn(3, 0x0A, p[0], p[1], p[2], 0, 0);
+        roomfx_spawn(1, 0x00, p[0], p[1], p[2], GUN_FX_SIZE, 0);
+        roomfx_spawn(3, 0x0A, p[0], p[1], p[2], GUN_FX_SIZE, 0);
     } else if (player.key == 3) {
         leon_point(HAND_BONE, port, p);
-        roomfx_spawn(3, 0x08, p[0], p[1], p[2], 0, 0);
+        roomfx_spawn(3, 0x08, p[0], p[1], p[2], GUN_FX_SIZE, 0);
+        // the handgun casing: CORE00 effect 2, frames 0-7 (it tumbles; frame 8
+        // goes back to 0), palette row 0 (brass). Its body is 4 x 10 of the
+        // 16-texel frame; drawn at a third of the other effects' size.
         int16_t dir = player.dir + 1300 * 8;
-        effect_spawn(2, 0, p[0], p[1], p[2], (40 * cosLerp(dir)) >> 12, -40, -((40 * sinLerp(dir)) >> 12), 1,
-                     player.y, 230, 180, 80);
+        roomfx_throw(2, 0, 0, p[0], p[1], p[2], (30 * cosLerp(dir)) >> 12, -45, -((30 * sinLerp(dir)) >> 12),
+                     player.y, 4096 * 3 / 10);
     }
 }
 
@@ -2204,7 +2358,7 @@ static void update_player_tick(void)
 static const char *aot_name(int type)
 {
     switch (type) {
-    case SCE_DOOR: return "Tuer";
+    case SCE_DOOR: return "Door";
     case SCE_ITEM: return "Item";
     case SCE_MESSAGE: return "Text";
     case SCE_EVENT: return "Event";
@@ -2236,7 +2390,7 @@ static void print_status(void)
         printf("A: runterspringen          \n");
     else
         printf("                          \n");
-    printf("\nD-pad walk/turn, B run\nA use, L+A open any lock\nSELECT room menu\n");
+    printf("\nD-pad walk/turn, B run\nA use, L+A open any lock\nL+A at a typewriter: save\nSELECT room menu\n");
 }
 
 static void update_menu(uint32_t down)
@@ -2300,6 +2454,7 @@ int main(void)
 
     if (!nitroFSInit(NULL))
         fatal("NitroFS init failed");
+    save_init(); // re2ds.sav on the SD card; without one the game just cannot save
     sound_init();
 
     bg_id = bgInit(3, BgType_Bmp8, BgSize_B8_256x256, 0, 0);
@@ -2334,7 +2489,7 @@ int main(void)
         movie_play("opn2");
     movie_end();
     setBrightness(1, -16);
-    new_game();
+    start_game();
 
     // pmMainLoop() services calico's power management (lid, reset, ARM7 messages);
     // the devkitPro examples call it every frame before reading input.

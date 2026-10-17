@@ -16,6 +16,11 @@ int menu_has_focus(void);
 // messages (room texts, items) in the text box; A / B / touch closes them
 void menu_message(const char *text);
 int menu_message_open(void);
+// A choice over the whole lower screen (yes / no, save slots): up / down and
+// A or touch pick a line, B cancels if allowed (-1). Runs until answered,
+// calling frame_fn once per DS frame so the upper screen keeps going.
+int menu_choose(const char *title, const char *const *lines, int count, int start, int can_cancel,
+                void (*frame_fn)(void));
 // show the item's picture (as on the PS1 when picking it up) until the
 // message closes or, without a message, until the next input
 void menu_picture(int item);
