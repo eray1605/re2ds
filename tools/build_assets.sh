@@ -35,9 +35,9 @@ echo $ROOMS | tr ' ' '\n' | xargs -P "$JOBS" -I{} tools/convert_room.sh "$DISC" 
 
 # room/index.bin: u16 count, then (u8 stage, u8 room) per converted room
 python3 -I - build/ds/room <<'PY'
-import os, struct, sys
+import os, re, struct, sys
 d = sys.argv[1]
-rooms = sorted((int(n[4]), int(n[5:7], 16)) for n in os.listdir(d) if n.startswith("room") and n.endswith("0.bin"))
+rooms = sorted((int(n[4]), int(n[5:7], 16)) for n in os.listdir(d) if re.fullmatch(r"room\d[0-9a-f]{2}0\.bin", n))
 with open(os.path.join(d, "index.bin"), "wb") as f:
     f.write(struct.pack("<H", len(rooms)) + b"".join(struct.pack("BB", s, r) for s, r in rooms))
 print(f"{len(rooms)} rooms in room/index.bin")
@@ -82,13 +82,22 @@ python3 -I tools/itps2ds.py "$DISC/COMMON/DATA/ITPS.ITP" build/ds/menu/items.bin
 mkdir -p build/ds/effect
 python3 -I tools/esp2ds.py "$DISC/COMMON/DATA/CORE00.ESP" "$DISC/COMMON/DATA/CORE01.TIM" \
     build/ds/effect/core.bin > /dev/null
+python3 -I tools/resp2ds.py --core "$DISC/COMMON/DATA/CORE00.ESP" "$DISC/COMMON/DATA/CORE01.TIM" \
+    "$DISC/COMMON/DATA/TEX_PAL.TIM" build/ds/effect/core_fx.bin > /dev/null
 
 # "YOU DIED" (Leon)
 mkdir -p build/ds/die
 python3 -I tools/die2ds.py "$DISC/COMMON/DATA/DIED00.DIE" build/ds/die/died00.bin
 
-# the opening movies (Leon meets Claire): need the STRs as raw sectors,
-# see tools/extract_str.py; skipped without them
+# voice clips (xa_on): per stage and the common ones
+mkdir -p build/ds/voice
+for s in 1 2 3 4 5 6 7; do
+    python3 -I tools/xa2ds.py "$DISC/COMMON/BIN/STAGE$s.BIN" "$DISC/PL0/VOICE/VOICE0$s.XAS.raw2352" $s build/ds/voice > /dev/null
+done
+python3 -I tools/xa2ds.py --common "$DISC/SLES_009.72" "$DISC/PL0/VOICE/VOICE00.XAS.raw2352" build/ds/voice > /dev/null
+
+# the opening movies (Leon meets Claire): need the STRs as raw sectors
+# (tools/extract_psx_iso.py writes them so); skipped without them
 mkdir -p build/ds/movie
 for m in OPN1STL:opn1 OPN2NDL:opn2; do
     if [ -f "$DISC/PL0/ZMOVIE/${m%%:*}.STR.raw2352" ]; then
@@ -96,5 +105,5 @@ for m in OPN1STL:opn1 OPN2NDL:opn2; do
     fi
 done
 
-cp -R build/ds/bg build/ds/room build/ds/model build/ds/mask build/ds/sound build/ds/door build/ds/effect build/ds/music build/ds/menu build/ds/movie build/ds/die nitrofiles/
+cp -R build/ds/bg build/ds/room build/ds/model build/ds/mask build/ds/sound build/ds/door build/ds/effect build/ds/music build/ds/menu build/ds/movie build/ds/die build/ds/voice nitrofiles/
 du -sh nitrofiles nitrofiles/*

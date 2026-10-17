@@ -78,6 +78,9 @@ void game_voice(int k, int n) { (void)k; (void)n; }
 int game_voice_playing(void) { return 0; }
 void game_object_set(const uint8_t *ins) { (void)ins; }
 void game_object_hide(int model) { (void)model; }
+void game_espr_on(const uint8_t *ins) { (void)ins; }
+void game_espr_kill(int id, int type) { (void)id; (void)type; }
+void game_floor_sound_set(int n, int on) { (void)n; (void)on; }
 int game_object_member(int n, int m, int *v) { (void)n; (void)m; (void)v; return 0; }
 void game_object_member_set(int n, int m, int v) { (void)n; (void)m; (void)v; }
 void game_plc(int w, int i, const uint8_t *ins) { if (w == 3) enemy_plc(i, ins); }

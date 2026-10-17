@@ -85,6 +85,9 @@ void game_voice(int k, int n) { printf("t%d  VOICE %d.%d\n", tick, k, n); voice_
 int game_voice_playing(void) { return voice_left > 0; }
 void game_object_set(const uint8_t *ins) { (void)ins; }
 void game_object_hide(int model) { (void)model; }
+void game_espr_on(const uint8_t *ins) { (void)ins; }
+void game_espr_kill(int id, int type) { (void)id; (void)type; }
+void game_floor_sound_set(int n, int on) { (void)n; (void)on; }
 static int16_t obj_pos[32][3], obj_dir[32];
 int game_object_member(int n, int m, int *v)
 {

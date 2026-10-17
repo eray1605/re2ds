@@ -24,11 +24,13 @@ const uint8_t scd_op_size[256] = {
     [92] = 3, [93] = 2, [94] = 2, [95] = 2, [96] = 14, [97] = 4, [98] = 2, [99] = 1,
     [100] = 16, [101] = 2, [102] = 1, [103] = 28, [104] = 40, [105] = 30, [106] = 6,
     [107] = 4, [108] = 1, [109] = 4, [110] = 6, [111] = 2, [122] = 16, [123] = 16,
-    // missing in OpenBiohazard2; inferred from the scripts of disc 1 (every
-    // occurrence then decodes to evt_end with all jump targets on instruction
-    // starts). Only sizes with clear evidence; others still stop the thread.
-    [73] = 8, [114] = 7, [115] = 4, [116] = 4, [117] = 18, [128] = 2, [132] = 2,
-    [134] = 10, [136] = 2,
+    // missing in OpenBiohazard2: read from the PS1 handlers (jump table
+    // 0x8009f560, 138 entries; each advances thread+0x1c by its size).
+    // 0x1b (a loop block) is still left out.
+    [28] = 1, [56] = 3, [69] = 5, [73] = 8, [74] = 2, [79] = 4, [85] = 6, [86] = 4,
+    [112] = 1, [113] = 1, [114] = 16, [115] = 8, [116] = 4, [117] = 22, [118] = 3, [119] = 4,
+    [120] = 6, [121] = 1, [124] = 6, [125] = 6, [126] = 6, [127] = 6, [128] = 2, [129] = 3,
+    [130] = 3, [131] = 1, [132] = 2, [133] = 6, [134] = 1, [135] = 1, [136] = 3, [137] = 1,
 };
 
 enum {
@@ -38,7 +40,7 @@ enum {
     OP_SWITCH = 19, OP_CASE = 20, OP_DEFAULT = 21, OP_ESWITCH = 22, OP_GOTO = 23, OP_GOSUB = 24,
     OP_RETURN = 25, OP_BREAK = 26, OP_CK = 33, OP_SET = 34, OP_CMP = 35, OP_SAVE = 36,
     OP_COPY = 37, OP_CALC = 38, OP_CALC2 = 39, OP_CUT_CHG = 41, OP_CUT_OLD = 42,
-    OP_MESSAGE_ON = 43, OP_AOT_SET = 44, OP_OBJ_MODEL_SET = 45, OP_WORK_SET = 46, OP_SPEED_SET = 47, OP_ADD_SPEED = 48, OP_ADD_ASPEED = 49, OP_POS_SET = 50, OP_DIR_SET = 51,
+    OP_MESSAGE_ON = 43, OP_AOT_SET = 44, OP_OBJ_MODEL_SET = 45, OP_FLR_SET = 56, OP_SCE_ESPR_ON = 58, OP_SCE_ESPR_KILL = 76, OP_WORK_SET = 46, OP_SPEED_SET = 47, OP_ADD_SPEED = 48, OP_ADD_ASPEED = 49, OP_POS_SET = 50, OP_DIR_SET = 51,
     OP_MEMBER_SET = 52, OP_MEMBER_SET2 = 53, OP_SE_ON = 54, OP_SCA_ID_SET = 55, OP_DIR_CK = 57, OP_SCE_EM_SET = 68, OP_DOOR_AOT_SET = 59, OP_CUT_AUTO = 60, OP_MEMBER_COPY = 61, OP_MEMBER_CMP = 62,
     OP_AOT_RESET = 70, OP_AOT_ON = 71, OP_CUT_REPLACE = 75, OP_ITEM_AOT_SET = 78,
     OP_SCE_TRG_CK = 80, OP_SCE_BGM_CONTROL = 81, OP_KEEP_ITEM_CK = 94, OP_AOT_SET_4P = 103, OP_DOOR_AOT_SET_4P = 104,
@@ -58,6 +60,7 @@ typedef struct {
 typedef struct {
     uint8_t active;
     const uint8_t *code;       // SCD block (function table + bytecode)
+    uint16_t code_size;        // its bytes: a jump to the end ends the thread
     uint16_t pc;
     uint16_t sleep;
     uint8_t wait_message;
@@ -76,6 +79,7 @@ typedef struct {
 Aot aots[NUM_AOTS];
 int script_threads_running;
 int script_unknown_ops;
+int script_unknown_at = -1;   // diagnostics: op << 16 | pc of the last one
 
 static Thread threads[NUM_THREADS];
 static const Room *cur_room;
@@ -258,7 +262,7 @@ static void work_member_set(const Thread *t, int member, int value)
 }
 
 // ------------------------------------------------------------ threads
-static Thread *start_thread(int slot, const uint8_t *code, int function)
+static Thread *start_thread(int slot, const uint8_t *code, uint16_t code_size, int function)
 {
     uint16_t pc = function_start(code, function);
     if (pc == 0xFFFF)
@@ -273,6 +277,7 @@ static Thread *start_thread(int slot, const uint8_t *code, int function)
     memset(t, 0, sizeof(*t));
     t->active = 1;
     t->code = code;
+    t->code_size = code_size;
     t->pc = pc;
     return t;
 }
@@ -280,7 +285,7 @@ static Thread *start_thread(int slot, const uint8_t *code, int function)
 void script_start_event(int function)
 {
     if (cur_room && cur_room->exec_script)
-        start_thread(-1, cur_room->exec_script, function);
+        start_thread(-1, cur_room->exec_script, cur_room->header->size_exec, function);
 }
 
 static int call_base(const Thread *t)
@@ -392,11 +397,16 @@ static void run_thread(Thread *t)
     for (int budget = BUDGET; budget > 0 && t->active; budget--) {
         if (unwind(t))
             return; // do loop iteration done
+        if (t->code_size && t->pc >= t->code_size) { // ran off the block (room 10F's init
+            t->active = 0;                          // jumps to its end): as evt_end
+            return;
+        }
         const uint8_t *ins = t->code + t->pc;
         int op = ins[0];
         int size = scd_op_size[op];
         if (size == 0) {
             script_unknown_ops++;
+            script_unknown_at = op << 16 | t->pc;
             t->active = 0;
             return;
         }
@@ -429,7 +439,7 @@ static void run_thread(Thread *t)
             break;
         }
         case OP_EVT_EXEC:
-            start_thread(ins[1] == 0xFF ? -1 : ins[1], t->code, ins[3]);
+            start_thread(ins[1] == 0xFF ? -1 : ins[1], t->code, t->code_size, ins[3]);
             break;
         case OP_EVT_KILL:
             if (ins[1] < NUM_THREADS && &threads[ins[1]] != t)
@@ -615,6 +625,15 @@ static void run_thread(Thread *t)
         case OP_OBJ_MODEL_SET:
             game_object_set(ins);
             break;
+        case OP_FLR_SET: // scd_op_38: floor sound area on (1) / off (else)
+            game_floor_sound_set(ins[1], ins[2] == 1);
+            break;
+        case OP_SCE_ESPR_ON: // scd_op_3a: an effect of the room's ESP
+            game_espr_on(ins);
+            break;
+        case OP_SCE_ESPR_KILL: // scd_op_4c: id, type, object
+            game_espr_kill(ins[1], ins[2]);
+            break;
         case OP_WORK_SET:
             t->work_type = ins[1];
             t->work_index = ins[2];
@@ -724,7 +743,7 @@ void script_room_enter(const Room *room)
 
     // init script: run function 0 to completion
     if (room->init_script) {
-        Thread *t = start_thread(0, room->init_script, 0);
+        Thread *t = start_thread(0, room->init_script, room->header->size_init, 0);
         for (int guard = 0; t && t->active && guard < 64; guard++) {
             t->sleep = 0;
             run_thread(t);
@@ -733,7 +752,7 @@ void script_room_enter(const Room *room)
             t->active = 0;
     }
     if (room->exec_script)
-        start_thread(0, room->exec_script, 0);
+        start_thread(0, room->exec_script, room->header->size_exec, 0);
 
     // Doors the converter found in the scripts but that were not set (the init
     // script stopped early at an unsupported opcode): add them so every room

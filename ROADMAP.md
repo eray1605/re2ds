@@ -1,123 +1,95 @@
-# re2ds – Roadmap zum kompletten Spiel
+# re2ds – roadmap to the complete game
 
-Ziel: Resident Evil 2 (PS1, PAL; Disc 1 = SLES-00972) komplett als native DS-ROM – beide
-Charaktere, beide Szenarien, mit Menüs, Ton und Videos. Die ROM wird immer lokal aus den
-eigenen Discs gebaut und **nie weitergegeben** (sie enthält Capcom-Daten).
+Goal: Resident Evil 2 (PS1, PAL; disc 1 = SLES-00972) complete as a native DS ROM – both
+characters, both scenarios, with menus, sound and movies. The ROM is always built locally from
+your own discs and is **never shared** (it contains Capcom's data).
 
-Aufwand pro Phase: S (Tage), M (1–3 Wochen), L (1–2 Monate), XL (mehrere Monate).
+Effort per phase: S (days), M (1–3 weeks), L (1–2 months), XL (several months).
 
-## Stand heute (Phase 0 – erledigt)
+## What is on the disc (disc 1, Leon)
 
-- Analyse mit REA/Ghidra: Spielersteuerung, Zombie-KI, Treffer/Schaden, Tod/Kopfschüsse,
-  Hund/Krähe/Licker (`../re2ds-notes/`).
-- Konverter: BSS-Hintergründe (MDEC), Masken (LZ + TIM), RDT-Raumdaten, Leon (PLD/PLW).
-- DS-Engine: Raum 100 mit Hintergrund, Masken-Verdeckung über den Tiefenpuffer, Leon mit
-  Texturen und Animation, Gehen/Rennen/Drehen, Kollision, Kamerawechsel.
-
-## Was auf der Disc steckt (Disc 1, Leon)
-
-| Inhalt | Dateien | Größe PS1 | Bemerkung |
+| Contents | Files | Size on PS1 | Notes |
 |---|---|---|---|
-| Räume (RDT) | 125 in 7 Stages | 20 MB | Kameras, Kollision, Skripte, Texte, Masken-Infos |
-| Hintergründe (BSS) | 128 Dateien, 1285 Kamera-Slots | 80 MB | je 320×240 MDEC |
-| Videos (STR) | 15 | 380 MB | ca. 10 min Laufzeit |
-| Sprachausgabe (XA) | 8 | 41 MB | |
-| Musik (BGM) | 108 | 13 MB | Sequenzen + Samples |
-| Soundeffekte (EDH/VB) | 28 Paare | 1,6 MB | VAB-ähnlich |
-| Gegner (EMS) | 2 Pakete | 13 MB | Modelle, Animationen, KI-Overlays |
-| Türanimationen (DO2) | 55 | 3,4 MB | |
-| Menügrafiken (TIM/PIX) | ~50 | 11 MB | Inventar, Items, Karten, Files |
+| rooms (RDT) | 125 in 7 stages | 20 MB | cameras, collision, scripts, texts, masks, effects, objects |
+| backgrounds (BSS) | 128 files, 1285 camera slots | 80 MB | 320×240 MDEC each |
+| movies (STR) | 15 | 380 MB | about 10 minutes |
+| voices (XA) | 8 | 41 MB | |
+| music (BGM) | 108 | 13 MB | sequences + samples |
+| sound effects (EDH/VB) | 28 pairs | 1.6 MB | VAB-like |
+| enemies (EMS) | 2 packs | 13 MB | models, animations, AI overlays |
+| door animations (DO2) | 55 | 3.4 MB | |
+| menu graphics (TIM/PIX) | ~50 | 11 MB | inventory, items, maps, files |
 
-Disc 2 (Claire) hat denselben Aufbau.
+Disc 2 (Claire) has the same structure.
 
-## Grenzen des DS und was daraus folgt
+## DS limits and what follows from them
 
-- **ROM max. 512 MB.** Grobe Schätzung pro Charakter: Hintergründe ~40 MB (8 Bit mit
-  Palette + LZ statt heute 96 KB roh pro Kamera), Räume/Modelle ~35 MB, Ton ~30 MB,
-  Videos ~80 MB → zusammen ~380 MB. Das passt, aber **die Videos sind der Hebel**: sie
-  müssen auf ~128 KB/s.
-- **4 MB Hauptspeicher.** Immer nur einen Raum, die Modelle darin und die aktuelle Kamera
-  laden; Hintergründe pro Kamerawechsel aus NitroFS streamen.
-- **3D: max. 2048 Polygone pro Bild.** Leon allein hat 454 (187 Dreiecke + 267 Vierecke;
-  der DS zählt ein Viereck als ein Polygon), Masken kommen dazu. Bei 4–5 Zombies im Bild
-  wird es eng → Gegner-Modelle vereinfachen (LOD) und die Polygonzahl messen.
-- **Textur-Speicher heute 256 KB** (Bänke B + D; A hält den Hintergrund, C die Textkonsole).
-  Leon belegt 96 KB →
-  Texturen pro Raum budgetieren, evtl. auf 4 Bit reduzieren.
-- **Ton: 16 Kanäle** (PS1: 24) → Sequenzer auf dem ARM7 mit Kanal-Priorität.
-- **Zweiter Bildschirm** als Vorteil: Inventar, Karte und Status unten mit Touch.
+- **ROM at most 512 MB.** Today about 290 MB for disc 1 with two movies; the remaining movies
+  must stay small (≈ 128 KB/s or less).
+- **4 MB of main memory.** Only one room, its models and the current camera are loaded;
+  backgrounds and movies are streamed from NitroFS.
+- **3D: at most 2048 polygons per frame.** Leon alone has 454; enemies are drawn nearest first
+  within the budget left after masks and effects.
+- **Texture memory 512 KB** (banks A–D): Leon 96 KB, masks 64 KB, effects, room objects and
+  room effects within budgets (96 KB each), the rest for enemies.
+- **Sound: 16 channels** (PS1: 24) → a sequencer with channel priorities.
+- **The second screen** as an advantage: inventory, map and status on the lower screen with
+  touch.
 
-## Phasen
+## Phases
 
-### Phase 1 – Alle Räume begehbar (L) – erledigt bis auf Türanimation und genaue Kollisionsformen
-- Batch-Konverter für alle 125 Räume; Hintergründe 8 Bit + LZ, beim Kamerawechsel laden.
-- Räume wechseln über Türen inkl. Türanimation (DO2) und Ladezeit dahinter verstecken.
-- Bodenhöhen, Treppen und Rampen (RDT-Höhendaten), Speicherverwaltung für Raumwechsel.
-- Debug-Menü: in jeden Raum springen.
-- **Fertig, wenn:** Leon jeden Raum von Szenario A betreten kann, ohne Absturz und mit
-  passenden Kameras und Masken.
+### Phase 1 – every room walkable (L) – done
+- Batch converter for all 125 rooms; 8-bit backgrounds with LZ77, loaded per camera.
+- Doors with the door animations (DO2), floors, stairs and slopes, collision.
+- Debug menu: warp to any room.
 
-### Phase 2 – Skriptsystem (XL) – begonnen
+### Phase 2 – script system (XL) – done for disc 1
+- SCD interpreter (`source/script.c`): control flow, flags, variables, threads, AOTs (doors
+  with locks, items, messages, events), every opcode used on disc 1 with its size taken from
+  the PS1 handlers.
+- Cutscenes: `plc_*` (characters moved by the scripts), camera cuts, voices, room objects and
+  their movement (`speed_set` / `add_speed`), effects (`sce_espr_on`).
+- Open: `0x1b` (a loop with a variable count, not used on disc 1), head turning (`plc_neck`),
+  room lighting (`0x7c`–`0x7f`).
 
-Stand: Interpreter (`source/script.c`) mit Kontrollfluss, Flags, Variablen, Threads und
-AOTs (Türen inkl. Schlösser, Items, Texte, Events); Texte der englischen PAL-Disc;
-Host-Test `tests/script_host.c` über alle Räume. Offen: 12 Räume mit seltenen unbekannten
-Opcodes, Figuren-/Kamera-Befehle für Cutscenes (plc_*, sce_em_set, obj_model_set), Flag-Startwerte.
+### Phase 3 – the player (M) – mostly done
+- Done: tank controls, health animations, pose blending, aiming / firing / reloading for the
+  handguns and the knife, auto-aim, grab and struggle, death sequence.
+- Open: the other weapons (magnum, shotgun, grenade launcher, …) and their frame handlers,
+  pushing objects, the death scenes of other enemies.
 
-- Interpreter für die Raumskripte (SCD-Bytecode). Vorlage: `script/` in OpenBiohazard2
-  (Go, in diesem Ordner), fehlende Opcodes per REA aus der PS1-EXE.
-- Auslöser (AOT): Türen, verschlossene Türen, Items aufheben, Untersuchen, Ereignisse.
-- Spiel-Flags, Texte aus den RDT-Nachrichten mit eigener Schrift, Skript-Kamerafahrten.
-- **Fertig, wenn:** in Szenario A alle Türen, Schlösser, Items und Rätsel per Skript
-  funktionieren.
+### Phase 4 – enemies (XL) – zombies done
+- Done: zombies with the original AI, path zones, hits, falling, dying, eating, people moved
+  by scripts.
+- Open: dog, crow and licker (analysis in [docs/enemy-others.md](docs/enemy-others.md)),
+  spider, moth, plant, alligator, G (all stages), Mr. X; head shots and severed parts as in
+  [docs/damage.md](docs/damage.md).
 
-### Phase 3 – Spieler komplett (M)
-- Zielen und Schießen (Analyse liegt vor), Waffenmodelle aus PLW, Nachladen, Munition.
-- Gesundheit (Fine/Caution/Danger mit eigenen Animationen), Treffer, Tod, Game Over.
-- Objekte schieben, Klettern, Treppen-Animationen.
+### Phase 5 – menus and saving (L) – started
+- Done: inventory on the lower screen, equip / check (with the item pictures) / combine.
+- Open: item box, map, files, typewriter and ink ribbons with save games, title screen,
+  options, ending and ranking.
 
-### Phase 4 – Gegner (XL)
-- Gegner-Konverter (EMD aus den EMS-Paketen) mit Polygon-Reduktion.
-- Zombie, Hund, Krähe, Licker nach den vorhandenen Analysen nachbauen.
-- Noch analysieren und bauen: Spinne, Motte, Pflanze (Ivy), Alligator, G (Birkin, alle
-  Stufen), Mr. X (Szenario B).
-- Treffer-Reaktionen, Kopfschüsse und Tod nach `damage.md`.
-- **Fertig, wenn:** jeder Gegner in seinem Raum spielbar ist und das Bild flüssig bleibt.
+### Phase 6 – sound (L) – done for disc 1
+- Room sound effects, enemy voices, footsteps, weapon sounds, music sequencer, voice clips.
+- Open: the remaining one-off sounds (e.g. the PS1's death sound effect).
 
-### Phase 5 – Menüs und Speichern (L)
-- Inventar, Item-Kiste, Kombinieren und Untersuchen, Karte, Files – auf dem unteren
-  Bildschirm.
-- Schreibmaschine und Farbbänder; Spielstände auf SD-Karte (libfat) bzw. melonDS.
-- Titelbild, Optionen, Game Over, Abspann, Ranking.
+### Phase 7 – movies (L) – started
+- Done: player and converter (`tools/str2ds.py`, `source/movie.c`); the opening (two movies).
+- Open: the in-game movies (`ZMOVIE`, `PL0/ZMOVIE`) at their trigger points, the ending.
 
-### Phase 6 – Ton (L)
-- Soundeffekte (EDH/VB) in DS-Samples umwandeln.
-- Musik: das BGM-Sequenzformat analysieren und einen eigenen Sequenzer auf dem ARM7
-  schreiben (16 Kanäle).
-- Sprachausgabe: XA → IMA-ADPCM, gestreamt aus NitroFS.
+### Phase 8 – all scenarios (M)
+- Disc 2 (Claire) through the same pipeline.
+- Scenarios A/B, the zapping system.
+- Optional: 4th Survivor, Tofu, extra costumes.
 
-### Phase 7 – Videos (L)
-- 15 Videos pro Disc auf 256×192 umrechnen; DS-Codec mit Decoder auf dem ARM9
-  (Entscheidung offen: eigener einfacher Codec oder einen vorhandenen portieren).
-- Ziel ~15 Bilder/s und ~128 KB/s inkl. Ton.
+### Phase 9 – polish (M)
+- Performance and loading times, bugs, real hardware (flashcart), the ripple effect of the
+  YOU DIED picture, the glass shards' exact physics.
 
-### Phase 8 – Alle Szenarien (M)
-- Disc 2 (Claire) durch dieselbe Pipeline schicken.
-- Szenario A/B, Zapping-System (Entscheidungen in A wirken sich auf B aus).
-- Optional: 4th Survivor, Tofu, Extra-Kostüme.
+## Biggest risks
 
-### Phase 9 – Feinschliff (M)
-- Leistung und Ladezeiten, Bugs, Test auf echter Hardware (Flashcart), Spielstand-
-  Kompatibilität.
-
-## Größte Risiken
-
-1. **Polygonbudget** bei mehreren Gegnern – früh in Phase 4 messen.
-2. **Skriptsystem** – viele Opcodes, jeder Fehler blockiert den Spielfortschritt.
-3. **Video-Codec** – Rechenleistung des ARM9 (67 MHz) und ROM-Größe.
-4. **Musik** – das BGM-Format ist noch nicht analysiert.
-
-## Nächster Schritt
-
-Phase 1 beginnen: Batch-Konverter für alle Räume und komprimierte Hintergründe, danach
-Türen und Raumwechsel.
+1. **Polygon budget** with several enemies on screen – measure early in phase 4.
+2. **Movies** – ARM9 time (67 MHz) and ROM size.
+3. **Script edge cases** – every wrong opcode can block progress; the host tests run every
+   room's scripts.

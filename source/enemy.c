@@ -16,7 +16,7 @@
 #define MAX_SETS 4
 
 // Zombie behaviour after the PS1 code (zombie overlay of CDEMD0.EMS, linked at
-// 0x80100000; re2ds-notes/enemy-zombie.md). States as in obj+5; only the ones
+// 0x80100000; docs/enemy-zombie.md). States as in obj+5; only the ones
 // that need no attacks yet. One game tick here is one PS1 frame.
 #define ST_LURK 0               // stands, shuffles now and then (0x801011fc / 0x8010135c)
 #define ST_CHASE 1              // shuffles toward Leon (0x8010167c / 0x801019d0)

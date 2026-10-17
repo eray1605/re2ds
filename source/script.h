@@ -93,6 +93,11 @@ void game_object_set(const uint8_t *ins);
 void game_object_hide(int model);
 // work_set 4: members 0x0B-0x0D position, 0x0F facing of room object n
 int game_object_member(int n, int member, int *value);
+// sce_espr_on (the 16-byte instruction) / sce_espr_kill: room effect sprites
+void game_espr_on(const uint8_t *ins);
+void game_espr_kill(int id, int type);
+// flr_set: the room's floor sound area n on / off (RoomFloorSound.floor & 0x80)
+void game_floor_sound_set(int n, int on);
 void game_object_member_set(int n, int member, int value);
 
 void script_room_enter(const Room *room);   // resets AOTs/threads, runs init, starts main

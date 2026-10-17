@@ -1,7 +1,7 @@
 // re2ds - enemies and other characters set by the room scripts (sce_em_set).
 //
 // Models come from tools/em2ds.py (model/emXX.bin, _tex.bin, _sets.bin).
-// Every type behaves like a zombie (re2ds-notes/enemy-zombie.md): lurking,
+// Every type behaves like a zombie (docs/enemy-zombie.md): lurking,
 // chasing, lying and getting up as the spawn variant says. No attacks yet.
 #pragma once
 
