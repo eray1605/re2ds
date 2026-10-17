@@ -11,6 +11,7 @@
 
 #define SAVE_SLOTS 12
 #define BOX_SLOTS 64            // the item box (not used yet)
+#define BGM_TABLE_BYTES 320     // 141 rooms x main, sub
 
 typedef struct {
     uint8_t used;
@@ -25,6 +26,9 @@ typedef struct {
     InvSlot box[BOX_SLOTS];
     uint8_t locks[128];
     uint8_t script[SCRIPT_STATE_SIZE];
+    // version 2: the room music table (sce_bgmtbl_set changes it)
+    uint8_t bgm_saved;
+    uint8_t bgm[BGM_TABLE_BYTES];
 } SaveSlot;
 
 int save_init(void);                     // mounts the SD card; 0 if there is none

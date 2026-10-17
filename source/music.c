@@ -48,8 +48,9 @@ static uint8_t program[16], ch_volume[16], ch_pan[16];
 static int16_t ch_bend[16];
 static Voice voices[MAX_VOICES];
 static int current_main = -1;
-// sce_bgm_control volumes (left, right) of the whole music and of programs 0-2
-static uint8_t main_l = 127, main_r = 127, prog_l[3] = { 127, 127, 127 }, prog_r[3] = { 127, 127, 127 };
+// sce_bgm_control (FUN_8005702c): volume and pan (64 = centre) of the whole
+// music and of programs 0-2
+static uint8_t main_vol = 127, main_pan = 64, prog_vol[3] = { 127, 127, 127 }, prog_pan[3] = { 64, 64, 64 };
 
 static void set_tempo(uint32_t us_per_quarter)
 {
@@ -95,9 +96,12 @@ int music_playing(void) { return seq != NULL; }
 void music_play(const char *path)
 {
     music_stop();
-    main_l = main_r = 127;
-    for (int i = 0; i < 3; i++)
-        prog_l[i] = prog_r[i] = 127;
+    main_vol = 127;
+    main_pan = 64;
+    for (int i = 0; i < 3; i++) {
+        prog_vol[i] = 127;
+        prog_pan[i] = 64;
+    }
     uint32_t size;
     data = asset_load(path, &size);
     if (!data || *(uint32_t *)data != MUSIC_MAGIC || size < 16) {
@@ -165,14 +169,14 @@ static void note_on(int midi, int note, int velocity)
     if (!v)
         v = &voices[0];
     voice_stop(v);
-    int l = main_l, r = main_r;
+    int vol = main_vol, bgm_pan = main_pan - 64;
     if (program[midi] < 3) {
-        l = l * prog_l[program[midi]] / 127;
-        r = r * prog_r[program[midi]] / 127;
+        vol = vol * prog_vol[program[midi]] / 127;
+        bgm_pan += prog_pan[program[midi]] - 64;
     }
     int volume = t->volume * ch_volume[midi] / 127 * velocity / 127 * MASTER_VOLUME / 127 * duck / 127;
-    volume = volume * (l > r ? l : r) / 127;
-    int pan = ch_pan[midi] + (t->pan - 64) + (l + r ? (r - l) * 64 / (l + r) : 0);
+    volume = volume * vol / 127;
+    int pan = ch_pan[midi] + (t->pan - 64) + bgm_pan;
     pan = pan < 0 ? 0 : pan > 127 ? 127 : pan;
     uint32_t rate = note_rate(t, note, ch_bend[midi]);
     int looped = t->loop != 0xFFFFFFFF;
@@ -298,12 +302,68 @@ void music_frame(void)
     }
 }
 
-void music_room(int stage, int room)
+// bgm_table.bin: u8 stages, u8 first room[stages], u16 rooms, then main, sub
+// per room. Kept in RAM: sce_bgmtbl_set changes it and saves keep it, as the
+// PS1's copy at 0x800cc2cc is part of its save state.
+static uint8_t *table;
+
+static int table_load(void)
 {
-    static uint8_t *table;
     if (!table)
         table = asset_load("nitro:/music/bgm_table.bin", NULL);
-    if (!table)
+    return table != NULL;
+}
+
+static uint8_t *table_pairs(int *bytes)
+{
+    if (!table_load())
+        return NULL;
+    int stages = table[0];
+    *bytes = 2 * (table[1 + stages] | table[2 + stages] << 8);
+    return table + 3 + stages;
+}
+
+void music_table_reset(void)
+{
+    asset_free(table);
+    table = NULL;
+    table_load();
+}
+
+int music_table_get(uint8_t *out, int max)
+{
+    int bytes;
+    uint8_t *pairs = table_pairs(&bytes);
+    if (!pairs || bytes > max)
+        return 0;
+    memcpy(out, pairs, bytes);
+    return bytes;
+}
+
+void music_table_put(const uint8_t *in, int max)
+{
+    int bytes;
+    uint8_t *pairs = table_pairs(&bytes);
+    if (pairs && bytes <= max)
+        memcpy(pairs, in, bytes);
+}
+
+// sce_bgmtbl_set (opcode 0x57 -> FUN_80057330)
+void music_table_set(int stage, int room, int main, int sub)
+{
+    if (!table_load() || stage < 1 || stage > table[0])
+        return;
+    int stages = table[0];
+    int index = table[stage] + room;
+    if (index >= (table[1 + stages] | table[2 + stages] << 8))
+        return;
+    table[3 + stages + 2 * index] = main;
+    table[4 + stages + 2 * index] = sub;
+}
+
+void music_room(int stage, int room)
+{
+    if (!table_load())
         return;
     int stages = table[0];
     if (stage < 1 || stage > stages)
@@ -326,23 +386,39 @@ void music_room(int stage, int room)
     current_main = main;
 }
 
-// sce_bgm_control (opcode 0x51): id 0 = main music; operation 0 nop, 1 start,
-// 2 stop, 3 restart, 4 pause, 5 fade out; type 0 = main volume, 1-3 = volume
-// of programs 0-2 (left, right)
-void music_control(int id, int op, int type, int left, int right)
+// sce_bgm_control (opcode 0x51 -> FUN_8005702c): id 0 = main music; operation
+// 0 nop, 1 start, 2 stop, 3 resume, 4 pause, 5 fade out; type 0 = the whole
+// music, 1-3 = programs 0-2. The last two bytes are volume and pan, each
+// stored minus 1; 0 leaves the value as it is (sce_bgm_control 0, 2, 0, 0, 0
+// only stops).
+void music_control(int id, int op, int type, int volume, int pan)
 {
     if (id != 0)
         return; // the sub music (SUB_xx) is not played yet
-    if (type == 0) {
-        main_l = left;
-        main_r = right;
-    } else if (type <= 3) {
-        prog_l[type - 1] = left;
-        prog_r[type - 1] = right;
-    }
-    if (op == 2 || op == 4 || op == 5) {
+    uint8_t *v = type == 0 ? &main_vol : type <= 3 ? &prog_vol[type - 1] : NULL;
+    uint8_t *p = type == 0 ? &main_pan : type <= 3 ? &prog_pan[type - 1] : NULL;
+    if (op == 1 || op == 3) { // (re)start the room's music if it was stopped
+        if (!seq && current_main >= 0) {
+            uint8_t mv = main_vol, mp = main_pan, pv[3], pp[3];
+            memcpy(pv, prog_vol, 3);
+            memcpy(pp, prog_pan, 3);
+            char path[40];
+            int main = current_main;
+            snprintf(path, sizeof(path), "nitro:/music/main%02x.bin", main);
+            music_play(path);
+            current_main = main;
+            main_vol = mv;
+            main_pan = mp;
+            memcpy(prog_vol, pv, 3);
+            memcpy(prog_pan, pp, 3);
+        }
+    } else if (op == 2 || op == 4 || op == 5) {
         int keep = current_main;
         music_stop();
         current_main = keep; // the room still "has" it: no restart on re-entry
     }
+    if (v && volume)
+        *v = volume - 1 > 127 ? 127 : volume - 1;
+    if (p && pan)
+        *p = pan - 1 > 127 ? 127 : pan - 1;
 }
