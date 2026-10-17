@@ -5,6 +5,10 @@ SLES-00972). It is not an emulator: converters turn the data of *your own* disc 
 formats, and a C engine (devkitARM + libnds) plays them with the game's original rules,
 reverse engineered from the PS1 executable.
 
+![re2ds running on a Nintendo DSi XL: Leon in the alley behind the gun shop, the status screen on the lower screen](docs/images/dsi-xl.jpg)
+
+*Running on real hardware (Nintendo DSi XL).*
+
 > **No game data is included, and none may be shared.** Everything under `build/` and
 > `nitrofiles/` and the ROM `re2ds.nds` contain Capcom's data: they are generated locally
 > from your own disc, are ignored by git, and must never be committed or distributed.
