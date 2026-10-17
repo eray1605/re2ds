@@ -68,8 +68,8 @@ Disc 2 (Claire) has the same structure.
 ### Phase 5 – menus and saving (L) – started
 - Done: inventory on the lower screen, equip / check (with the item pictures) / combine;
   saving at the typewriters with ink ribbons (12 slots on the SD card), loading at the start
-  and after dying.
-- Open: item box, map, files, title screen, options, ending and ranking.
+  and after dying; the item box (64 slots, shared by all save rooms, kept in the save).
+- Open: map, files, title screen, options, ending and ranking.
 
 ### Phase 6 – sound (L) – done for disc 1
 - Room sound effects, enemy voices, footsteps, weapon sounds, music sequencer, voice clips.

@@ -4,12 +4,14 @@ the DS sequencer (source/music.c), and the room -> music table.
 A BGM file holds a SEQ (pQES, MIDI-like, played by libsnd), a VAB header and
 its samples; the last 12 bytes give the offsets of VB, VH and SEQ
 (FUN_80056410). Output music/<name>.bin:
-  u32 "RMU1", u32 seq offset, u32 seq size, u16 tone count, u16 0
+  u32 "RMU1", u32 seq offset, u32 seq size, u16 tone count, u16 format (1 = 8-bit)
   tones (24 bytes): u8 program, u8 note min, u8 note max, u8 centre,
                     s8 fine, u8 volume, u8 pan, u8 release (ADSR2 bits 0-4),
                     u32 sample offset, u32 sample bytes, u32 loop start bytes
                     (0xFFFFFFFF = plays once), u32 0
-  SEQ bytes, 16-bit PCM samples (each sample's rate is 44100 Hz at its centre note).
+  SEQ bytes, 8-bit signed PCM samples (each sample's rate is 44100 Hz at its centre
+  note). 8-bit halves the RAM a piece needs against 16-bit: the largest one is
+  then ~400 KB, and a 675 KB piece no longer failed to fit after a room change.
 
 Table music/bgm_table.bin (--table SLES INIT_TBL.DAT out): the new game's
 BGM table (INIT_TBL.DAT is the starting save state; the table lies at RAM
@@ -24,6 +26,7 @@ import struct
 import sys
 
 MAGIC = 0x31554D52  # "RMU1"
+FORMAT_8BIT = 1
 F0 = (0, 60, 115, 98, 122)
 F1 = (0, 0, -52, -55, -60)
 
@@ -83,10 +86,9 @@ def convert(src, dst):
                 continue
             if vag not in placed:
                 samples, loop = decoded[vag]
-                if len(samples) % 2:
-                    samples.append(0)
-                placed[vag] = (len(pcm), 2 * len(samples), 0xFFFFFFFF if loop is None else 2 * (loop & ~1))
-                pcm += struct.pack(f"<{len(samples)}h", *samples)
+                samples = samples + [0] * (-len(samples) % 4)  # whole words
+                placed[vag] = (len(pcm), len(samples), 0xFFFFFFFF if loop is None else loop & ~3)
+                pcm += bytes((max(-128, min(127, (v + 128) >> 8)) & 0xFF) for v in samples)
             off, size, loop = placed[vag]
             fine_s = fine - 256 if fine > 127 else fine
             tones.append((p, lo, hi, centre, fine_s, vol, pan, adsr2 & 0x1F, off, size, loop))
@@ -94,7 +96,7 @@ def convert(src, dst):
     head_size = 16 + 24 * len(tones)
     seq_off = head_size
     pcm_off = (seq_off + len(seq_data) + 3) & ~3
-    out = bytearray(struct.pack("<IIIHH", MAGIC, seq_off, len(seq_data), len(tones), 0))
+    out = bytearray(struct.pack("<IIIHH", MAGIC, seq_off, len(seq_data), len(tones), FORMAT_8BIT))
     for p, lo, hi, centre, fine, vol, pan, rel, off, size, loop in tones:
         out += struct.pack("<BBBBbBBBIIII", p, lo, hi, centre, fine, vol, pan, rel,
                            pcm_off + off, size, loop, 0)

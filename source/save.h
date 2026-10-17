@@ -10,7 +10,7 @@
 #include "script.h"
 
 #define SAVE_SLOTS 12
-#define BOX_SLOTS 64            // the item box (not used yet)
+#define BOX_SLOTS 64            // the item box
 #define BGM_TABLE_BYTES 320     // 141 rooms x main, sub
 
 typedef struct {

@@ -462,6 +462,182 @@ int menu_choose(const char *title, const char *const *lines, int count, int star
     return answer;
 }
 
+// ---------------------------------------------------------------- item box
+// Left Leon's 8 slots (2 x 4), right the box as a scrolling list. A picks an
+// item (red), A on another slot swaps the two; B drops the pick or closes.
+#define BOX_INV_X 4
+#define BOX_INV_Y 16
+#define BOX_LIST_X 112
+#define BOX_LIST_Y 18
+#define BOX_ROW_H 12
+#define BOX_ROWS 13
+
+static int shows_count(int item) { return item >= 0x02 && item <= 0x1E; }
+
+static void box_inv_pos(int i, int *x, int *y)
+{
+    *x = BOX_INV_X + (i % 2) * 52;
+    *y = BOX_INV_Y + (i / 2) * 40;
+}
+
+static void draw_item_box(const InvSlot *box, int box_slots, int side, int inv_sel, int box_sel, int top,
+                          int pick_side, int pick)
+{
+    memset(fb, col(C_BLACK), sizeof(fb));
+    text(4, 4, "ITEM BOX", C_WHITE);
+    for (int i = 0; i < INV_SLOTS; i++) {
+        int x, y;
+        box_inv_pos(i, &x, &y);
+        int c = side == 0 && inv_sel == i ? C_YELLOW : pick_side == 0 && pick == i ? C_RED
+              : i == inventory_equipped ? C_GREEN : C_DARK;
+        frame(x, y, 48, 36, c);
+        if (inventory[i].item) {
+            icon(x + 4, y + 3, inventory[i].item);
+            if (shows_count(inventory[i].item)) {
+                char n[8];
+                snprintf(n, sizeof(n), "%d", inventory[i].count);
+                text(x + 46 - 8 * (int)strlen(n), y + 27, n, C_WHITE);
+            }
+        }
+    }
+    frame(BOX_LIST_X - 4, BOX_LIST_Y - 4, 252 - BOX_LIST_X + 8, BOX_ROWS * BOX_ROW_H + 6, C_GREY);
+    for (int r = 0; r < BOX_ROWS && top + r < box_slots; r++) {
+        int i = top + r, y = BOX_LIST_Y + r * BOX_ROW_H;
+        int c = side == 1 && box_sel == i ? C_YELLOW : pick_side == 1 && pick == i ? C_RED : -1;
+        if (c >= 0)
+            frame(BOX_LIST_X - 2, y - 2, 252 - BOX_LIST_X + 4, BOX_ROW_H, c);
+        char line[20];
+        if (box[i].item) {
+            char name[14];
+            snprintf(name, sizeof(name), "%s", item_name(box[i].item));
+            if (shows_count(box[i].item))
+                snprintf(line, sizeof(line), "%-13s%3d", name, box[i].count);
+            else
+                snprintf(line, sizeof(line), "%s", name);
+        } else {
+            snprintf(line, sizeof(line), "-");
+        }
+        text(BOX_LIST_X, y, line, box[i].item ? C_WHITE : C_DARK);
+    }
+    // scroll marks
+    if (top > 0)
+        text(244, 4, "^", C_LIGHT);
+    if (top + BOX_ROWS < box_slots)
+        text(244, BOX_LIST_Y + BOX_ROWS * BOX_ROW_H, "v", C_LIGHT);
+    // the full name of the slot under the cursor
+    const InvSlot *cur = side == 0 ? &inventory[inv_sel] : &box[box_sel];
+    if (cur->item)
+        text(4, 182, item_name(cur->item), C_LIGHT);
+    dirty = 1;
+}
+
+void menu_item_box(InvSlot *box, int box_slots, void (*frame_fn)(void))
+{
+    int side = 0, inv_sel = 0, box_sel = 0, top = 0, pick_side = -1, pick = -1, done = 0;
+    pause_show(0);
+    while (!done) {
+        scanKeys();
+        uint32_t down = keysDown();
+        int moved = 0, act = 0;
+        if (down & (KEY_LEFT | KEY_RIGHT)) {
+            if (side == 0 && (down & KEY_RIGHT) && inv_sel % 2 == 0)
+                inv_sel++;
+            else if (side == 0 && (down & KEY_RIGHT))
+                side = 1;
+            else if (side == 1 && (down & KEY_LEFT))
+                side = 0;
+            else if (side == 0 && (down & KEY_LEFT) && inv_sel % 2 == 1)
+                inv_sel--;
+            moved = 1;
+        }
+        if (down & KEY_UP) {
+            if (side == 0)
+                inv_sel = (inv_sel + INV_SLOTS - 2) % INV_SLOTS;
+            else
+                box_sel = (box_sel + box_slots - 1) % box_slots;
+            moved = 1;
+        }
+        if (down & KEY_DOWN) {
+            if (side == 0)
+                inv_sel = (inv_sel + 2) % INV_SLOTS;
+            else
+                box_sel = (box_sel + 1) % box_slots;
+            moved = 1;
+        }
+        if (down & KEY_TOUCH) {
+            touchPosition t;
+            touchRead(&t);
+            for (int i = 0; i < INV_SLOTS; i++) {
+                int x, y;
+                box_inv_pos(i, &x, &y);
+                if (t.px >= x && t.px < x + 48 && t.py >= y && t.py < y + 36) {
+                    side = 0;
+                    inv_sel = i;
+                    act = 1;
+                }
+            }
+            int r = (t.py - BOX_LIST_Y + 2) / BOX_ROW_H;
+            if (t.px >= BOX_LIST_X - 4 && t.py >= BOX_LIST_Y - 2 && r >= 0 && r < BOX_ROWS && top + r < box_slots) {
+                side = 1;
+                box_sel = top + r;
+                act = 1;
+            }
+        }
+        if (box_sel < top)
+            top = box_sel;
+        if (box_sel >= top + BOX_ROWS)
+            top = box_sel - BOX_ROWS + 1;
+        if (down & KEY_A)
+            act = 1;
+        if (act) {
+            int cur = side == 0 ? inv_sel : box_sel;
+            if (pick < 0) {
+                const InvSlot *s = side == 0 ? &inventory[cur] : &box[cur];
+                if (s->item) {
+                    pick_side = side;
+                    pick = cur;
+                    game_menu_sound(SND_SELECT);
+                } else {
+                    game_menu_sound(SND_NO);
+                }
+            } else if (pick_side == side && pick == cur) {
+                pick = pick_side = -1; // the same slot again: drop the pick
+                game_menu_sound(SND_BACK);
+            } else {
+                InvSlot *a = pick_side == 0 ? &inventory[pick] : &box[pick];
+                InvSlot *b = side == 0 ? &inventory[cur] : &box[cur];
+                InvSlot tmp = *a;
+                *a = *b;
+                *b = tmp;
+                // the weapon in hand went into the box: nothing equipped
+                if (inventory_equipped >= 0 &&
+                    ((pick_side == 0 && pick == inventory_equipped) || (side == 0 && cur == inventory_equipped)))
+                    inventory_equipped = -1;
+                pick = pick_side = -1;
+                game_menu_sound(SND_SELECT);
+            }
+        } else if (down & KEY_B) {
+            if (pick >= 0) {
+                pick = pick_side = -1;
+            } else {
+                done = 1;
+            }
+            game_menu_sound(SND_BACK);
+        } else if (moved) {
+            game_menu_sound(SND_CURSOR);
+        }
+        draw_item_box(box, box_slots, side, inv_sel, box_sel, top, pick_side, pick);
+        if (dirty && bg >= 0) {
+            DC_FlushRange(fb, sizeof(fb));
+            dmaCopy(fb, bgGetGfxPtr(bg), sizeof(fb));
+            dirty = 0;
+        }
+        frame_fn();
+    }
+    last_inv = ~0u;
+    last_hp = -9999; // the status screen again
+}
+
 void menu_picture(int item)
 {
     picture = item;
