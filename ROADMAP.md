@@ -24,8 +24,9 @@ Disc 2 (Claire) has the same structure.
 
 ## DS limits and what follows from them
 
-- **ROM at most 512 MB.** Today about 290 MB for disc 1 with two movies; the remaining movies
-  must stay small (≈ 128 KB/s or less).
+- **ROM at most 512 MB.** Today about 425 MB for disc 1 with all its movies: the opening at
+  15 fps, the in-game movies at 10 fps (≈ 300 KB/s); music, sound effects and the movies'
+  sound are 8-bit PCM.
 - **4 MB of main memory.** Only one room, its models and the current camera are loaded;
   backgrounds and movies are streamed from NitroFS.
 - **3D: at most 2048 polygons per frame.** Leon alone has 454; enemies are drawn nearest first
@@ -54,9 +55,11 @@ Disc 2 (Claire) has the same structure.
 
 ### Phase 3 – the player (M) – mostly done
 - Done: tank controls, health animations, pose blending, aiming / firing / reloading for the
-  handguns and the knife, auto-aim, grab and struggle, death sequence.
-- Open: the other weapons (magnum, shotgun, grenade launcher, …) and their frame handlers,
-  pushing objects, the death scenes of other enemies.
+  handguns, magnums, shotguns and the knife (frame handlers as data), auto-aim, grab and
+  struggle, death sequence; the shotgun's impact on zombies by distance (thrown backward,
+  heavy recoil).
+- Open: grenade launcher, bowgun, SMG and the rest, crawlers and bursting heads (shotgun
+  and magnum), pushing objects, the death scenes of other enemies.
 
 ### Phase 4 – enemies (XL) – zombies done
 - Done: zombies with the original AI, path zones, hits, falling, dying, eating, people moved
@@ -68,16 +71,19 @@ Disc 2 (Claire) has the same structure.
 ### Phase 5 – menus and saving (L) – started
 - Done: inventory on the lower screen, equip / check (with the item pictures) / combine;
   saving at the typewriters with ink ribbons (12 slots on the SD card), loading at the start
-  and after dying; the item box (64 slots, shared by all save rooms, kept in the save).
-- Open: map, files, title screen, options, ending and ranking.
+  and after dying; the item box (64 slots, shared by all save rooms, kept in the save); the
+  documents (`FILES.TIM`, read when found, again with L on the status screen).
+- Open: map, options, ending and ranking. (The title screen with NEW GAME / LOAD GAME is done.)
 
 ### Phase 6 – sound (L) – done for disc 1
 - Room sound effects, enemy voices, footsteps, weapon sounds, music sequencer, voice clips.
 - Open: the remaining one-off sounds (e.g. the PS1's death sound effect).
 
 ### Phase 7 – movies (L) – started
-- Done: player and converter (`tools/str2ds.py`, `source/movie.c`); the opening (two movies).
-- Open: the in-game movies (`ZMOVIE`, `PL0/ZMOVIE`) at their trigger points, the ending.
+- Done: player and converter (`tools/str2ds.py`, `source/movie.c`, paced by a tick clock); the
+  opening; every in-game movie of disc 1 at its `movie_on` (movie table `0x8009a578`),
+  including the ending.
+- Open: Claire's movies (disc 2).
 
 ### Phase 8 – all scenarios (M)
 - Disc 2 (Claire) through the same pipeline.

@@ -126,7 +126,7 @@ python3 -I tools/extract_psx_iso.py "/mnt/c/Users/YourName/Downloads/Resident Ev
 Tips: `ls /mnt/c/Users/` shows the Windows user names, and the **Tab** key completes a path
 while you type it.
 
-**4. Convert the game data** (a few minutes; fills `nitrofiles/`, about 290 MB):
+**4. Convert the game data** (a few minutes; fills `nitrofiles/`, about 420 MB):
 
 ```bash
 tools/build_assets.sh build/disc1
@@ -191,15 +191,17 @@ need them like that.
 | B | run (hold with up) |
 | A | action: doors, items, examine; fire while aiming |
 | R | aim (hold); up / down aims high / low |
-| START | status screen (inventory); skips the opening movie |
+| START | status screen (inventory); skips a movie |
 | touch | select on the status screen |
+| L on the status screen | the documents (files) found so far |
+| A / B while reading a document | next page / close (left: page back) |
 
 Debug:
 
 | Button | Action |
 |--------|--------|
 | SELECT | room menu: warp to any room (L/R ±10, A warp) |
-| hold SELECT while the game boots | leaves out the opening movie |
+| hold SELECT while the game boots | leaves out the title movie and the opening (NEW GAME) |
 | L + A at a door | opens any lock |
 | L + A at a typewriter | saves without an ink ribbon |
 

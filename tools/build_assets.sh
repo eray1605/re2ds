@@ -92,6 +92,12 @@ python3 -I tools/esp2ds.py "$DISC/COMMON/DATA/CORE00.ESP" "$DISC/COMMON/DATA/COR
 python3 -I tools/resp2ds.py --core "$DISC/COMMON/DATA/CORE00.ESP" "$DISC/COMMON/DATA/CORE01.TIM" \
     "$DISC/COMMON/DATA/TEX_PAL.TIM" build/ds/effect/core_fx.bin > /dev/null
 
+# the title screen (PRESS ANY BUTTON, NEW GAME / LOAD GAME)
+python3 -I tools/title2ds.py "$DISC/COMMON/DATA/TIT_BG.TIM" "$DISC/COMMON/DATA/TMOJI.TIM" build/ds/title > /dev/null
+
+# the documents (items 0x68-0x80): one picture per page
+python3 -I tools/files2ds.py "$DISC/COMMON/DATA/FILES.TIM" build/ds/files > /dev/null
+
 # "YOU DIED" (Leon)
 mkdir -p build/ds/die
 python3 -I tools/die2ds.py "$DISC/COMMON/DATA/DIED00.DIE" build/ds/die/died00.bin
@@ -103,14 +109,19 @@ for s in 1 2 3 4 5 6 7; do
 done
 python3 -I tools/xa2ds.py --common "$DISC/SLES_009.72" "$DISC/PL0/VOICE/VOICE00.XAS.raw2352" build/ds/voice > /dev/null
 
-# the opening movies (Leon meets Claire): need the STRs as raw sectors
-# (tools/extract_psx_iso.py writes them so); skipped without them
+# the movies: need the STRs as raw sectors (tools/extract_psx_iso.py writes
+# them so); skipped without them. The opening at 15 fps, the in-game ones
+# (movie_on, source/main.c movie_names) at 10 fps so that all fit the 512 MB
+# ROM. Four at a time: each takes a while.
 mkdir -p build/ds/movie
-for m in OPN1STL:opn1 OPN2NDL:opn2; do
-    if [ -f "$DISC/PL0/ZMOVIE/${m%%:*}.STR.raw2352" ]; then
-        python3 -I tools/str2ds.py "$DISC/PL0/ZMOVIE/${m%%:*}.STR.raw2352" "build/ds/movie/${m##*:}.bin" > /dev/null
-    fi
-done
+for m in PL0/ZMOVIE/TITLEL:titlel:15 PL0/ZMOVIE/OPN1STL:opn1:15 PL0/ZMOVIE/OPN2NDL:opn2:15 \
+         ZMOVIE/R10B:r10b:10 ZMOVIE/R200:r200:10 ZMOVIE/R505:r505:10 ZMOVIE/R109:r109:10 \
+         PL0/ZMOVIE/R108L:r108l:10 PL0/ZMOVIE/R204L:r204l:10 PL0/ZMOVIE/R409:r409:10 \
+         PL0/ZMOVIE/R700L:r700l:10 PL0/ZMOVIE/R703L:r703l:10 PL0/ZMOVIE/R704L:r704l:10; do
+    src="$DISC/${m%%:*}.STR.raw2352"
+    rest="${m#*:}"
+    [ -f "$src" ] && echo "$src build/ds/movie/${rest%%:*}.bin ${rest##*:}"
+done | xargs -P 4 -n 3 sh -c 'python3 -I tools/str2ds.py "$0" "$1" --fps "$2" > /dev/null'
 
-cp -R build/ds/bg build/ds/room build/ds/model build/ds/mask build/ds/sound build/ds/door build/ds/effect build/ds/music build/ds/menu build/ds/movie build/ds/die build/ds/voice nitrofiles/
+cp -R build/ds/bg build/ds/room build/ds/model build/ds/mask build/ds/sound build/ds/door build/ds/effect build/ds/music build/ds/menu build/ds/movie build/ds/die build/ds/voice build/ds/files build/ds/title nitrofiles/
 du -sh nitrofiles nitrofiles/*

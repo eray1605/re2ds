@@ -2,7 +2,7 @@
 //
 // Pictures: each frame is an LZ77 packed 8 bpp image with its own palette,
 // unpacked in RAM and copied to the BG3 bitmap (VRAM E) in the vblank.
-// Sound: one block of 16-bit mono PCM after the frames, streamed into a ring
+// Sound: one block of 8-bit ("RMV2"; "RMV1": 16-bit) mono PCM after the frames, streamed into a ring
 // buffer the ARM7 loops over. The ARM7's position is not visible here, so
 // both are paced by a 1 kHz tick task started with the sound (calico's tick
 // counter itself stands still while no tick task runs):
@@ -18,7 +18,8 @@
 
 #include "movie.h"
 
-#define MOVIE_MAGIC 0x31564D52  // "RMV1"
+#define MOVIE_MAGIC 0x31564D52  // "RMV1": 16-bit sound
+#define MOVIE_MAGIC8 0x32564D52 // "RMV2": 8-bit sound (half the size)
 #define RING 32768               // samples (64 KB, about 1.5 s)
 #define LEAD 22050               // samples kept queued ahead of the sound
 #define CLOCK_HZ 1000            // the movie clock counts milliseconds
@@ -64,15 +65,16 @@ int movie_play(const char *name)
     snprintf(path, sizeof(path), "nitro:/movie/%s.bin", name);
     FILE *fv = fopen(path, "rb"), *fa = fopen(path, "rb");
     MovieHeader h;
-    if (!fv || !fa || fread(&h, sizeof(h), 1, fv) != 1 || h.magic != MOVIE_MAGIC ||
+    if (!fv || !fa || fread(&h, sizeof(h), 1, fv) != 1 || (h.magic != MOVIE_MAGIC && h.magic != MOVIE_MAGIC8) ||
         h.width != 256 || h.height > 128 || !h.fps) {
         if (fv) fclose(fv);
         if (fa) fclose(fa);
         return 1;
     }
     uint8_t *lz = malloc(h.max_lz);
-    // the sound ring only while a movie plays (64 KB; RAM is short)
-    int16_t *ring = memalign(32, RING * 2);
+    // the sound ring only while a movie plays (up to 64 KB; RAM is short)
+    int bps = h.magic == MOVIE_MAGIC8 ? 1 : 2; // bytes per sample
+    uint8_t *ring = memalign(32, RING * bps);
     if (!lz || !ring) {
         free(lz);
         free(ring);
@@ -90,7 +92,7 @@ int movie_play(const char *name)
 
     // sound: fill the ring, then start it looping
     uint32_t written = 0; // samples queued in total
-    memset(ring, 0, RING * 2);
+    memset(ring, 0, RING * bps);
     int channel = -1;
     int skipped = 0, shown = -1, decoded = -1;
     for (int first = 1;; first = 0) {
@@ -104,15 +106,16 @@ int movie_play(const char *name)
                 n = 4096;
             if (written + n > h.audio_samples)
                 n = h.audio_samples - written;
-            if (fread(ring + pos, 2, n, fa) != (size_t)n)
+            if (fread(ring + pos * bps, bps, n, fa) != (size_t)n)
                 n = 0;
-            DC_FlushRange(ring + pos, n * 2);
+            DC_FlushRange(ring + pos * bps, n * bps);
             written += n;
             if (!n)
                 break;
         }
         if (channel < 0) {
-            channel = soundPlaySample(ring, SoundFormat_16Bit, RING * 2, h.rate, 127, 64, true, 0);
+            channel = soundPlaySample(ring, bps == 1 ? SoundFormat_8Bit : SoundFormat_16Bit, RING * bps, h.rate,
+                                      127, 64, true, 0);
             clock_start();
         }
 

@@ -143,6 +143,9 @@ typedef struct {
     int8_t stagger;             // obj+0x223
     uint8_t stagger_out;        // reached 0 once (obj+0x222)
     uint8_t flinch;             // frames of the hit recoil left
+    int16_t push;               // shotgun impulse along push_dir, -50 per tick (obj+0x144)
+    int16_t push_dir;           // DS units
+    uint8_t bleed;              // ticks of blood after a heavy hit (obj+0x15a)
     uint8_t fall_back;          // death / knockdown: falls backward
     uint8_t routine;            // obj+4: 1 = own AI, 8 = room script's zombie modes
     uint8_t mode;               // obj+5 in routine 8 (state in routine 1)
@@ -974,6 +977,7 @@ static void lying(Enemy *e)
 }
 
 static void fallen(Enemy *e, int i);
+static void push_tick(Enemy *e, int i);
 
 // Routine 8 (zombie 0x80109c3c, modes from table 0x8010cd3c): the room
 // script drives the zombie. 0 stands, 1 shuffles toward the destination
@@ -1306,6 +1310,14 @@ void enemy_tick(const EnemyTarget *p)
             e->sees = !game_sight_blocked(e->x, e->y + EYE_ENEMY, e->z, p->x, p->y + EYE_PLAYER, p->z);
             update_goal(e, p);
         }
+        if (e->push > 0) // thrown back / heavy recoil (0x80109550, 0x80105b00)
+            push_tick(e, i);
+        if (e->bleed) {
+            if (!(e->bleed & 1))
+                game_blood(0, e->x, e->y - 1800 - (rnd() & 0x1FF), e->z, e->push_dir + (rnd() & 0xFFF) - 0x800,
+                           10 + (rnd() & 15), e->y);
+            e->bleed--;
+        }
         if (e->state == ST_DEAD)
             continue;
         if (e->plc.active) {
@@ -1407,10 +1419,31 @@ static void fall(Enemy *e, int dying)
         grab.enemy = -1;
 }
 
+// the shotgun's impulse: pushed along push_dir, 50 less every tick
+static void push_tick(Enemy *e, int i)
+{
+    int32_t mx = (e->push * cosLerp(e->push_dir)) >> 12, mz = -((e->push * sinLerp(e->push_dir)) >> 12);
+    if (!game_blocked(e->x, e->z, e->x + mx, e->z, e->y) && !crowded(i, e->x + mx, e->z))
+        e->x += mx;
+    if (!game_blocked(e->x, e->z, e->x, e->z + mz, e->y) && !crowded(i, e->x, e->z + mz))
+        e->z += mz;
+    e->push -= 50;
+}
+
+// a burst of blood where the shell hits (0x80109550: two big ones, then 1-4
+// spatters fanned around the shot direction)
+static void blood_burst(const Enemy *e, int16_t dir)
+{
+    int n = 3 + (rnd() & 3);
+    for (int k = 0; k < n; k++)
+        game_blood(0, e->x, e->y - 1900 - (rnd() & 0x3FF), e->z, dir + (rnd() & 0x1FFF) - 0x1000,
+                   20 + (rnd() & 31), e->y);
+}
+
 // A shot or stab: the nearest living enemy within +-22.5 degrees of dir that
 // Leon can see, within range (0 = any). damage[3] by distance (near < 3000,
 // < 6000, farther; table 0x8009c470). Returns the enemy hit or -1.
-int enemy_hit(int32_t x, int32_t y, int32_t z, int16_t dir, int range, int weapon, const uint8_t damage[3])
+int enemy_hit(int32_t x, int32_t y, int32_t z, int16_t dir, int range, int weapon, const uint16_t damage[3], int low)
 {
     int best = -1;
     int64_t best_d = 0;
@@ -1418,6 +1451,8 @@ int enemy_hit(int32_t x, int32_t y, int32_t z, int16_t dir, int range, int weapo
         const Enemy *e = &enemies[i];
         if (!alive(e))
             continue;
+        if (!low && (e->state == ST_DOWN || e->state == ST_LYING))
+            continue; // on the ground: the shot passes over it
         int64_t dx = e->x - x, dz = e->z - z, d = dx * dx + dz * dz;
         if (range && d > (int64_t)range * range)
             continue;
@@ -1436,8 +1471,47 @@ int enemy_hit(int32_t x, int32_t y, int32_t z, int16_t dir, int range, int weapo
         return -1;
     Enemy *e = &enemies[best];
     float dist = sqrtf((float)best_d);
-    e->hp -= damage[dist < 3000 ? 0 : dist < 6000 ? 1 : 2];
+    int box = dist < 3000 ? 0 : dist < 6000 ? 1 : 2;
+    e->hp -= damage[box];
     game_blood(0, e->x, e->y - 2300, e->z, dir, 20, e->y);
+    // The shotgun (zombie tables 0x8010c764 / 0x8010ca48, weapons 7 and 8,
+    // upper body): near it throws the zombie over (0x8010663c; the PS1 then
+    // often uses "thrown backward" 0x80109550 - impulse 400, -50 per tick,
+    // a burst of blood, sound 0xb / 0xd - and crawlers / head bursts, which
+    // need parts this port does not have yet: thrown backward always).
+    // Middle distance: the heavy recoil 0x80105b00 (impulse 450, bleeding for
+    // 10 ticks, sound 0xc / 0xd) when it survives; far: the normal hit.
+    // The magnums kill with every hit; the PS1 bursts the head then
+    // (0x80109204, part 8 flies off, which this port does not have yet):
+    // the burst of blood and the fall
+    if ((weapon == 5 || weapon == 6) && !is_person(e) && e->hp < 0) {
+        blood_burst(e, dir);
+        fall(e, 1);
+        sound_at(e, (rnd() & 1) ? SND_MOAN + 3 : SND_MOAN + 1);
+        return best;
+    }
+    if ((weapon == 7 || weapon == 8) && !is_person(e) && box < 2) {
+        e->push_dir = dir;
+        if (box == 0) {
+            blood_burst(e, dir);
+            e->push = 400;
+            fall(e, e->hp < 0);
+            sound_at(e, (rnd() & 1) ? SND_MOAN + 3 : SND_MOAN + 1);
+            return best;
+        }
+        if (e->hp >= 0 && e->state != ST_LYING && e->state != ST_DOWN && e->state != ST_GRAB) {
+            e->push = 450;
+            e->bleed = 10;
+            e->flinch = 15;
+            if (!e->moan_pause) {
+                sound_at(e, (rnd() & 1) ? SND_MOAN + 2 : SND_MOAN + 3);
+                e->moan_pause = MOAN_PAUSE;
+            }
+            if (e->state == ST_LURK)
+                enter_state(e, ST_CHASE);
+            return best;
+        }
+    }
     if (e->hp < 0) { // dies (0x80108470)
         fall(e, 1);
         sound_at(e, (rnd() & 1) ? SND_MOAN + 3 : SND_MOAN + 1);

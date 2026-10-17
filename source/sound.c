@@ -47,14 +47,16 @@ int sound_play(const void *bank, int note, int volume, int pan)
     const SoundEntry *e = find(bank, note);
     if (!e)
         return -1;
-    return soundPlaySample((const uint8_t *)bank + e->offset, SoundFormat_16Bit, e->size & ~3,
+    int eight = ((const SoundBankHeader *)bank)->reserved == 1;
+    return soundPlaySample((const uint8_t *)bank + e->offset, eight ? SoundFormat_8Bit : SoundFormat_16Bit, e->size & ~3,
                            e->rate, volume, pan, false, 0);
 }
 
 int sound_frames(const void *bank, int note)
 {
     const SoundEntry *e = find(bank, note);
-    return e ? (int)(e->size / 2 * 60 / e->rate) : 0;
+    int bytes = ((const SoundBankHeader *)bank)->reserved == 1 ? 1 : 2;
+    return e ? (int)(e->size / bytes * 60 / e->rate) : 0;
 }
 
 // ---------------------------------------------------------------- voices

@@ -141,6 +141,9 @@ static const char *message_text;    // open message, NULL = none
 static uint8_t lock_open[128];      // door locks opened (key id & 0x7F)
 static SaveSlot saves[SAVE_SLOTS];  // re2ds.sav as last read
 static InvSlot item_box[BOX_SLOTS]; // the item box (the same in every save room)
+#define FIRST_FILE 0x68              // the documents: items 0x68-0x80
+#define NUM_FILES 25
+static uint32_t files_found;         // bit n: document FIRST_FILE + n
 static uint16_t save_count;         // saves of this game so far
 static int last_slot;               // the slot saved to or loaded from
 
@@ -280,11 +283,10 @@ static void upload_leon_textures(void)
     asset_free(tex);
 }
 
-static void set_camera(int cam)
+// background, masks and the first 3D frame of camera cam
+static void show_camera_view(int cam)
 {
     char path[64];
-    script_camera_changed(cur_cam, cam);
-    cur_cam = cam;
 
     // Background: unpack into the hidden buffer; it is shown at the end,
     // together with the first 3D frame of the new camera.
@@ -326,6 +328,13 @@ static void set_camera(int cam)
     for (int i = 1; i < 256; i++)
         BG_PALETTE[i] = bg->palette[i];
     asset_free(bg);
+}
+
+static void set_camera(int cam)
+{
+    script_camera_changed(cur_cam, cam);
+    cur_cam = cam;
+    show_camera_view(cam);
 }
 
 static void free_objects(void)
@@ -1419,6 +1428,28 @@ void game_bgm_control(int id, int op, int type, int left, int right)
     music_control(id, op, type, left, right);
 }
 
+// movie_on (FUN_80031494): the movie table 0x8009a578, field 12 = the STR
+// file. Entries 0-2 are the logo and the opening, 15 Claire's opening; 16
+// another cut of the ending. The in-game movies are converted at 10 fps
+// (tools/build_assets.sh). Afterwards the room picture comes back.
+static const char *const movie_names[] = {
+    [3] = "r10b", [4] = "r200", [5] = "r505", [6] = "r505", [7] = "r108l", [8] = "r109",
+    [9] = "r204l", [10] = "r409", [11] = "r700l", [12] = "r703l", [13] = "r704l",
+    [14] = "opn2", [16] = "r704l",
+};
+
+void game_movie(int n)
+{
+    if (n < 0 || n >= (int)(sizeof(movie_names) / sizeof(movie_names[0])) || !movie_names[n])
+        return;
+    movie_play(movie_names[n]);
+    movie_end();
+    if (cur_cam >= 0)
+        show_camera_view(cur_cam);
+    setBrightness(1, 0);
+    game_tick_acc = 0; // no catching up on the ticks the movie took
+}
+
 void game_bgmtbl_set(int stage, int room, int main, int sub)
 {
     music_table_set(stage, room, main, sub);
@@ -1724,6 +1755,7 @@ static void new_game(void)
     // Leon starts with the knife and the H&K VP70 (rounds: unverified)
     inventory_reset();
     memset(item_box, 0, sizeof(item_box));
+    files_found = 0;
     inventory_add(0x01, 0);
     inventory_add(0x02, 18);
     inventory_equipped = 1;
@@ -1746,6 +1778,90 @@ static void choice_frame(void)
     swiWaitForVBlank();
     music_frame();
     voice_frame();
+}
+
+// ---------------------------------------------------------------- documents
+// The pages of a document (tools/files2ds.py: files/fileNN_P.bin, page 0 the
+// title) on the upper screen in place of the room picture: A / right / touch
+// next page, left / L back, B / START closes (or A on the last page).
+static int file_pages(int k)
+{
+    static uint8_t *index;
+    if (!index)
+        index = asset_load("nitro:/files/index.bin", NULL);
+    return index && k >= 0 && k < index[0] ? index[1 + k] : 0;
+}
+
+static void show_file_page(int k, int page)
+{
+    char path[40];
+    snprintf(path, sizeof(path), "nitro:/files/file%02d_%d.bin", k, page);
+    BgHeader *bg = asset_load(path, NULL);
+    if (!bg || bg->magic != BG_MAGIC) {
+        asset_free(bg);
+        return;
+    }
+    decompress(bg + 1, bg_ram, LZ77);
+    DC_FlushRange(bg_ram, BG_BYTES);
+    swiWaitForVBlank();
+    dmaCopy(bg_ram, BG_GFX, BG_BYTES);
+    for (int i = 1; i < 256; i++)
+        BG_PALETTE[i] = bg->palette[i];
+    asset_free(bg);
+}
+
+static void show_file(int k)
+{
+    int pages = file_pages(k);
+    if (!pages)
+        return;
+    uint32_t layers = REG_DISPCNT & (DISPLAY_BG0_ACTIVE | DISPLAY_SPR_ACTIVE);
+    REG_DISPCNT &= ~(DISPLAY_BG0_ACTIVE | DISPLAY_SPR_ACTIVE); // no 3D, no PAUSE
+    int page = 0, shown = -1;
+    for (;;) {
+        if (page != shown) {
+            show_file_page(k, page);
+            shown = page;
+        }
+        scanKeys();
+        uint32_t down = keysDown();
+        if (down & (KEY_A | KEY_RIGHT | KEY_TOUCH)) {
+            if (page + 1 >= pages)
+                break;
+            page++;
+            game_menu_sound(4);
+        } else if ((down & (KEY_LEFT | KEY_L)) && page > 0) {
+            page--;
+            game_menu_sound(4);
+        } else if (down & (KEY_B | KEY_START)) {
+            break;
+        }
+        swiWaitForVBlank();
+        music_frame();
+        voice_frame();
+    }
+    REG_DISPCNT |= layers;
+    if (cur_cam >= 0)
+        show_camera_view(cur_cam); // the room picture again
+}
+
+// L on the status screen: the documents found so far
+static void open_files(void)
+{
+    const char *lines[NUM_FILES];
+    int which[NUM_FILES], n = 0;
+    for (int k = 0; k < NUM_FILES; k++)
+        if (files_found & (1u << k)) {
+            lines[n] = item_name(FIRST_FILE + k);
+            which[n++] = k;
+        }
+    if (!n) {
+        game_show_message("There are no files yet.");
+        return;
+    }
+    int c = menu_choose("Files", lines, n, 0, 1, choice_frame);
+    if (c >= 0)
+        show_file(which[c]);
 }
 
 static int any_save(void)
@@ -1822,6 +1938,7 @@ static void use_typewriter(void)
         inventory[ribbon].item = 0;
     memcpy(s->inventory, inventory, sizeof(s->inventory));
     memcpy(s->box, item_box, sizeof(s->box));
+    s->files = files_found;
     memcpy(s->locks, lock_open, sizeof(s->locks));
     script_state_get(s->script);
     s->bgm_saved = music_table_get(s->bgm, sizeof(s->bgm)) > 0;
@@ -1849,6 +1966,7 @@ static void load_game(int n)
     memcpy(lock_open, s->locks, sizeof(lock_open));
     memcpy(inventory, s->inventory, sizeof(inventory));
     memcpy(item_box, s->box, sizeof(item_box));
+    files_found = s->files;
     inventory_equipped = s->equipped;
     save_count = s->saves;
     last_slot = n;
@@ -1866,11 +1984,75 @@ static void load_game(int n)
 }
 
 // At the start and after Leon died: a new game, or one from re2ds.sav
+// The PS1 title screen (tools/title2ds.py: title/press.bin, new.bin,
+// load.bin) on the upper screen: PRESS ANY BUTTON, then NEW GAME / LOAD GAME
+// with up / down, A or START to choose. LOAD GAME without saves stays.
+static void show_title(const char *name)
+{
+    char path[32];
+    snprintf(path, sizeof(path), "nitro:/title/%s.bin", name);
+    BgHeader *bg = asset_load(path, NULL);
+    if (!bg || bg->magic != BG_MAGIC) {
+        asset_free(bg);
+        return;
+    }
+    decompress(bg + 1, bg_ram, LZ77);
+    DC_FlushRange(bg_ram, BG_BYTES);
+    swiWaitForVBlank();
+    dmaCopy(bg_ram, BG_GFX, BG_BYTES);
+    for (int i = 1; i < 256; i++)
+        BG_PALETTE[i] = bg->palette[i];
+    asset_free(bg);
+}
+
+static int skip_movies;               // SELECT held at start: no title movie, no opening
+
+static int title_screen(void)
+{
+    uint32_t layers = REG_DISPCNT & (DISPLAY_BG0_ACTIVE | DISPLAY_SPR_ACTIVE);
+    REG_DISPCNT &= ~(DISPLAY_BG0_ACTIVE | DISPLAY_SPR_ACTIVE);
+    bgShow(bg_id);
+    show_title("press");
+    setBrightness(1, 0);
+    setBrightness(2, -16); // the lower screen stays black (it holds leftovers until the status screen draws)
+    for (;;) { // PRESS ANY BUTTON
+        swiWaitForVBlank();
+        scanKeys();
+        if (keysDown() & (KEY_A | KEY_B | KEY_START | KEY_X | KEY_Y | KEY_TOUCH))
+            break;
+    }
+    game_menu_sound(5);
+    int sel = any_save() ? 1 : 0, shown = -1;
+    for (;;) {
+        if (sel != shown) {
+            show_title(sel ? "load" : "new");
+            shown = sel;
+        }
+        swiWaitForVBlank();
+        scanKeys();
+        uint32_t down = keysDown();
+        if (down & (KEY_UP | KEY_DOWN)) {
+            sel ^= 1;
+            game_menu_sound(4);
+        } else if (down & (KEY_A | KEY_START)) {
+            if (sel == 1 && !any_save()) {
+                game_menu_sound(7); // nothing to load
+                continue;
+            }
+            game_menu_sound(5);
+            break;
+        }
+    }
+    setBrightness(1, -16); // the room fades in as after the movie
+    setBrightness(2, 0);
+    REG_DISPCNT |= layers;
+    return sel;
+}
+
 static void start_game(void)
 {
-    static const char *const choices[] = { "NEW GAME", "LOAD GAME" };
-    while (any_save()) {
-        if (menu_choose("RESIDENT EVIL 2", choices, 2, 1, 0, choice_frame) == 0)
+    for (;;) {
+        if (title_screen() == 0)
             break;
         int n = pick_slot("Load which file?", 0);
         if (n >= 0) {
@@ -1878,6 +2060,11 @@ static void start_game(void)
             return;
         }
     }
+    // NEW GAME: the opening (Leon meets Claire, the tanker crash) first
+    if (!skip_movies && !movie_play("opn1"))
+        movie_play("opn2");
+    movie_end();
+    setBrightness(1, -16);
     new_game();
 }
 
@@ -1962,6 +2149,17 @@ static void trigger(Aot *a)
     case SCE_ITEM: {
         int item = a->data[0] | a->data[1] << 8, amount = a->data[2] | a->data[3] << 8;
         int picked = a->data[4] | a->data[5] << 8;
+        if (item >= FIRST_FILE && item < FIRST_FILE + NUM_FILES) {
+            // a document: read at once, then kept in the files (L on the status screen)
+            files_found |= 1u << (item - FIRST_FILE);
+            flag_set(FLAGS_ITEM_PICKED, picked, 1);
+            a->active = 0;
+            game_object_hide(a->data[6]);
+            show_file(item - FIRST_FILE);
+            snprintf(text, sizeof(text), "You found the %s. (Status screen: L)", item_name(item));
+            game_show_message(text);
+            break;
+        }
         if (!inventory_add(item, amount)) {
             game_show_message("You cannot carry any more.");
             break;
@@ -2060,18 +2258,29 @@ static const uint8_t plw_fire[3] = { 10, 12, 14 }, plw_hold[3] = { 11, 13, 15 };
 // Shots: the frame handler (0x8009f0bc[weapon], VP70 0x80040b94) spawns the
 // fire at the muzzle on keyframe 1 (effect 1, 138 / 615 / 8 from the hand)
 // and the casing on 3 (effect 2, 350 / 40 / -15, thrown at facing + 1300).
+// Per weapon from the PS1 data: the reload events of PLW move 16 (EDD flags
+// 0x100000 sound, 0x400000 loads), the fire moves' own sound events (the
+// shotgun pumps on key 23 / 26 / 26, flag 0x140000: sound 4) and the
+// lowering key of table 0x8009eed8 (row item - 1, 3rd byte).
 typedef struct {
     uint8_t item;
     uint16_t range;           // 0 = any
-    uint8_t damage[3];
+    uint16_t damage[3];       // zombie table 0x8009c470: near / middle / far
     uint8_t lower_key;
-    uint8_t reload_key[2], reload_sound[2]; // the second key loads
+    uint8_t reload_key[3], reload_sound[3]; // key 0 = no event
+    uint8_t load_event;       // which reload event loads
+    uint8_t pump_key[3];      // fire move keyframe (straight / up / down) with a sound; 0 = none
+    uint8_t pump_sound;
 } Weapon;
 static const Weapon weapons[] = {
-    { 0x01, 1500, { 3, 0, 0 }, 50, { 0, 0 }, { 0, 0 } },      // knife
-    { 0x02, 0, { 16, 15, 14 }, 8, { 7, 22 }, { 4, 3 } },      // H&K VP70
-    { 0x03, 0, { 16, 15, 14 }, 8, { 7, 22 }, { 4, 3 } },      // Browning (no move 16 in its PLW)
-    { 0x04, 0, { 16, 15, 14 }, 15, { 7, 23 }, { 3, 3 } },     // custom handgun
+    { 0x01, 1500, { 3, 0, 0 }, 50, { 0 }, { 0 }, 1, { 0 }, 0 },                       // knife
+    { 0x02, 0, { 16, 15, 14 }, 8, { 7, 22 }, { 4, 3 }, 1, { 0 }, 0 },                  // H&K VP70
+    { 0x03, 0, { 16, 15, 14 }, 8, { 7, 22 }, { 4, 3 }, 1, { 0 }, 0 },                  // Browning (no move 16 in its PLW)
+    { 0x04, 0, { 16, 15, 14 }, 15, { 7, 23 }, { 3, 3 }, 1, { 0 }, 0 },                 // custom handgun
+    { 0x05, 0, { 900, 900, 900 }, 30, { 7, 22 }, { 4, 3 }, 1, { 0 }, 0 },              // magnum
+    { 0x06, 0, { 900, 900, 900 }, 50, { 7, 22 }, { 4, 3 }, 1, { 0 }, 0 },              // custom magnum
+    { 0x07, 0, { 200, 60, 40 }, 30, { 28, 42 }, { 3, 3 }, 0, { 23, 26, 26 }, 4 },      // shotgun
+    { 0x08, 0, { 300, 80, 60 }, 40, { 27, 42, 56 }, { 3, 3, 3 }, 0, { 0 }, 0 },        // custom shotgun
 };
 enum { PLW_RELOAD = 16 };
 #define SND_EMPTY 1               // ARMS sound 1: the click (FUN_80057364(0x1010001))
@@ -2173,23 +2382,73 @@ static void leon_point(int bone, const int32_t local[3], int32_t out[3])
 // The gun effects at a quarter of the room effects' size (size 16 = 1024/4096):
 // the flash about 12 cm, the smoke a small puff instead of a cloud
 #define GUN_FX_SIZE 16
-static void shot_effects(void)
+// the PS1 size byte (0x0e for the VP70) relative to GUN_FX_SIZE; capped at
+// the shotgun's largest flash (0x1d): the byte of 0x01025000 (0x50) may not
+// be a size at all
+#define GUN_FX(size) (((size) > 0x1D ? 0x1D : (size)) * GUN_FX_SIZE / 0x0E)
+
+// a casing / shell: CORE00 effect 2 from frame first on, thrown out at
+// facing + 1300 like FUN_8001b8fc's direction. The effect's frames: 0-7 the
+// tumbling handgun casing (frame 8 loops to 0), 9-16 the shotgun shell (17
+// loops to 9). Its sub effect table converts badly (all point at frame 22),
+// so the frames are named here.
+enum { CASING_HANDGUN = 0, CASING_SHELL = 9 };
+static void throw_casing(int first, int dir_re2, const int32_t p[3])
 {
-    static const int32_t muzzle[3] = { 138, 615, 8 }, port[3] = { 350, 40, -15 };
-    int32_t p[3];
-    if (player.key == 1) {
-        leon_point(HAND_BONE, muzzle, p);
-        roomfx_spawn(1, 0x00, p[0], p[1], p[2], GUN_FX_SIZE, 0);
-        roomfx_spawn(3, 0x0A, p[0], p[1], p[2], GUN_FX_SIZE, 0);
-    } else if (player.key == 3) {
-        leon_point(HAND_BONE, port, p);
-        roomfx_spawn(3, 0x08, p[0], p[1], p[2], GUN_FX_SIZE, 0);
-        // the handgun casing: CORE00 effect 2, frames 0-7 (it tumbles; frame 8
-        // goes back to 0), palette row 0 (brass). Its body is 4 x 10 of the
-        // 16-texel frame; drawn at a third of the other effects' size.
-        int16_t dir = player.dir + 1300 * 8;
-        roomfx_throw(2, 0, 0, p[0], p[1], p[2], (30 * cosLerp(dir)) >> 12, -45, -((30 * sinLerp(dir)) >> 12),
-                     player.y, 4096 * 3 / 10);
+    int16_t dir = player.dir + dir_re2 * 8;
+    roomfx_throw(2, first, 0, p[0], p[1], p[2], (30 * cosLerp(dir)) >> 12, -45, -((30 * sinLerp(dir)) >> 12),
+                 player.y, 4096 * 3 / 10);
+}
+
+// The frame handlers 0x8009f0bc[weapon] as data: on a fire move keyframe,
+// FUN_8001b8fc(id << 24 | sub << 16 | size << 8, 0, hand matrix, point).
+// Effect 2 is the casing: thrown at facing + dir from the casing frames.
+typedef struct {
+    uint8_t item, key, id, sub, size;
+    int16_t x, y, z;
+    int16_t dir;              // casings: direction offset (RE2 units)
+} ShotFx;
+static const ShotFx shot_fx[] = {
+    // VP70 0x80040b94 (also the other handguns for now)
+    { 0x02, 1, 3, 0x0A, 0x0E, 138, 615, 8, 0 }, { 0x02, 1, 1, 0x00, 0x0E, 138, 615, 8, 0 },
+    { 0x02, 3, 3, 0x08, 0x0E, 350, 40, -15, 0 }, { 0x02, 3, 2, CASING_HANDGUN, 0, 350, 40, -15, 1300 },
+    // magnum 0x80040ee8
+    { 0x05, 1, 3, 0x0A, 0x14, 110, 670, -10, 0 }, { 0x05, 1, 1, 0x00, 0x1D, 110, 670, -10, 0 },
+    { 0x05, 4, 3, 0x08, 0x09, 330, 50, 0, 0 }, { 0x05, 4, 2, CASING_HANDGUN, 0, 330, 50, 0, 0x694 },
+    // custom magnum 0x80040ff4
+    { 0x06, 1, 3, 0x0A, 0x18, 130, 900, -10, 0 }, { 0x06, 1, 1, 0x00, 0x20, 130, 900, -10, 0 },
+    { 0x06, 1, 1, 0x02, 0x30, 130, 1100, -10, 0 },
+    { 0x06, 4, 3, 0x08, 0x09, 330, 50, 0, 0 }, { 0x06, 4, 2, CASING_HANDGUN, 0, 330, 50, 0, 0x694 },
+    // shotgun 0x80041138: the blast along the barrel, the pump
+    { 0x07, 1, 1, 0x00, 0x1D, 150, 1300, 0, 0 }, { 0x07, 1, 1, 0x04, 0x10, 150, 1300, 0, 0 },
+    { 0x07, 1, 3, 0x0C, 0x18, 150, 1300, 0, 0 }, { 0x07, 1, 3, 0x0E, 0x10, 150, 1800, 0, 0 },
+    { 0x07, 1, 1, 0x02, 0x50, 150, 1800, 0, 0 }, { 0x07, 1, 3, 0x0E, 0x1D, 150, 2300, 0, 0 },
+    { 0x07, 0x1A, 3, 0x08, 0x0D, 184, 558, -80, 0 }, { 0x07, 0x1A, 2, CASING_SHELL, 0, 184, 558, -80, 1300 },
+    { 0x07, 0x1B, 3, 0x08, 0x0D, 184, 538, -80, 0 },
+    // custom shotgun 0x80041310
+    { 0x08, 1, 1, 0x00, 0x29, 780, 1330, 0, 0 }, { 0x08, 1, 1, 0x04, 0x16, 780, 1330, 0, 0 },
+    { 0x08, 1, 1, 0x05, 0x40, 780, 1330, 0, 0 }, { 0x08, 1, 3, 0x0C, 0x16, 780, 1330, 0, 0 },
+    { 0x08, 1, 3, 0x0E, 0x0E, 959, 1630, 0, 0 }, { 0x08, 1, 1, 0x04, 0x18, 959, 1630, 0, 0 },
+    { 0x08, 1, 3, 0x0E, 0x16, 1253, 2130, 0, 0 }, { 0x08, 1, 1, 0x03, 0x59, 1253, 2130, 0, 0 },
+    { 0x08, 1, 1, 0x04, 0x1A, 1253, 2130, 0, 0 }, { 0x08, 1, 3, 0x0E, 0x20, 1606, 2730, 0, 0 },
+    { 0x08, 5, 3, 0x08, 0x0D, 184, 558, -80, 0 }, { 0x08, 5, 2, CASING_SHELL, 0, 184, 558, -80, 1300 },
+    { 0x08, 6, 3, 0x08, 0x0D, 184, 538, -80, 0 },
+};
+
+static void shot_effects(const Weapon *w)
+{
+    int item = w->item == 0x03 || w->item == 0x04 ? 0x02 : w->item; // handguns share the VP70's
+    for (unsigned i = 0; i < sizeof(shot_fx) / sizeof(shot_fx[0]); i++) {
+        const ShotFx *f = &shot_fx[i];
+        if (f->item != item || f->key != player.key)
+            continue;
+        const int32_t local[3] = { f->x, f->y, f->z };
+        int32_t p[3];
+        leon_point(HAND_BONE, local, p);
+        if (f->id == 2)
+            throw_casing(f->sub, f->dir, p);
+        else
+            roomfx_spawn(f->id, f->sub, p[0], p[1], p[2], GUN_FX(f->size), 0);
     }
 }
 
@@ -2208,15 +2467,15 @@ static void reload_tick(void)
     const Weapon *w = weapon_in_hand();
     if (!w || PLW_FIRST + PLW_RELOAD >= leon.header->num_anims) { // no move for it: at once
         if (w)
-            sound_play(weapon_bank, w->reload_sound[1], 127, 64);
+            sound_play(weapon_bank, w->reload_sound[w->load_event], 127, 64);
         inventory_reload();
         player.state = ST_AIM;
         return;
     }
-    for (int k = 0; k < 2; k++)
-        if (player.key == w->reload_key[k]) {
+    for (int k = 0; k < 3; k++)
+        if (w->reload_key[k] && player.key == w->reload_key[k]) {
             sound_play(weapon_bank, w->reload_sound[k], 127, 64);
-            if (k == 1)
+            if (k == w->load_event)
                 inventory_reload();
         }
     const ModelAnim *a = &leon.anims[player.anim];
@@ -2247,7 +2506,7 @@ static void fire(void)
     player.key = 0;
     player.shot = 1;
     sound_play(weapon_bank, 0, 127, 64);
-    enemy_hit(player.x, player.y, player.z, player.dir, w->range, w->item, w->damage);
+    enemy_hit(player.x, player.y, player.z, player.dir, w->range, w->item, w->damage, player.aim_posture == 2);
 }
 
 // aiming / firing per DS frame; returns 1 while the weapon is up
@@ -2486,8 +2745,13 @@ static void update_player_tick(void)
         const ModelAnim *wa = &leon.anims[player.anim];
         if (player.key + 1 < wa->count) {
             player.key++;
-            if (st == ST_FIRE && inventory_equipped >= 0 && inventory[inventory_equipped].item != 0x01)
-                shot_effects();
+            const Weapon *w = st == ST_FIRE ? weapon_in_hand() : NULL;
+            if (w && w->item != 0x01) {
+                shot_effects(w);
+                // EDD flag 0x100000 on the fire move: the pump
+                if (w->pump_key[player.aim_posture] && player.key == w->pump_key[player.aim_posture])
+                    sound_play(weapon_bank, w->pump_sound, 127, 64);
+            }
         }
         else if (st == ST_AIM)
             player.aim_raised = 1;
@@ -2656,11 +2920,15 @@ int main(void)
     menu_init();
     voice_bank = sound_bank_load("nitro:/sound/core00.bin");
     enemy_pairs = asset_load("nitro:/sound/enem_pairs.bin", NULL);
-    // the opening (Leon meets Claire, the tanker crash); START skips it,
-    // holding SELECT while the game starts leaves it out (debugging)
+    // as the PS1 boots: the title movie (PL0/ZMOVIE/TITLEL.STR: the CAPCOM
+    // logo, game scenes, the G eye, the announcer's "Resident Evil 2"), then
+    // the title screen; the opening comes with NEW GAME (start_game). START
+    // skips a movie; holding SELECT while the game starts leaves the movies
+    // out (debugging).
     scanKeys();
-    if (!(keysHeld() & KEY_SELECT) && !movie_play("opn1"))
-        movie_play("opn2");
+    skip_movies = (keysHeld() & KEY_SELECT) != 0;
+    if (!skip_movies)
+        movie_play("titlel");
     movie_end();
     setBrightness(1, -16);
     start_game();
@@ -2674,6 +2942,10 @@ int main(void)
         // message; the closing press is not passed on (it would trigger the
         // same AOT again)
         int paused = 0;
+        if (!menu_open && menu_has_focus() && !menu_message_open() && (down & KEY_L)) {
+            open_files();
+            down = 0;
+        }
         if (!menu_open) {
             int had_message = menu_message_open();
             paused = menu_frame(down, player.hp) || had_message;
