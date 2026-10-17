@@ -53,6 +53,7 @@ types, the remaining movies, Claire's disc.
 | `docs/` | analysis notes of the original engine (addresses, tables, behaviour) |
 | `Makefile` | devkitPro ARM9 build with NitroFS |
 | `start.command` | builds the ROM and starts it in melonDS (macOS) |
+| `tools/setup_wsl.sh` | installs everything on Ubuntu / WSL (packages, devkitPro or its Docker image) |
 
 Main engine modules:
 
@@ -98,43 +99,23 @@ program.
    to the tabs). The first start asks for a new Linux user name and password (not your
    Windows password). If Ubuntu does not show up, `wsl -l -v` lists what is installed and
    `wsl --install -d Ubuntu` installs it.
-2. **Install the tools** in the Ubuntu terminal:
-   ```bash
-   sudo apt update
-   sudo apt install git build-essential pkg-config python3 ffmpeg libavcodec-dev libavutil-dev libswscale-dev
-   ```
-3. **Install devkitPro** (devkitARM and libnds) – see
-   <https://devkitpro.org/wiki/devkitPro_pacman#Debian_and_derivatives>:
-   ```bash
-   wget https://apt.devkitpro.org/install-devkitpro-pacman
-   chmod +x ./install-devkitpro-pacman
-   sudo ./install-devkitpro-pacman
-   sudo dkp-pacman -S nds-dev
-   ```
-   Close and reopen the Ubuntu terminal, or set the paths yourself:
-   `export DEVKITPRO=/opt/devkitpro DEVKITARM=/opt/devkitpro/devkitARM`.
-
-   **If `wget` answers `403 Forbidden`:** devkitpro.org sits behind Cloudflare, which blocks
-   some networks completely (then `dkp-pacman` cannot load its packages either). Use
-   devkitPro's official Docker image instead; it comes from Docker Hub and already has
-   devkitARM, libnds (`nds-dev`) and the NDS portlibs:
-   ```bash
-   sudo apt install -y docker.io
-   sudo service docker start
-   sudo docker pull devkitpro/devkitarm
-   ```
-   Then build with the Docker line in [3. Build and run](#3-build-and-run) instead of plain
-   `make`. Everything else (Python, FFmpeg, the asset conversion) runs in Ubuntu as described.
-4. **Get the code** into your Linux home folder (much faster than a folder under `/mnt/c`):
+2. **Get the code and install everything** in the Ubuntu terminal (it asks for your Linux
+   password):
    ```bash
    cd ~
    git clone https://github.com/eray1605/re2ds.git
    cd re2ds
+   tools/setup_wsl.sh
    ```
-5. Continue with steps 1–3 below. Windows drives are under `/mnt/c`, `/mnt/d`, …, e.g. a disc
+   The script installs the Ubuntu packages (compiler, Python, FFmpeg) and devkitPro
+   (devkitARM + libnds). If devkitpro.org is blocked for your network (`403 Forbidden` – it
+   sits behind Cloudflare), it takes devkitPro's official Docker image from Docker Hub
+   instead, and `make` then builds inside it by itself. Keep the code in your Linux home
+   folder: under `/mnt/c` everything is much slower.
+3. Continue with steps 1–3 below. Windows drives are under `/mnt/c`, `/mnt/d`, …, e.g. a disc
    image in your Windows *Downloads* folder is
    `"/mnt/c/Users/<you>/Downloads/Resident Evil 2 (Europe) (Disc 1) (Track 1).bin"`.
-6. **Play:** install melonDS for Windows (<https://melonds.kuribo64.net/>) and open
+4. **Play:** install melonDS for Windows (<https://melonds.kuribo64.net/>) and open
    `\\wsl$\Ubuntu\home\<your Linux user>\re2ds\re2ds.nds` (or copy it to a Windows folder:
    `cp re2ds.nds /mnt/c/Users/<you>/Desktop/`). For saving set up DLDI as described under
    [Controls](#controls) with a folder such as `C:\Users\<you>\Documents\re2ds-sd`, and after
@@ -166,17 +147,14 @@ the movies take the longest). Single rooms can be converted again with
 ### 3. Build and run
 
 ```bash
-export DEVKITPRO=/opt/devkitpro DEVKITARM=/opt/devkitpro/devkitARM
 make                 # → re2ds.nds
-./start.command      # builds if needed and starts melonDS
+./start.command      # macOS: builds if needed and starts melonDS
 ```
 
-Without a local devkitPro (see the `403 Forbidden` note under Windows), build in devkitPro's
-Docker image from the repository folder; `re2ds.nds` lands next to the Makefile as usual:
-
-```bash
-sudo docker run --rm -v "$PWD":/re2ds -w /re2ds -u "$(id -u):$(id -g)" devkitpro/devkitarm make
-```
+`make` finds devkitPro in `/opt/devkitpro` (or where `DEVKITARM` points). Without a local
+devkitPro it builds in devkitPro's Docker image (`devkitpro/devkitarm`, set up by
+`tools/setup_wsl.sh`); after a restart of Windows or WSL start Docker first with
+`sudo service docker start`.
 
 ## Controls
 
