@@ -29,6 +29,8 @@ typedef struct {
     // version 2: the room music table (sce_bgmtbl_set changes it)
     uint8_t bgm_saved;
     uint8_t bgm[BGM_TABLE_BYTES];
+    // version 3: the documents found (bit n = item 0x68 + n)
+    uint32_t files;
 } SaveSlot;
 
 int save_init(void);                     // mounts the SD card; 0 if there is none

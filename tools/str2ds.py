@@ -12,12 +12,13 @@ Audio: mono 16-bit PCM at RATE in one block after the frames; the player
 reads it ahead of the pictures with a second file handle.
 
 Output movie/<name>.bin:
-  u32 "RMV1", u16 width, u16 height, u16 fps, u16 frames, u32 audio rate,
+  u32 "RMV2", u16 width, u16 height, u16 fps, u16 frames, u32 audio rate,
   u32 audio offset, u32 audio samples, u32 largest lz size
   frames[]: u32 lz size, u16 palette[256], lz data (padded to 4 bytes)
-  s16 audio[samples]
+  s8 audio[samples] ("RMV1": s16)
 
-Usage: python3 -I str2ds.py MOVIE.STR.raw2352 out.bin
+Usage: python3 -I str2ds.py MOVIE.STR.raw2352 out.bin [--fps N]
+       (default 15; the in-game movies use 10 to fit the 512 MB ROM)
 """
 import os
 import struct
@@ -26,7 +27,7 @@ import sys
 import tempfile
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
-MAGIC = 0x31564D52  # "RMV1"
+MAGIC = 0x32564D52  # "RMV2": 8-bit audio (RMV1 had 16-bit)
 W, H, FPS = 256, 128, 15
 RATE = 22050        # the DS plays it at 16756991 / 760 = 22048.7 Hz
 FILTER = (f"scale={W}:{H}:flags=lanczos,split[a][b];"
@@ -47,9 +48,10 @@ def lz77_all(frames, tmp):
 
 def main():
     src, out = sys.argv[1], sys.argv[2]
+    fps = int(sys.argv[sys.argv.index("--fps") + 1]) if "--fps" in sys.argv else FPS
     video = subprocess.run(
         ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "psxstr", "-i", src, "-an",
-         "-filter_complex", FILTER, "-r", str(FPS), "-f", "rawvideo", "-pix_fmt", "pal8", "-"],
+         "-filter_complex", FILTER, "-r", str(fps), "-f", "rawvideo", "-pix_fmt", "pal8", "-"],
         check=True, capture_output=True).stdout
     audio = subprocess.run(
         ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "psxstr", "-i", src, "-vn",
@@ -74,12 +76,12 @@ def main():
     for k in range(count):
         lz = packed[k] + bytes(-len(packed[k]) % 4)
         body += struct.pack("<I", len(lz)) + struct.pack("<256H", *palettes[k]) + lz
-    head = struct.pack("<IHHHHIIII", MAGIC, W, H, FPS, count, RATE, 28 + len(body), len(samples),
+    head = struct.pack("<IHHHHIIII", MAGIC, W, H, fps, count, RATE, 28 + len(body), len(samples),
                        max(len(p) + 3 & ~3 for p in packed))
-    body = head + body + audio[:len(samples) * 2]
+    body = head + body + bytes((max(-128, min(127, (v + 128) >> 8)) & 0xFF) for v in samples)
     with open(out, "wb") as f:
         f.write(body)
-    print(f"{out}: {count} frames ({count / FPS:.1f} s), {len(samples) / RATE:.1f} s audio, "
+    print(f"{out}: {count} frames ({count / fps:.1f} s), {len(samples) / RATE:.1f} s audio, "
           f"{len(body) / 1e6:.1f} MB")
 
 

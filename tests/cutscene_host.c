@@ -59,6 +59,7 @@ void game_set_player_dir(int16_t d) { pl.dir = d * 8; }
 void game_set_box_flag(int b, int f) { printf("t%d  box %d flag %04x\n", tick, b, f & 0xFFFF); }
 void game_bgm_control(int i, int o, int t, int l, int r) { (void)i; (void)o; (void)t; (void)l; (void)r; }
 void game_bgmtbl_set(int s, int r, int m, int u) { (void)s; (void)r; (void)m; (void)u; }
+void game_movie(int n) { (void)n; }
 void game_play_sound(int bank, int sound) { printf("t%d  sound bank %d #%d\n", tick, bank, sound); }
 void game_spawn_enemy(int s, int t, int v, int voice, int x, int y, int z, int d)
 {

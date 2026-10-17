@@ -56,6 +56,7 @@ void game_set_player_dir(int16_t d) { (void)d; }
 void game_set_box_flag(int b, int f) { if (host_room.data && b >= 0 && b < host_room.header->num_boxes) ((RoomBox *)host_room.boxes)[b].flag = f; printf("  box %d flag %04x\n", b, f & 0xFFFF); }
 void game_bgm_control(int i, int o, int t, int l, int r) { (void)i; (void)o; (void)t; (void)l; (void)r; }
 void game_bgmtbl_set(int s, int r, int m, int u) { (void)s; (void)r; (void)m; (void)u; }
+void game_movie(int n) { (void)n; }
 void game_play_sound(int bank, int sound) { (void)bank; (void)sound; }
 void game_spawn_enemy(int s, int t, int v, int voice, int x, int y, int z, int d)
 {
@@ -109,8 +110,8 @@ int main(int argc, char **argv)
             int target = enemy_aim_target(p.x, 0, p.z, 0, &tx, &tz);
             if (target >= 0) {
                 int16_t dir = (int16_t)((int)(atan2f((float)-(tz - p.z), (float)(tx - p.x)) * 32768.0f / 6.2831853f) & 32767);
-                static const uint8_t dmg[3] = { 16, 15, 14 };
-                int hit = enemy_hit(p.x, 0, p.z, dir, 0, 2, dmg);
+                static const uint16_t dmg[3] = { 16, 15, 14 };
+                int hit = enemy_hit(p.x, 0, p.z, dir, 0, 2, dmg, 1);
                 printf("t%d shot -> %d\n", t, hit);
             }
         }

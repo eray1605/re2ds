@@ -711,8 +711,9 @@ static void run_thread(Thread *t)
             break;
         case OP_MOVIE_ON: // scd_op_6f: movie number (FUN_80031494). Flag 0:0x16 is
             // set while a movie plays and the scripts wait for it to clear (room
-            // 200's "do ... edwhile ck 0 0x16 1"). The movies are not converted
-            // yet: skip it as if it had ended.
+            // 200's "do ... edwhile ck 0 0x16 1"). The movie plays right here
+            // (a missing one is skipped), so it has ended when the flag clears.
+            game_movie(ins[1]);
             flag_set(0, 0x16, 0);
             break;
         case OP_SCA_ID_SET:

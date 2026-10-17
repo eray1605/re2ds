@@ -42,7 +42,10 @@ int enemy_grabbing(void);       // a zombie holds Leon
 // auto-aim: nearest living enemy Leon sees within range (0 = any); -1 none
 int enemy_aim_target(int32_t x, int32_t y, int32_t z, int range, int32_t *tx, int32_t *tz);
 // shot / stab toward dir: damage[near, mid, far]; returns the enemy hit or -1
-int enemy_hit(int32_t x, int32_t y, int32_t z, int16_t dir, int range, int weapon, const uint8_t damage[3]);
+// low: Leon aims down. Zombies on the ground (knocked down or lying) are only
+// hit then - a straight shot passes over them, as the PS1's hit check
+// compares the heights of the body parts (FUN_8003dd8c).
+int enemy_hit(int32_t x, int32_t y, int32_t z, int16_t dir, int range, int weapon, const uint16_t damage[3], int low);
 // room script access (work_set 3): member 7 = flags; 0 if unknown
 int enemy_member_get(int slot, int member, int *value);
 void enemy_member_set(int slot, int member, int value);

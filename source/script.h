@@ -75,6 +75,7 @@ void game_set_box_flag(int box, int flag);  // sca_id_set: collision box on/off
 void game_play_sound(int bank, int sound);
 void game_bgm_control(int id, int op, int type, int left, int right);
 void game_bgmtbl_set(int stage, int room, int main, int sub); // a room's music from now on
+void game_movie(int n);                     // movie_on: plays movie table entry n
 // sce_em_set: enemy / character in slot `slot` (enemy.c)
 // voice: kind of voice (byte 7), picks the enemy sound set of the room
 void game_spawn_enemy(int slot, int type, int flags, int voice, int x, int y, int z, int dir_re2);

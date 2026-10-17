@@ -11,7 +11,7 @@
 #include "save.h"
 
 #define SAVE_MAGIC 0x31565352  // "RSV1"
-#define SAVE_VERSION 2
+#define SAVE_VERSION 3
 // version 1 slots ended before bgm_saved (padded to the struct's 4-byte alignment)
 #define SLOT_V1_SIZE ((offsetof(SaveSlot, bgm_saved) + 3) & ~(size_t)3)
 
@@ -63,12 +63,15 @@ int save_read(SaveSlot slots[SAVE_SLOTS])
         return 0;
     SaveHeader h;
     int ok = fread(&h, sizeof(h), 1, f) == 1 && h.magic == SAVE_MAGIC && h.slots == SAVE_SLOTS;
-    if (ok && h.version == SAVE_VERSION && h.slot_size == sizeof(SaveSlot)) {
-        ok = fread(slots, sizeof(SaveSlot), SAVE_SLOTS, f) == SAVE_SLOTS;
-    } else if (ok && h.version == 1 && h.slot_size == SLOT_V1_SIZE) {
+    // Every version appends fields: an older slot is read into the start of
+    // the new one, the rest stays 0 (version 1: no music table, version 2:
+    // no documents).
+    if (ok && h.version >= 1 && h.version <= SAVE_VERSION && h.slot_size >= SLOT_V1_SIZE &&
+        h.slot_size <= sizeof(SaveSlot)) {
         for (int i = 0; i < SAVE_SLOTS && ok; i++) {
-            ok = fread(&slots[i], SLOT_V1_SIZE, 1, f) == 1;
-            slots[i].bgm_saved = 0; // was padding: the starting music table
+            ok = fread(&slots[i], h.slot_size, 1, f) == 1;
+            if (h.version < 2)
+                slots[i].bgm_saved = 0; // was padding: the starting music table
         }
     } else {
         ok = 0;
