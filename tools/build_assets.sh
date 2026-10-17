@@ -13,9 +13,16 @@ ROOMS="$*"
 rm -rf build/ds
 mkdir -p build/bg build/room build/leon build/mask build/ds/bg build/ds/room build/ds/model build/ds/mask build/ds/sound build/ds/door
 
-[ -x tools/bss2ppm ] || clang -O2 -o tools/bss2ppm tools/bss2ppm.c -I/opt/homebrew/include \
-    -L/opt/homebrew/lib -lavcodec -lavutil -lswscale
-[ -x tools/lz77 ] || clang -O2 -o tools/lz77 tools/lz77.c
+# the two C tools: FFmpeg's libraries through pkg-config (Linux, WSL, Homebrew),
+# else Homebrew's default paths
+CC="${CC:-cc}"
+if pkg-config --exists libavcodec libavutil libswscale 2>/dev/null; then
+    AV="$(pkg-config --cflags --libs libavcodec libavutil libswscale)"
+else
+    AV="-I/opt/homebrew/include -L/opt/homebrew/lib -lavcodec -lavutil -lswscale"
+fi
+[ -x tools/bss2ppm ] || $CC -O2 -o tools/bss2ppm tools/bss2ppm.c $AV
+[ -x tools/lz77 ] || $CC -O2 -o tools/lz77 tools/lz77.c
 
 python3 -I tools/pld2json.py "$DISC/PL0/PLD/PL00.PLD" build/leon/leon --plw "$DISC/PL0/PLD/PL00W00.PLW"
 python3 -I tools/model2ds.py build/leon/leon.json "$DISC/PL0/PLD/PL00.PLD" build/ds/model/leon
@@ -30,7 +37,7 @@ for f in "$DISC"/COMMON/DOOR/DOOR*.DO2; do
     python3 -I tools/do2ds.py "$f" "build/ds/door/$n" > /dev/null
 done
 
-JOBS=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
+JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 echo $ROOMS | tr ' ' '\n' | xargs -P "$JOBS" -I{} tools/convert_room.sh "$DISC" {}
 
 # room/index.bin: u16 count, then (u8 stage, u8 room) per converted room

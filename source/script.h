@@ -31,6 +31,8 @@ enum {
     SCE_NORMAL = 3,
     SCE_MESSAGE = 4,
     SCE_EVENT = 5,
+    SCE_SAVE = 9,              // typewriter
+    SCE_ITEMBOX = 10,
 };
 
 // Script variables the engine keeps up to date
@@ -72,6 +74,7 @@ void game_set_box_flag(int box, int flag);  // sca_id_set: collision box on/off
 // (FUN_80057364: tables 0x800d36c0[bank])
 void game_play_sound(int bank, int sound);
 void game_bgm_control(int id, int op, int type, int left, int right);
+void game_bgmtbl_set(int stage, int room, int main, int sub); // a room's music from now on
 // sce_em_set: enemy / character in slot `slot` (enemy.c)
 // voice: kind of voice (byte 7), picks the enemy sound set of the room
 void game_spawn_enemy(int slot, int type, int flags, int voice, int x, int y, int z, int dir_re2);
@@ -122,6 +125,12 @@ extern int inventory_equipped;      // slot of the weapon in hand, -1 = none
 int inventory_has(int item);
 int inventory_add(int item, int amount); // 0 if there is no room
 void inventory_reset(void);
+
+// What a save game keeps of the scripts: every flag array and variable.
+#define SCRIPT_STATE_SIZE (NUM_FLAG_ARRAYS * 32 + NUM_VARS * 2)
+void script_state_get(uint8_t *out);
+void script_state_set(const uint8_t *in);
+void script_state_reset(void);      // a new game
 
 // debug counters
 extern int script_threads_running;

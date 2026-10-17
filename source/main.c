@@ -21,6 +21,7 @@
 #include "enemy.h"
 #include "movie.h"
 #include "roomfx.h"
+#include "save.h"
 #include "plc.h"
 #include "effect.h"
 #include "music.h"
@@ -136,6 +137,9 @@ static uint32_t pending_keys;       // keys pressed since the last game tick
 static int game_tick_acc;           // accumulates GAME_HZ per DS frame
 static const char *message_text;    // open message, NULL = none
 static uint8_t lock_open[128];      // door locks opened (key id & 0x7F)
+static SaveSlot saves[SAVE_SLOTS];  // re2ds.sav as last read
+static uint16_t save_count;         // saves of this game so far
+static int last_slot;               // the slot saved to or loaded from
 
 static struct {
     int32_t x, y, z;
@@ -874,7 +878,7 @@ static void die_picture_level(int level)
     }
 }
 
-static void new_game(void);
+static void start_game(void);
 
 // one game tick of the death sequence
 static void die_tick(void)
@@ -957,7 +961,7 @@ static void die_tick(void)
             setBrightness(1, -16);
             die.step = DIE_OFF;
             bgShow(bg_id);
-            new_game();
+            start_game();
         }
         break;
     }
@@ -1047,8 +1051,23 @@ static int is_slope(const RoomBox *b)
 }
 
 // How far a circle of PLAYER_RADIUS at (x, z) reaches into box b (0 = free).
+// Shapes as the PS1 tests them (OpenBiohazard2 world/collision.go): 6 = a
+// circle of diameter w, 7 / 8 = ellipses filling the box (long axis x / z;
+// e.g. the low wall in front of the stairs of room 103, which as a rectangle
+// covered the top step). Triangles are still tested as their box.
 static int32_t penetration(const RoomBox *b, int32_t x, int32_t z)
 {
+    if (b->shape == 6 || b->shape == 7 || b->shape == 8) {
+        float ra = (b->shape == 6 ? b->w : b->w) * 0.5f, rb = (b->shape == 6 ? b->w : b->d) * 0.5f;
+        float dx = x - (b->x + ra), dz = z - (b->z + rb);
+        ra += PLAYER_RADIUS;
+        rb += PLAYER_RADIUS;
+        float q = dx * dx / (ra * ra) + dz * dz / (rb * rb);
+        if (q >= 1.0f)
+            return 0;
+        int32_t depth = (int32_t)((1.0f - sqrtf(q)) * (ra < rb ? ra : rb));
+        return depth > 0 ? depth : 1;
+    }
     int32_t in_x = x - (b->x - PLAYER_RADIUS), out_x = b->x + b->w + PLAYER_RADIUS - x;
     int32_t in_z = z - (b->z - PLAYER_RADIUS), out_z = b->z + b->d + PLAYER_RADIUS - z;
     if (in_x <= 0 || out_x <= 0 || in_z <= 0 || out_z <= 0)
@@ -1063,18 +1082,24 @@ static int32_t penetration(const RoomBox *b, int32_t x, int32_t z)
 
 // A step is blocked only if it pushes Leon deeper into an obstacle, so he
 // can always walk out of one he starts in (door exits lie close to walls).
-static int blocked(int32_t from_x, int32_t from_z, int32_t x, int32_t z)
+// mask: BOX_PLAYER for Leon, BOX_ENEMY for the enemies.
+static int blocked_for(uint16_t mask, int32_t from_x, int32_t from_z, int32_t x, int32_t z)
 {
     uint32_t floor_bit = 1u << player_floor();
     for (int i = 0; i < room.header->num_boxes; i++) {
         const RoomBox *b = &room.boxes[i];
-        if (!(b->floors & floor_bit) || is_slope(b) || !(b->flag & BOX_PLAYER))
+        if (!(b->floors & floor_bit) || is_slope(b) || !(b->flag & mask))
             continue;
         int32_t depth = penetration(b, x, z);
         if (depth > 0 && depth >= penetration(b, from_x, from_z))
             return 1;
     }
     return 0;
+}
+
+static int blocked(int32_t from_x, int32_t from_z, int32_t x, int32_t z)
+{
+    return blocked_for(BOX_PLAYER, from_x, from_z, x, z);
 }
 
 // Height on slopes and stairs (OpenBiohazard2 game/player.go): the box rises
@@ -1365,6 +1390,11 @@ void game_bgm_control(int id, int op, int type, int left, int right)
     music_control(id, op, type, left, right);
 }
 
+void game_bgmtbl_set(int stage, int room, int main, int sub)
+{
+    music_table_set(stage, room, main, sub);
+}
+
 // status screen sounds (menu.c): CORE00, as the PS1's bank 4
 void game_menu_sound(int sound)
 {
@@ -1512,7 +1542,7 @@ int game_blocked(int32_t from_x, int32_t from_z, int32_t x, int32_t z, int32_t y
 {
     int32_t saved = player.y;
     player.y = y; // player_floor() reads it
-    int b = blocked(from_x, from_z, x, z);
+    int b = blocked_for(BOX_ENEMY, from_x, from_z, x, z);
     player.y = saved;
     return b;
 }
@@ -1527,6 +1557,108 @@ void game_set_box_flag(int box, int flag)
 {
     if (box >= 0 && box < room.header->num_boxes)
         ((RoomBox *)room.boxes)[box].flag = flag; // room data lives in RAM
+}
+
+// NitroFS (the game data inside the ROM). calico's nitroFSInit reads the file
+// argv[0] names (flashcart menus pass it) or, without argv, the cartridge. With
+// a Slot-1 DLDI driver the ARM7 owns the card bus, so the ARM9 cannot read the
+// cartridge: melonDS with DLDI passes no argv and fails both ways. Then look for
+// the ROM on the SD card itself (start.command copies it there for melonDS).
+static NitroRom sd_rom;
+static int nitro_step; // how far nitro_init got, for the error screen
+
+// Reading the ROM file: FAT seeks forward from the current cluster but walks
+// the cluster chain from the start to go back, and the movie (picture and
+// sound) or the music and a room read from far apart places in turn. So keep
+// a few handles and use the one already just before the offset: each stream
+// then reads forward through its own handle.
+#define SD_HANDLES 3
+#define SD_BUFFER 16384
+static struct {
+    FILE *f;
+    u32 pos, used;
+} sd_files[SD_HANDLES];
+static const char *sd_rom_path;
+static u32 sd_clock;
+
+static bool sd_rom_read(void *user, u32 offset, void *buf, u32 size)
+{
+    (void)user;
+    int pick = -1;
+    for (int i = 0; i < SD_HANDLES; i++) // the closest one at or before offset
+        if (sd_files[i].f && sd_files[i].pos <= offset && (pick < 0 || sd_files[i].pos > sd_files[pick].pos))
+            pick = i;
+    if (pick < 0) { // none: an unused or the least recently used one
+        pick = 0;
+        for (int i = 1; i < SD_HANDLES; i++)
+            if (!sd_files[i].f || (sd_files[pick].f && sd_files[i].used < sd_files[pick].used))
+                pick = i;
+        if (!sd_files[pick].f) {
+            sd_files[pick].f = fopen(sd_rom_path, "rb");
+            if (!sd_files[pick].f)
+                return false;
+            setvbuf(sd_files[pick].f, NULL, _IOFBF, SD_BUFFER);
+            sd_files[pick].pos = 0;
+        }
+    }
+    FILE *f = sd_files[pick].f;
+    if (sd_files[pick].pos != offset && fseek(f, offset, SEEK_SET) != 0)
+        return false;
+    size_t n = fread(buf, 1, size, f);
+    sd_files[pick].pos = offset + n;
+    sd_files[pick].used = ++sd_clock;
+    return n == size;
+}
+
+static void sd_rom_close(void *user)
+{
+    (void)user;
+    for (int i = 0; i < SD_HANDLES; i++)
+        if (sd_files[i].f) {
+            fclose(sd_files[i].f);
+            sd_files[i].f = NULL;
+        }
+}
+
+static const NitroRomIface sd_rom_iface = { sd_rom_read, sd_rom_close };
+
+static bool nitro_init(void)
+{
+    static const char *const paths[] = { "fat:/re2ds.nds", "sd:/re2ds.nds" };
+    nitro_step = 1;
+    if (nitroFSInit(NULL)) // also mounts the SD card (fatInitDefault)
+        return true;
+    for (unsigned i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+        FILE *f = fopen(paths[i], "rb");
+        if (!f)
+            continue;
+        // only this very build: another one's files lie elsewhere in the ROM
+        static uint8_t header[0x160];
+        if (fread(header, 1, sizeof(header), f) != sizeof(header) ||
+            memcmp(header, g_envAppNdsHeader, sizeof(header)) != 0) {
+            fclose(f);
+            nitro_step = 4;
+            continue;
+        }
+        setvbuf(f, NULL, _IOFBF, SD_BUFFER);
+        sd_files[0].f = f;
+        sd_files[0].pos = sizeof(header);
+        sd_rom_path = paths[i];
+        nitro_step = 2;
+        NitroRomParams params = {
+            .fat_offset = g_envAppNdsHeader->fat_rom_offset,
+            .fat_sz = g_envAppNdsHeader->fat_size,
+            .fnt_offset = g_envAppNdsHeader->fnt_rom_offset,
+            .fnt_sz = g_envAppNdsHeader->fnt_size,
+            .img_offset = 0,
+        };
+        if (nitroromOpen(&sd_rom, &params, &sd_rom_iface, NULL)) {
+            nitro_step = 3;
+            return nitroFSMount(&sd_rom);
+        }
+        sd_rom_close(NULL);
+    }
+    return false;
 }
 
 // The init script may test the arrival camera (VAR_CUT), e.g. room 107.
@@ -1553,6 +1685,10 @@ static void enter_room(int stage, int id, int arrival_cam)
 static void new_game(void)
 {
     memset(&die, 0, sizeof(die));
+    script_state_reset();
+    music_table_reset();
+    memset(lock_open, 0, sizeof(lock_open));
+    save_count = 0;
     player.state = ST_IDLE;
     player.hp = PLAYER_HP;
     player.saved_once = 0;
@@ -1569,6 +1705,148 @@ static void new_game(void)
     objects_ready = 1;
     upload_objects();
     fade(-1);
+}
+
+// ---------------------------------------------------------------- saving
+// A frame while a choice is open on the lower screen
+static void choice_frame(void)
+{
+    if (room.data)
+        render_frame();
+    swiWaitForVBlank();
+    music_frame();
+    voice_frame();
+}
+
+static int any_save(void)
+{
+    if (!save_read(saves))
+        return 0;
+    for (int i = 0; i < SAVE_SLOTS; i++)
+        if (saves[i].used)
+            return 1;
+    return 0;
+}
+
+// the lines of the slot list; empty slots only when saving
+static int pick_slot(const char *title, int saving)
+{
+    static char text[SAVE_SLOTS][40];
+    const char *lines[SAVE_SLOTS];
+    for (int i = 0; i < SAVE_SLOTS; i++) {
+        const SaveSlot *s = &saves[i];
+        if (s->used)
+            snprintf(text[i], sizeof(text[i]), "%2d LEON  ROOM %d%02X  SAVE %u", i + 1, s->stage, s->room,
+                     (unsigned)s->saves); // at most 28 characters
+        else
+            snprintf(text[i], sizeof(text[i]), "%2d --- NO DATA ---", i + 1);
+        lines[i] = text[i];
+    }
+    for (;;) {
+        int n = menu_choose(title, lines, SAVE_SLOTS, last_slot, 1, choice_frame);
+        if (n < 0 || saving || saves[n].used)
+            return n;
+    }
+}
+
+// a typewriter (AOT type 9): uses up an ink ribbon to save
+#define ITEM_INK_RIBBON 0x1E
+static void use_typewriter(void)
+{
+    int ribbon = -1;
+    for (int i = 0; i < INV_SLOTS; i++)
+        if (inventory[i].item == ITEM_INK_RIBBON && inventory[i].count)
+            ribbon = i;
+    int debug = ribbon < 0 && (keysHeld() & KEY_L); // debug: L + A saves without a ribbon
+    if (ribbon < 0 && !debug) {
+        game_show_message("It's an old typewriter. If I had an Ink Ribbon, I could save my progress...");
+        return;
+    }
+    static const char *const yes_no[] = { "YES", "NO" };
+    if (menu_choose("It's an old typewriter. You can save your progress with this. Will you use the "
+                    "Ink Ribbon?", yes_no, 2, 0, 1, choice_frame) != 0)
+        return;
+    if (!save_available()) {
+        game_show_message("There is no SD card: the game cannot be saved. (melonDS: enable DLDI in the emulator settings.)");
+        return;
+    }
+    save_read(saves);
+    int n = pick_slot("Save to which file?", 1);
+    if (n < 0)
+        return;
+    SaveSlot *s = &saves[n];
+    memset(s, 0, sizeof(*s));
+    s->used = 1;
+    s->stage = cur_stage;
+    s->room = cur_room;
+    s->cam = cur_cam;
+    s->saves = ++save_count;
+    s->hp = player.hp;
+    s->x = player.x;
+    s->y = player.y;
+    s->z = player.z;
+    s->dir = player.dir;
+    s->equipped = inventory_equipped;
+    s->saved_once = player.saved_once;
+    if (ribbon >= 0 && --inventory[ribbon].count == 0) // the ribbon used is gone before the state is kept
+        inventory[ribbon].item = 0;
+    memcpy(s->inventory, inventory, sizeof(s->inventory));
+    memcpy(s->locks, lock_open, sizeof(s->locks));
+    script_state_get(s->script);
+    s->bgm_saved = music_table_get(s->bgm, sizeof(s->bgm)) > 0;
+    last_slot = n;
+    if (!save_write(saves)) {
+        if (ribbon >= 0) { // nothing saved: the ribbon is kept
+            inventory[ribbon].item = ITEM_INK_RIBBON;
+            inventory[ribbon].count++;
+        }
+        save_count--;
+        game_show_message("The game could not be saved.");
+        return;
+    }
+    game_show_message("Your progress was saved.");
+}
+
+static void load_game(int n)
+{
+    const SaveSlot *s = &saves[n];
+    memset(&die, 0, sizeof(die));
+    script_state_set(s->script);
+    music_table_reset();
+    if (s->bgm_saved) // saves from before version 2 keep the starting table
+        music_table_put(s->bgm, sizeof(s->bgm));
+    memcpy(lock_open, s->locks, sizeof(lock_open));
+    memcpy(inventory, s->inventory, sizeof(inventory));
+    inventory_equipped = s->equipped;
+    save_count = s->saves;
+    last_slot = n;
+    player.state = ST_IDLE;
+    player.hp = s->hp;
+    player.saved_once = s->saved_once;
+    player.aim_target = -1;
+    enter_room(s->stage, s->room, -1);
+    if (!room.data)
+        fatal("the saved room is missing");
+    place_player(s->x, s->y, s->z, s->dir, s->cam);
+    objects_ready = 1;
+    upload_objects();
+    fade(-1);
+}
+
+// At the start and after Leon died: a new game, or one from re2ds.sav
+static void start_game(void)
+{
+    static const char *const choices[] = { "NEW GAME", "LOAD GAME" };
+    while (any_save()) {
+        if (menu_choose("RESIDENT EVIL 2", choices, 2, 1, 0, choice_frame) == 0)
+            break;
+        int n = pick_slot("Load which file?", 0);
+        if (n >= 0) {
+            load_game(n);
+            return;
+        }
+    }
+    new_game();
 }
 
 static void warp_to(int index)
@@ -1673,6 +1951,9 @@ static void trigger(Aot *a)
     case SCE_EVENT:
         if (a->data[2] == 0x18) // gosub
             script_start_event(a->data[3]);
+        break;
+    case SCE_SAVE:
+        use_typewriter();
         break;
     default:
         break;
@@ -1854,20 +2135,26 @@ static void leon_point(int bone, const int32_t local[3], int32_t out[3])
 // flash (CORE00 effect 1, 0x01000e00) and fire (effect 3 sub 2 with the next
 // palette, 0x030a0e00) at the muzzle, on key 3 smoke (0x03080900) and the
 // casing (0x02000700) at the ejection port
+// The gun effects at a quarter of the room effects' size (size 16 = 1024/4096):
+// the flash about 12 cm, the smoke a small puff instead of a cloud
+#define GUN_FX_SIZE 16
 static void shot_effects(void)
 {
     static const int32_t muzzle[3] = { 138, 615, 8 }, port[3] = { 350, 40, -15 };
     int32_t p[3];
     if (player.key == 1) {
         leon_point(HAND_BONE, muzzle, p);
-        roomfx_spawn(1, 0x00, p[0], p[1], p[2], 0, 0);
-        roomfx_spawn(3, 0x0A, p[0], p[1], p[2], 0, 0);
+        roomfx_spawn(1, 0x00, p[0], p[1], p[2], GUN_FX_SIZE, 0);
+        roomfx_spawn(3, 0x0A, p[0], p[1], p[2], GUN_FX_SIZE, 0);
     } else if (player.key == 3) {
         leon_point(HAND_BONE, port, p);
-        roomfx_spawn(3, 0x08, p[0], p[1], p[2], 0, 0);
+        roomfx_spawn(3, 0x08, p[0], p[1], p[2], GUN_FX_SIZE, 0);
+        // the handgun casing: CORE00 effect 2, frames 0-7 (it tumbles; frame 8
+        // goes back to 0), palette row 0 (brass). Its body is 4 x 10 of the
+        // 16-texel frame; drawn at a third of the other effects' size.
         int16_t dir = player.dir + 1300 * 8;
-        effect_spawn(2, 0, p[0], p[1], p[2], (40 * cosLerp(dir)) >> 12, -40, -((40 * sinLerp(dir)) >> 12), 1,
-                     player.y, 230, 180, 80);
+        roomfx_throw(2, 0, 0, p[0], p[1], p[2], (30 * cosLerp(dir)) >> 12, -45, -((30 * sinLerp(dir)) >> 12),
+                     player.y, 4096 * 3 / 10);
     }
 }
 
@@ -2204,7 +2491,7 @@ static void update_player_tick(void)
 static const char *aot_name(int type)
 {
     switch (type) {
-    case SCE_DOOR: return "Tuer";
+    case SCE_DOOR: return "Door";
     case SCE_ITEM: return "Item";
     case SCE_MESSAGE: return "Text";
     case SCE_EVENT: return "Event";
@@ -2236,7 +2523,7 @@ static void print_status(void)
         printf("A: runterspringen          \n");
     else
         printf("                          \n");
-    printf("\nD-pad walk/turn, B run\nA use, L+A open any lock\nSELECT room menu\n");
+    printf("\nD-pad walk/turn, B run\nA use, L+A open any lock\nL+A at a typewriter: save\nSELECT room menu\n");
 }
 
 static void update_menu(uint32_t down)
@@ -2298,8 +2585,15 @@ int main(void)
     vramSetBankH(VRAM_H_SUB_BG);
     consoleInit(NULL, 0, BgType_Text4bpp, BgSize_T_256x256, 4, 0, false, true);
 
-    if (!nitroFSInit(NULL))
-        fatal("NitroFS init failed");
+    if (!nitro_init()) {
+        consoleDemoInit();
+        iprintf("\x1b[1;1HERROR:\nNitroFS init failed (step %d,\nboot %d)\n\n"
+                "With DLDI (melonDS) copy\nre2ds.nds to the SD card root\n(step 4: the copy there is\nanother build).\n",
+                nitro_step, g_envBootParam->boot_src);
+        while (1)
+            swiWaitForVBlank();
+    }
+    save_init(); // re2ds.sav on the SD card; without one the game just cannot save
     sound_init();
 
     bg_id = bgInit(3, BgType_Bmp8, BgSize_B8_256x256, 0, 0);
@@ -2334,7 +2628,7 @@ int main(void)
         movie_play("opn2");
     movie_end();
     setBrightness(1, -16);
-    new_game();
+    start_game();
 
     // pmMainLoop() services calico's power management (lid, reset, ARM7 messages);
     // the devkitPro examples call it every frame before reading input.

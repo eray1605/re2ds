@@ -11,5 +11,9 @@ int music_playing(void);
 // Room music like the PS1 (FUN_80055ed8): the BGM table entry of the room
 // picks MAINxx; the same music keeps playing across rooms.
 void music_room(int stage, int room);
-void music_control(int id, int op, int type, int left, int right); // sce_bgm_control
+void music_table_set(int stage, int room, int main, int sub); // sce_bgmtbl_set
+void music_table_reset(void);                    // new game: the starting table
+int music_table_get(uint8_t *out, int max);      // the room pairs for a save; bytes
+void music_table_put(const uint8_t *in, int max);   // from a save
+void music_control(int id, int op, int type, int volume, int pan); // sce_bgm_control
 void music_duck(int on);      // quieter while a voice clip plays

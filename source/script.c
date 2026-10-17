@@ -45,7 +45,7 @@ enum {
     OP_AOT_RESET = 70, OP_AOT_ON = 71, OP_CUT_REPLACE = 75, OP_ITEM_AOT_SET = 78,
     OP_SCE_TRG_CK = 80, OP_SCE_BGM_CONTROL = 81, OP_KEEP_ITEM_CK = 94, OP_AOT_SET_4P = 103, OP_DOOR_AOT_SET_4P = 104,
     OP_ITEM_AOT_SET_4P = 105, OP_PLC_MOTION = 63, OP_PLC_DEST = 64, OP_PLC_RET = 66, OP_PLC_ROT = 88,
-    OP_PLC_CNT = 91, OP_PLC_STOP = 102, OP_XA_ON = 89,
+    OP_PLC_CNT = 91, OP_PLC_STOP = 102, OP_XA_ON = 89, OP_MOVIE_ON = 111, OP_SCE_BGMTBL_SET = 87,
 };
 
 enum { B_IF, B_FOR, B_WHILE, B_DO, B_DOCOND, B_SWITCH };
@@ -149,6 +149,25 @@ int inventory_add(int item, int amount)
             return 1;
         }
     return 0; // full
+}
+
+// ------------------------------------------------------------ save games
+void script_state_get(uint8_t *out)
+{
+    memcpy(out, flags, sizeof(flags));
+    memcpy(out + sizeof(flags), vars, sizeof(vars));
+}
+
+void script_state_set(const uint8_t *in)
+{
+    memcpy(flags, in, sizeof(flags));
+    memcpy(vars, in + sizeof(flags), sizeof(vars));
+}
+
+void script_state_reset(void)
+{
+    memset(flags, 0, sizeof(flags));
+    memset(vars, 0, sizeof(vars));
 }
 
 void inventory_reset(void)
@@ -686,6 +705,15 @@ static void run_thread(Thread *t)
             break;
         case OP_SCE_BGM_CONTROL: // id, operation, type, left, right
             game_bgm_control(ins[1], ins[2], ins[3], ins[4], ins[5]);
+            break;
+        case OP_SCE_BGMTBL_SET: // scd_op_57: 0, room, stage, u16 main|sub, u16 OR'd in
+            game_bgmtbl_set(ins[3], ins[2], ins[4] | ins[6], ins[5] | ins[7]);
+            break;
+        case OP_MOVIE_ON: // scd_op_6f: movie number (FUN_80031494). Flag 0:0x16 is
+            // set while a movie plays and the scripts wait for it to clear (room
+            // 200's "do ... edwhile ck 0 0x16 1"). The movies are not converted
+            // yet: skip it as if it had ended.
+            flag_set(0, 0x16, 0);
             break;
         case OP_SCA_ID_SET:
             game_set_box_flag(ins[1], ru16(ins + 2));

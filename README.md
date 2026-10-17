@@ -36,8 +36,10 @@ Playable from the opening movie through Leon's disc 1 rooms:
 - **Effects:** blood, muzzle fire, smoke, fires, glass shards (the PS1's ESP sprites with
   their real palettes).
 - **Death:** the PS1's death sequence (white flash, circling camera, YOU DIED).
+- **Saving:** at the typewriters with an ink ribbon, 12 slots in `re2ds.sav` on the SD card;
+  NEW GAME / LOAD GAME at the start and after dying.
 
-Still missing (see [ROADMAP.md](ROADMAP.md)): saving, the map and files, the other enemy
+Still missing (see [ROADMAP.md](ROADMAP.md)): the item box, the map and files, the other enemy
 types, the remaining movies, Claire's disc.
 
 ## Repository layout
@@ -65,6 +67,7 @@ Main engine modules:
 | `effect.c`, `roomfx.c` | blood and casings; ESP effects of the core and the rooms |
 | `sound.c`, `music.c` | sound banks, voices, the music sequencer |
 | `movie.c` | movie player (FMV) |
+| `save.c` | save games on the SD card |
 | `assets.c` | file loading from NitroFS |
 
 ## Building
@@ -78,8 +81,49 @@ Main engine modules:
 - **clang** or gcc for the two small C tools
 - **melonDS** to play (or a flashcart)
 
-`tools/build_assets.sh` and `start.command` assume macOS with Homebrew paths; on Linux adjust
-the include / library paths of the `bss2ppm` build line and the melonDS call.
+`tools/build_assets.sh` finds FFmpeg's libraries through `pkg-config` (or Homebrew's default
+paths) and runs on macOS, Linux and Windows (WSL). `start.command` (build and start melonDS)
+is macOS only. On Windows follow [Building on Windows](#building-on-windows-wsl) first, then
+steps 1–3 below in the Ubuntu terminal.
+
+### Building on Windows (WSL)
+
+The tools are shell scripts and Python, so on Windows they run in **WSL** (Windows Subsystem
+for Linux, Ubuntu); devkitPro supports Linux as well. melonDS itself runs as a normal Windows
+program.
+
+1. **Install WSL with Ubuntu.** In PowerShell as administrator run `wsl --install`, restart,
+   then open *Ubuntu* from the Start menu and pick a user name and password.
+2. **Install the tools** in the Ubuntu terminal:
+   ```bash
+   sudo apt update
+   sudo apt install git build-essential pkg-config python3 ffmpeg libavcodec-dev libavutil-dev libswscale-dev
+   ```
+3. **Install devkitPro** (devkitARM and libnds) – see
+   <https://devkitpro.org/wiki/devkitPro_pacman#Debian_and_derivatives>:
+   ```bash
+   wget https://apt.devkitpro.org/install-devkitpro-pacman
+   chmod +x ./install-devkitpro-pacman
+   sudo ./install-devkitpro-pacman
+   sudo dkp-pacman -S nds-dev
+   ```
+   Close and reopen the Ubuntu terminal, or set the paths yourself:
+   `export DEVKITPRO=/opt/devkitpro DEVKITARM=/opt/devkitpro/devkitARM`.
+4. **Get the code** into your Linux home folder (much faster than a folder under `/mnt/c`):
+   ```bash
+   cd ~
+   git clone https://github.com/eray1605/re2ds.git
+   cd re2ds
+   ```
+5. Continue with steps 1–3 below. Windows drives are under `/mnt/c`, `/mnt/d`, …, e.g. a disc
+   image in your Windows *Downloads* folder is
+   `"/mnt/c/Users/<you>/Downloads/Resident Evil 2 (Europe) (Disc 1) (Track 1).bin"`.
+6. **Play:** install melonDS for Windows (<https://melonds.kuribo64.net/>) and open
+   `\\wsl$\Ubuntu\home\<your Linux user>\re2ds\re2ds.nds` (or copy it to a Windows folder:
+   `cp re2ds.nds /mnt/c/Users/<you>/Desktop/`). For saving set up DLDI as described under
+   [Controls](#controls) with a folder such as `C:\Users\<you>\Documents\re2ds-sd`, and after
+   every build copy the ROM there as well, since the game reads its data from it:
+   `cp re2ds.nds /mnt/c/Users/<you>/Documents/re2ds-sd/` (melonDS must be closed).
 
 ### 1. Extract your disc
 
@@ -129,9 +173,19 @@ Debug:
 | SELECT | room menu: warp to any room (L/R ±10, A warp) |
 | hold SELECT while the game boots | leaves out the opening movie |
 | L + A at a door | opens any lock |
+| L + A at a typewriter | saves without an ink ribbon |
 
 In melonDS's default keyboard mapping START is Enter and SELECT is Backspace (check
 *Config → Input and hotkeys*).
+
+Saving needs an SD card: on a flashcart or a DSi it is the card the ROM runs from
+(`fat:/re2ds.sav` or `sd:/re2ds.sav`). In melonDS enable *Config → Emu settings → DLDI →
+Enable DLDI (for homebrew)* with an SD card image of **1 GB** and *Sync SD to folder* with the
+folder `~/Documents/re2ds-sd`
+(or set `RE2DS_SD` to another one). With DLDI on, the DS cannot read the game data from the
+cartridge any more and melonDS passes no ROM path, so the game reads `re2ds.nds` from the SD
+card root: `start.command` copies it into that folder whenever the ROM changed. melonDS keeps
+the ROM there padded to 512 MB, so a 512 MB image leaves no room for `re2ds.sav`.
 
 ## Tests
 

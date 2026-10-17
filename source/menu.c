@@ -81,14 +81,11 @@ static void text(int x, int y, const char *s, int c)
     dirty = 1;
 }
 
-// word-wrapped text in the box at the bottom (5 lines of 30 characters)
-static void text_box(const char *s, int c)
+// word-wrapped text from (x, y), lines of up to 30 characters, until y_end
+static void text_wrapped(int x, int y, int y_end, const char *s, int c)
 {
-    fill(4, 150, 248, 40, C_BLACK);
-    frame(4, 150, 248, 40, C_GREY);
     char line[31];
-    int y = 153;
-    while (*s && y < 188) {
+    while (*s && y + 8 <= y_end) {
         int len = 0, last_space = -1;
         while (s[len] && s[len] != '\n' && len < 30) {
             if (s[len] == ' ')
@@ -99,12 +96,20 @@ static void text_box(const char *s, int c)
             len = last_space;
         memcpy(line, s, len);
         line[len] = 0;
-        text(8, y, line, c);
+        text(x, y, line, c);
         s += len;
         while (*s == ' ' || *s == '\n')
             s++;
         y += 9;
     }
+}
+
+// word-wrapped text in the box at the bottom (5 lines of 30 characters)
+static void text_box(const char *s, int c)
+{
+    fill(4, 150, 248, 40, C_BLACK);
+    frame(4, 150, 248, 40, C_GREY);
+    text_wrapped(8, 153, 188, s, c);
 }
 
 static void icon(int x, int y, int item)
@@ -393,6 +398,69 @@ void menu_message(const char *t)
 }
 
 int menu_message_open(void) { return message != NULL; }
+
+// ---------------------------------------------------------------- choices
+#define CHOICE_Y 56                    // first line
+#define CHOICE_H 11                    // line height
+
+static void draw_choice(const char *title, const char *const *lines, int count, int sel)
+{
+    memset(fb, col(C_BLACK), sizeof(fb));
+    frame(4, 4, 248, 46, C_GREY);
+    text_wrapped(8, 8, 48, title, C_WHITE);
+    for (int i = 0; i < count; i++) {
+        int y = CHOICE_Y + i * CHOICE_H;
+        if (i == sel)
+            frame(4, y - 2, 248, CHOICE_H, C_YELLOW);
+        text(8, y, lines[i], i == sel ? C_WHITE : C_LIGHT);
+    }
+    dirty = 1;
+}
+
+int menu_choose(const char *title, const char *const *lines, int count, int start, int can_cancel,
+                void (*frame_fn)(void))
+{
+    int sel = start < 0 || start >= count ? 0 : start, answer = -2;
+    pause_show(0);
+    draw_choice(title, lines, count, sel);
+    while (answer == -2) {
+        scanKeys();
+        uint32_t down = keysDown();
+        int moved = 0;
+        if (down & KEY_UP)
+            sel = (sel + count - 1) % count, moved = 1;
+        if (down & KEY_DOWN)
+            sel = (sel + 1) % count, moved = 1;
+        if (down & KEY_TOUCH) {
+            touchPosition t;
+            touchRead(&t);
+            int i = (t.py - CHOICE_Y + 2) / CHOICE_H;
+            if (t.py >= CHOICE_Y - 2 && i >= 0 && i < count) {
+                sel = i;
+                answer = i;
+            }
+        }
+        if (down & KEY_A)
+            answer = sel;
+        if ((down & KEY_B) && can_cancel)
+            answer = -1;
+        if (moved)
+            game_menu_sound(SND_CURSOR);
+        if (answer >= 0)
+            game_menu_sound(SND_SELECT);
+        else if (answer == -1)
+            game_menu_sound(SND_BACK);
+        draw_choice(title, lines, count, sel);
+        if (dirty && bg >= 0) {
+            DC_FlushRange(fb, sizeof(fb));
+            dmaCopy(fb, bgGetGfxPtr(bg), sizeof(fb));
+            dirty = 0;
+        }
+        frame_fn();
+    }
+    last_hp = -9999; // the status screen again
+    return answer;
+}
 
 void menu_picture(int item)
 {
