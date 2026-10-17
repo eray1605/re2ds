@@ -5,10 +5,30 @@
 #---------------------------------------------------------------------------------
 .SUFFIXES:
 
+# devkitPro's default place when DEVKITARM is not set
 ifeq ($(strip $(DEVKITARM)),)
-$(error "Please set DEVKITARM in your environment. export DEVKITARM=<path to>devkitARM")
+ifneq ($(wildcard /opt/devkitpro/devkitARM/ds_rules),)
+export DEVKITPRO := /opt/devkitpro
+export DEVKITARM := /opt/devkitpro/devkitARM
+endif
 endif
 
+ifeq ($(strip $(DEVKITARM)),)
+#---------------------------------------------------------------------------------
+# No devkitPro here: build in devkitPro's Docker image (tools/setup_wsl.sh
+# installs it when devkitpro.org is blocked). sudo only if docker needs it.
+#---------------------------------------------------------------------------------
+ifeq ($(shell command -v docker 2>/dev/null),)
+$(error "devkitPro not found: run tools/setup_wsl.sh, or set DEVKITARM=<path to>devkitARM")
+endif
+DOCKER := $(shell docker info >/dev/null 2>&1 && echo docker || echo sudo docker)
+
+.PHONY: docker-make clean
+.DEFAULT_GOAL := docker-make
+docker-make:
+	$(DOCKER) run --rm -v "$(CURDIR)":/re2ds -w /re2ds -u "$$(id -u):$$(id -g)" devkitpro/devkitarm make $(MAKECMDGOALS)
+clean: docker-make
+else
 include $(DEVKITARM)/ds_rules
 
 TARGET     := re2ds
@@ -87,3 +107,5 @@ $(OFILES_SOURCES) : $(HFILES)
 #---------------------------------------------------------------------------------
 endif
 #---------------------------------------------------------------------------------
+endif # devkitPro found
+
