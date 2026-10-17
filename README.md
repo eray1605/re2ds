@@ -36,8 +36,10 @@ Playable from the opening movie through Leon's disc 1 rooms:
 - **Effects:** blood, muzzle fire, smoke, fires, glass shards (the PS1's ESP sprites with
   their real palettes).
 - **Death:** the PS1's death sequence (white flash, circling camera, YOU DIED).
+- **Saving:** at the typewriters with an ink ribbon, 12 slots in `re2ds.sav` on the SD card;
+  NEW GAME / LOAD GAME at the start and after dying.
 
-Still missing (see [ROADMAP.md](ROADMAP.md)): saving, the map and files, the other enemy
+Still missing (see [ROADMAP.md](ROADMAP.md)): the item box, the map and files, the other enemy
 types, the remaining movies, Claire's disc.
 
 ## Repository layout
@@ -65,6 +67,7 @@ Main engine modules:
 | `effect.c`, `roomfx.c` | blood and casings; ESP effects of the core and the rooms |
 | `sound.c`, `music.c` | sound banks, voices, the music sequencer |
 | `movie.c` | movie player (FMV) |
+| `save.c` | save games on the SD card |
 | `assets.c` | file loading from NitroFS |
 
 ## Building
@@ -129,9 +132,14 @@ Debug:
 | SELECT | room menu: warp to any room (L/R ±10, A warp) |
 | hold SELECT while the game boots | leaves out the opening movie |
 | L + A at a door | opens any lock |
+| L + A at a typewriter | saves without an ink ribbon |
 
 In melonDS's default keyboard mapping START is Enter and SELECT is Backspace (check
 *Config → Input and hotkeys*).
+
+Saving needs an SD card: on a flashcart or a DSi it is the card the ROM runs from
+(`fat:/re2ds.sav` or `sd:/re2ds.sav`). In melonDS enable *Config → Emu settings → DLDI →
+Enable DLDI (for homebrew)* with an SD card image or folder.
 
 ## Tests
 

@@ -151,6 +151,25 @@ int inventory_add(int item, int amount)
     return 0; // full
 }
 
+// ------------------------------------------------------------ save games
+void script_state_get(uint8_t *out)
+{
+    memcpy(out, flags, sizeof(flags));
+    memcpy(out + sizeof(flags), vars, sizeof(vars));
+}
+
+void script_state_set(const uint8_t *in)
+{
+    memcpy(flags, in, sizeof(flags));
+    memcpy(vars, in + sizeof(flags), sizeof(vars));
+}
+
+void script_state_reset(void)
+{
+    memset(flags, 0, sizeof(flags));
+    memset(vars, 0, sizeof(vars));
+}
+
 void inventory_reset(void)
 {
     memset(inventory, 0, sizeof(inventory));

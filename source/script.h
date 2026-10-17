@@ -31,6 +31,8 @@ enum {
     SCE_NORMAL = 3,
     SCE_MESSAGE = 4,
     SCE_EVENT = 5,
+    SCE_SAVE = 9,              // typewriter
+    SCE_ITEMBOX = 10,
 };
 
 // Script variables the engine keeps up to date
@@ -122,6 +124,12 @@ extern int inventory_equipped;      // slot of the weapon in hand, -1 = none
 int inventory_has(int item);
 int inventory_add(int item, int amount); // 0 if there is no room
 void inventory_reset(void);
+
+// What a save game keeps of the scripts: every flag array and variable.
+#define SCRIPT_STATE_SIZE (NUM_FLAG_ARRAYS * 32 + NUM_VARS * 2)
+void script_state_get(uint8_t *out);
+void script_state_set(const uint8_t *in);
+void script_state_reset(void);      // a new game
 
 // debug counters
 extern int script_threads_running;

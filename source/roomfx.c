@@ -13,7 +13,9 @@
 #define MAX_INSTANCES 48        // room 101 throws 38 glass shards at once
 #define WORLD_PER_TEXEL 20        // as effect.c
 #define TOWARD_CAMERA 300
-#define TEX_BUDGET (96 * 1024)    // texture memory for the effects (enemies need theirs)
+#define TEX_BUDGET (64 * 1024)    // texture memory for the room's effects (enemies need theirs)
+// The core effects use two texture pages (CORE01.TIM halves): they share
+// them, so at most 64 KB, uploaded when first used
 
 typedef struct {
     uint8_t id, palettes, frames, sprites, subs, log2;
@@ -27,6 +29,8 @@ typedef struct { uint8_t first, flags; uint16_t scale, speed, pad; } Sub; // see
 #define SUB_MIRRORED 1
 #define SUB_REPEATS 2
 #define SUB_FALLS 4                // glass shards: thrown along the direction, fall, vanish on the floor
+#define THROWN 8                   // instance flag: roomfx_throw (casings), lies a while after landing
+#define LIE_TICKS 60
 #define GRAVITY 6                  // as effect.c
 
 typedef struct {
@@ -39,6 +43,7 @@ typedef struct {
     int tex;                      // GL name, 0 = not uploaded
     int pal[MAX_PALETTES];        // palette holders (glAssignColorTable)
     uint8_t failed;
+    int8_t owner;                 // core effect whose texture (the same page) this one uses, -1 = own
 } Effect;
 
 typedef struct {
@@ -46,6 +51,8 @@ typedef struct {
     uint8_t id;
     int32_t x, y, z;
     int32_t vx, vy, vz;           // falling sprites
+    int32_t floor;                // thrown: lands here
+    uint8_t lying;                // thrown: ticks left on the floor
     int32_t scale;                // 4096 = 1
 } Instance;
 
@@ -64,6 +71,7 @@ static int parse(uint8_t *blob, uint32_t size, Effect *out, int max)
     for (int i = 0; i < n; i++) {
         Effect *f = &out[i];
         memset(f, 0, sizeof(*f));
+        f->owner = -1;
         f->e = (const EffectEntry *)(blob + 8) + i;
         const uint8_t *p = blob + f->e->offset;
         f->palette = (const uint16_t *)p;
@@ -88,10 +96,17 @@ void roomfx_load(int stage, int room)
     if (!core_data) {
         core_data = asset_load("nitro:/effect/core_fx.bin", &size);
         num_core = parse(core_data, size, effects + MAX_EFFECTS, MAX_EFFECTS);
+        for (int i = MAX_EFFECTS; i < MAX_EFFECTS + num_core; i++) { // the same page: one texture
+            Effect *f = &effects[i];
+            for (int j = MAX_EFFECTS; j < i && f->owner < 0; j++)
+                if (effects[j].owner < 0 && effects[j].e->log2 == f->e->log2 &&
+                    !memcmp(effects[j].texels, f->texels, 128 << f->e->log2))
+                    f->owner = j;
+        }
     }
     for (int i = MAX_EFFECTS; i < MAX_EFFECTS + num_core; i++) { // textures again per room
         Effect *f = &effects[i];
-        if (f->tex)
+        if (f->tex && f->owner < 0)
             glDeleteTextures(1, &f->tex);
         for (int r = 0; r < MAX_PALETTES; r++)
             if (f->pal[r])
@@ -123,13 +138,22 @@ void roomfx_load(int stage, int room)
     }
 }
 
-// texture and palettes on first use, within the budget
+// texture and palettes on first use, the room's within the budget
 static int upload(Effect *f)
 {
     if (f->tex || f->failed)
         return f->tex != 0;
-    int bytes = 128 << f->e->log2;
-    if (tex_used + bytes > TEX_BUDGET) {
+    int bytes = 128 << f->e->log2, core = f >= effects + MAX_EFFECTS;
+    if (f->owner >= 0) { // the page another core effect has uploaded
+        Effect *o = &effects[f->owner];
+        if (!upload(o)) {
+            f->failed = 1;
+            return 0;
+        }
+        f->tex = o->tex;
+        goto palettes;
+    }
+    if (!core && tex_used + bytes > TEX_BUDGET) {
         f->failed = 1;
         return 0;
     }
@@ -142,7 +166,9 @@ static int upload(Effect *f)
         f->failed = 1;
         return 0;
     }
-    tex_used += bytes;
+    if (!core)
+        tex_used += bytes;
+palettes:;
     int rows = f->e->palettes < MAX_PALETTES ? f->e->palettes : MAX_PALETTES;
     for (int r = 0; r < rows; r++) {
         glGenTextures(1, &f->pal[r]);
@@ -204,6 +230,37 @@ void roomfx_spawn(int id, int type, int32_t x, int32_t y, int32_t z, int size, i
     }
 }
 
+void roomfx_throw(int id, int first, int row, int32_t x, int32_t y, int32_t z, int32_t vx, int32_t vy, int32_t vz,
+                  int32_t floor_y, int scale)
+{
+    Effect *f = find(id);
+    if (!f || !upload(f) || first >= f->e->frames)
+        return;
+    for (int i = 0; i < MAX_INSTANCES; i++) {
+        Instance *n = &inst[i];
+        if (n->active)
+            continue;
+        memset(n, 0, sizeof(*n));
+        n->active = 1;
+        n->id = id;
+        n->effect = f - effects;
+        n->type = row << 3;
+        n->row = row;
+        n->first = n->frame = first;
+        n->flags = THROWN;
+        n->timer = f->frames[first].time;
+        n->x = x;
+        n->y = y;
+        n->z = z;
+        n->vx = vx;
+        n->vy = vy;
+        n->vz = vz;
+        n->floor = floor_y;
+        n->scale = scale;
+        return;
+    }
+}
+
 void roomfx_on(const uint8_t *ins)
 {
     // op, ?, id, sub | row << 3, object type, object index, u16 parameter,
@@ -226,6 +283,22 @@ void roomfx_tick(void)
         if (!n->active)
             continue;
         const Effect *f = &effects[n->effect];
+        if (n->flags & THROWN) {
+            if (n->lying) { // on the floor: still, then gone
+                if (--n->lying == 0)
+                    n->active = 0;
+                continue;
+            }
+            n->x += n->vx;
+            n->y += n->vy;
+            n->z += n->vz;
+            n->vy += GRAVITY;
+            if (n->y >= n->floor) {
+                n->y = n->floor;
+                n->lying = LIE_TICKS;
+                continue;
+            }
+        }
         if (n->flags & SUB_FALLS) {
             n->x += n->vx;
             n->y += n->vy;
