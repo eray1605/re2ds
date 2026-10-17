@@ -20,6 +20,7 @@
 #include "door.h"
 #include "enemy.h"
 #include "movie.h"
+#include "roomfx.h"
 #include "plc.h"
 #include "effect.h"
 #include "music.h"
@@ -71,7 +72,7 @@ static const uint8_t rbj_move_keys[4] = { 50, 15, 20, 20 };
 #define DS_HZ 60
 
 // Turn speeds per game tick in RE2 units (4096 = 360 degrees), Fine state
-// (re2ds-notes/player-control.md). Applied per DS frame scaled to DS units.
+// (docs/player-control.md). Applied per DS frame scaled to DS units.
 #define TURN_PER_FRAME(t) ((t) * 8 * GAME_HZ / DS_HZ)
 
 #define PLAYER_RADIUS 400
@@ -165,8 +166,11 @@ static void *enemy_bank;            // the room's enemy sounds (ENEMSE set, bank
 static uint8_t *enemy_pairs;        // voice kind pairs per set (enemse2ds.py)
 // Leon's death (COMMON/BIN/DIEDEMO.BIN, loaded at 0x80190000; its states are
 // in table 0x80193560 and run once per game tick):
-//   wait     a delay by killer (table 0x8019338c: zombies 95 ticks)
-//   flash    the screen fades to white, faster and faster (0x801902fc)
+//   wait     a delay by killer (table 0x8019338c: zombies 95 ticks); the
+//            common voice clip 0 starts (xa_on 1, 0: the main loop sets
+//            0x800c77b4 bit 4 when Leon's HP drop below 0)
+//   flash    the screen fades to white, faster and faster, and stays white
+//            while that clip still plays (0x801902fc)
 //   orbit    black background; a free camera 3000 away and 1000 above Leon's
 //            hip circles him and closes in (0x80191200, parameters per
 //            killer in 0x801933ac, the zombie row used here)
@@ -417,6 +421,17 @@ void game_object_set(const uint8_t *ins)
     upload_objects(); // placed later by an event
 }
 
+void game_espr_on(const uint8_t *ins) { roomfx_on(ins); }
+void game_espr_kill(int id, int type) { roomfx_kill(id, type); }
+
+void game_floor_sound_set(int n, int on)
+{
+    if (n < room.header->num_flr) {
+        RoomFloorSound *f = (RoomFloorSound *)&room.floor_sounds[n];
+        f->floor = on ? f->floor & ~0x80 : f->floor | 0x80;
+    }
+}
+
 void game_object_hide(int model)
 {
     if (model < MAX_OBJECTS)
@@ -521,6 +536,7 @@ static int load_room(int stage, int id)
     room_zones = asset_load(path, NULL);
     enemy_set_zones(room_zones);
     load_objects(stage, id);
+    roomfx_load(stage, id);
     if (old_bank)
         sound_bank_free(old_bank);
     near_aot = NULL;
@@ -870,6 +886,7 @@ static void die_tick(void)
         die.step = DIE_WAIT;
         die.ambient = 60;
         die.light[0] = die.light[1] = die.light[2] = 195;
+        voice_play(0, 0);
     }
     die.t++;
     switch (die.step) {
@@ -884,6 +901,11 @@ static void die_tick(void)
         die.flash_v += die.flash_a;
         die.flash_a += 24;
         die.flash += die.flash_v;
+        if (die.flash >= 32767 && voice_playing()) { // hold white until the clip ends
+            die.flash = 32766;
+            die.flash_v = 1;
+            die.flash_a = 0;
+        }
         if (die.flash >= 32767) {
             die.step = DIE_ORBIT;
             die.t = 0;
@@ -967,9 +989,11 @@ static void render_frame(void)
     draw_player();
     draw_objects();
     update_occlusion();
-    enemy_draw((have_masks ? 4 * masks.header->num_quads : 0) + 4 * effect_count(),
-               (have_masks ? masks.header->num_quads : 0) + effect_count());
+    int fx = effect_count() + roomfx_count();
+    enemy_draw((have_masks ? 4 * masks.header->num_quads : 0) + 4 * fx,
+               (have_masks ? masks.header->num_quads : 0) + fx);
     effect_draw(cam->from, cam->to);
+    roomfx_draw(cam->from, cam->to);
     glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(2));
     if (die.step < DIE_ORBIT)
         draw_masks();
@@ -1193,8 +1217,7 @@ void game_set_player_dir(int16_t dir_re2) { player.dir = dir_re2 * 8; }
 
 void game_voice(int kind, int n)
 {
-    if (kind == 0)
-        voice_play(cur_stage, n); // the common table (kind 1) is not converted yet
+    voice_play(kind == 0 ? cur_stage : 0, n); // kind 1: the common table (VOICE00)
 }
 
 int game_voice_playing(void) { return voice_playing(); }
@@ -1704,7 +1727,7 @@ static void move_forward(int32_t dist)
 
 // every DS frame: state, animation choice and turning
 // ---------------------------------------------------------------- weapons
-// pl_move_05_aim (re2ds-notes/player-control.md 5.): R raises the weapon in
+// pl_move_05_aim (docs/player-control.md 5.): R raises the weapon in
 // hand (PLW move 9), the auto-aim turns Leon to the nearest enemy he sees
 // (rate 0xd8, FUN_8003ed74); up / down aim high / low; A fires (moves 10 /
 // 12 / 14, held 11 / 13 / 15). Damage near / mid / far from table 0x8009c470.
@@ -1827,16 +1850,21 @@ static void leon_point(int bone, const int32_t local[3], int32_t out[3])
     out[2] = player.z + (int32_t)(-s * p[0] + c * p[2]);
 }
 
-// keyframe effects of a shot (VP70 frame handler 0x80040b94)
+// keyframe effects of a shot (VP70 frame handler 0x80040b94): on key 1 the
+// flash (CORE00 effect 1, 0x01000e00) and fire (effect 3 sub 2 with the next
+// palette, 0x030a0e00) at the muzzle, on key 3 smoke (0x03080900) and the
+// casing (0x02000700) at the ejection port
 static void shot_effects(void)
 {
     static const int32_t muzzle[3] = { 138, 615, 8 }, port[3] = { 350, 40, -15 };
     int32_t p[3];
     if (player.key == 1) {
         leon_point(HAND_BONE, muzzle, p);
-        effect_spawn(1, 0, p[0], p[1], p[2], 0, 0, 0, 0, player.y, 255, 230, 140);
+        roomfx_spawn(1, 0x00, p[0], p[1], p[2], 0, 0);
+        roomfx_spawn(3, 0x0A, p[0], p[1], p[2], 0, 0);
     } else if (player.key == 3) {
         leon_point(HAND_BONE, port, p);
+        roomfx_spawn(3, 0x08, p[0], p[1], p[2], 0, 0);
         int16_t dir = player.dir + 1300 * 8;
         effect_spawn(2, 0, p[0], p[1], p[2], (40 * cosLerp(dir)) >> 12, -40, -((40 * sinLerp(dir)) >> 12), 1,
                      player.y, 230, 180, 80);
@@ -2208,7 +2236,7 @@ static void print_status(void)
         printf("A: runterspringen          \n");
     else
         printf("                          \n");
-    printf("\nD-Pad gehen/drehen, B rennen\nA benutzen, L+A Schloss oeffnen\nSELECT Raum-Menue\n");
+    printf("\nD-pad walk/turn, B run\nA use, L+A open any lock\nSELECT room menu\n");
 }
 
 static void update_menu(uint32_t down)
@@ -2241,8 +2269,8 @@ static void update_menu(uint32_t down)
         return;
     }
 
-    printf("\x1b[0;0HRaum waehlen (%d Raeume)\n", room_count);
-    printf("hoch/runter, L/R +-10\nA springen, B zurueck\n\n");
+    printf("\x1b[0;0HChoose a room (%d rooms)\n", room_count);
+    printf("up/down, L/R +-10\nA warp, B back\n\n");
     int first = menu_sel - 7;
     if (first < 0)
         first = 0;
@@ -2346,6 +2374,7 @@ int main(void)
                 update_pose();
                 die_tick();
                 effect_tick();
+                roomfx_tick();
                 player.shot = 0;
                 if (player.state < ST_SCRIPT && player.state != ST_AIM && player.state != ST_FIRE && player.state != ST_RELOAD &&
                     !flag_get(2, 7))

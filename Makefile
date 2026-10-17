@@ -1,5 +1,5 @@
 #---------------------------------------------------------------------------------
-# re2ds - Resident Evil 2 room prototype for the Nintendo DS (devkitARM + libnds)
+# re2ds - Resident Evil 2 (PS1) for the Nintendo DS (devkitARM + libnds)
 # Based on the devkitPro arm9 template. Game data comes from nitrofiles/,
 # which tools/build_assets.sh fills from your own PS1 disc.
 #---------------------------------------------------------------------------------
@@ -18,7 +18,7 @@ INCLUDES   := source
 DATA       :=
 NITRO      := nitrofiles
 GAME_TITLE := RE2 DS Prototype
-GAME_SUBTITLE1 := Room 100
+GAME_SUBTITLE1 := Disc 1 (Leon)
 GAME_SUBTITLE2 := re2ds
 
 ARCH     := -marm -mthumb-interwork -march=armv5te -mtune=arm946e-s

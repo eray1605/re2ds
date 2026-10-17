@@ -4,7 +4,7 @@
 // (FUN_80061488) with a mode from table 0x800a0de0: play an animation of the
 // room's own set or of the character's, walk to a point, turn to a point or
 // a facing, stand. plc_ret hands control back. Modes used by disc 1 are
-// implemented; see re2ds-notes/cutscenes.md.
+// implemented; see docs/engine-notes.md.
 #pragma once
 
 #include <stdint.h>

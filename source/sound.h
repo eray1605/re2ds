@@ -14,7 +14,7 @@ int sound_frames(const void *bank, int note);
 
 // Voice clips of cutscenes (xa_on; tools/xa2ds.py: voice/s<stage>_<nn>.bin).
 // One at a time; a new one stops the old.
-void voice_play(int stage, int clip);
+void voice_play(int stage, int clip);  // stage 0: the common clips (xa_on 1, n)
 int voice_playing(void);     // the clip has not finished yet
 void voice_frame(void);      // once per DS frame: counts down, frees the clip
 void voice_stop(void);

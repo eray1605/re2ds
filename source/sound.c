@@ -77,7 +77,10 @@ void voice_play(int stage, int clip)
     char path[40];
     uint32_t size;
     voice_stop();
-    snprintf(path, sizeof(path), "nitro:/voice/s%d_%02d.bin", stage, clip);
+    if (stage == 0) // the common clips (xa_on 1, n)
+        snprintf(path, sizeof(path), "nitro:/voice/c_%02d.bin", clip);
+    else
+        snprintf(path, sizeof(path), "nitro:/voice/s%d_%02d.bin", stage, clip);
     voice_data = asset_load(path, &size);
     if (!voice_data || size < 16 || voice_data[0] != VOICE_MAGIC) {
         asset_free(voice_data);

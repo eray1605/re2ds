@@ -12,7 +12,12 @@ u32 samples, then IMA-ADPCM as the DS plays it (u16 first sample, u16 step
 index, then nibbles, low first), at half the rate (18900 Hz), each clip
 normalised to a peak of 30000 (at most 4x).
 
+xa_on 1, n (the common clips, e.g. the scream when Leon dies) uses the
+table at 0x80092838 in the executable (19 entries) with VOICE00.XAS; those
+are written as c_<nn>.bin.
+
 Usage: python3 -I xa2ds.py STAGE1.BIN VOICE01.XAS.raw2352 stage out_dir
+       python3 -I xa2ds.py --common SLES_009.72 VOICE00.XAS.raw2352 out_dir
        (the .XAS as raw 2352-byte sectors, with the XA subheaders)
 """
 import os
@@ -20,6 +25,8 @@ import struct
 import sys
 
 STAGE_BASE = 0x8011A000
+EXE_BASE = 0x80010000 - 0x800   # the PS-X EXE header is 2 KB
+COMMON_TABLE, COMMON_COUNT = 0x80092838, 19
 SECTOR = 2352
 MAGIC = 0x31435652  # "RVC1"
 PEAK = 30000      # normalised clip peak
@@ -130,13 +137,20 @@ def ima_encode(pcm):
 
 
 def main():
-    stage_bin = open(sys.argv[1], "rb").read()
-    xa = open(sys.argv[2], "rb").read()
-    stage, out_dir = int(sys.argv[3]), sys.argv[4]
+    if sys.argv[1] == "--common":
+        exe = open(sys.argv[2], "rb").read()
+        xa = open(sys.argv[3], "rb").read()
+        out_dir, prefix = sys.argv[4], "c"
+        table = [struct.unpack_from("<3H", exe, COMMON_TABLE - EXE_BASE + 6 * i) for i in range(COMMON_COUNT)]
+    else:
+        stage_bin = open(sys.argv[1], "rb").read()
+        xa = open(sys.argv[2], "rb").read()
+        out_dir, prefix = sys.argv[4], f"s{int(sys.argv[3])}"
+        table = clip_table(stage_bin)
     os.makedirs(out_dir, exist_ok=True)
     nsect = len(xa) // SECTOR
     written = 0
-    for n, (channel, start, length) in enumerate(clip_table(stage_bin)):
+    for n, (channel, start, length) in enumerate(table):
         if channel > 15 or not length or (start + length) * 16 > nsect + 16:
             continue  # past the real table
         pcm = clip_samples(xa, channel, start, length)
@@ -149,10 +163,10 @@ def main():
         gain = min(MAX_GAIN, PEAK / peak)
         half = [max(-32768, min(32767, int(x * gain))) for x in half]
         body = ima_encode(half)
-        with open(os.path.join(out_dir, f"s{stage}_{n:02d}.bin"), "wb") as f:
+        with open(os.path.join(out_dir, f"{prefix}_{n:02d}.bin"), "wb") as f:
             f.write(struct.pack("<III", MAGIC, 18900, len(half)) + body)
         written += 1
-    print(f"stage {stage}: {written} voice clips")
+    print(f"{prefix}: {written} voice clips")
 
 
 if __name__ == "__main__":
