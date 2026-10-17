@@ -38,6 +38,7 @@ typedef struct {
 static uint8_t *data;
 static const MusicTone *tones;
 static int num_tones;
+static int sample_format, sample_bytes; // format field of the file: 1 = 8-bit (else 16-bit)
 static const uint8_t *seq, *seq_end, *pos, *loop_pos;
 static uint8_t status, loop_status;
 static uint32_t ticks_per_frame;  // 16.16
@@ -112,6 +113,8 @@ void music_play(const char *path)
     DC_FlushRange(data, size); // the ARM7 reads the samples from RAM
     uint32_t seq_off = ((uint32_t *)data)[1], seq_size = ((uint32_t *)data)[2];
     num_tones = ((uint16_t *)data)[6];
+    sample_format = ((uint16_t *)data)[7] == 1 ? SoundFormat_8Bit : SoundFormat_16Bit;
+    sample_bytes = sample_format == SoundFormat_8Bit ? 1 : 2;
     tones = (const MusicTone *)(data + 16);
     seq = data + seq_off;
     seq_end = seq + seq_size;
@@ -148,15 +151,9 @@ static void note_off(int midi, int note)
     }
 }
 
-static void note_on(int midi, int note, int velocity)
+static void play_tone(const MusicTone *t, int midi, int note, int velocity)
 {
-    const MusicTone *t = NULL;
-    for (int i = 0; i < num_tones; i++)
-        if (tones[i].program == program[midi] && note >= tones[i].lo && note <= tones[i].hi) {
-            t = &tones[i];
-            break;
-        }
-    if (!t || !t->size)
+    if (!t->size)
         return;
     // a free voice, else the oldest one fading out, else the first
     Voice *v = NULL;
@@ -180,13 +177,22 @@ static void note_on(int midi, int note, int velocity)
     pan = pan < 0 ? 0 : pan > 127 ? 127 : pan;
     uint32_t rate = note_rate(t, note, ch_bend[midi]);
     int looped = t->loop != 0xFFFFFFFF;
-    v->ch = soundPlaySample(data + t->offset, SoundFormat_16Bit, t->size & ~3, rate, volume, pan,
+    v->ch = soundPlaySample(data + t->offset, sample_format, t->size & ~3, rate, volume, pan,
                             looped, looped ? t->loop / 4 : 0);
     v->midi = midi;
     v->note = note;
     v->release = -1;
     v->volume = volume;
-    v->frames = looped ? 0 : (uint16_t)(t->size / 2 * 60 / (rate ? rate : 1) + 1);
+    v->frames = looped ? 0 : (uint16_t)(t->size / sample_bytes * 60 / (rate ? rate : 1) + 1);
+}
+
+// libsnd plays every tone of the program whose key range holds the note:
+// 24 of the 52 pieces layer two (e.g. a left / right pair, slightly detuned)
+static void note_on(int midi, int note, int velocity)
+{
+    for (int i = 0; i < num_tones; i++)
+        if (tones[i].program == program[midi] && note >= tones[i].lo && note <= tones[i].hi)
+            play_tone(&tones[i], midi, note, velocity);
 }
 
 static void bend(int midi)

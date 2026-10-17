@@ -117,6 +117,8 @@ static int obj_tex_used;              // bytes uploaded in this room
 static int objects_ready;             // the room's init scripts have run
 static struct {
     uint8_t placed, hidden;
+    uint8_t type;      // obj_model_set ins[2]
+    uint16_t flags;    // ins[10] | 1 (0x10: drawn in every camera)
     int16_t pos[3], dir[3];
 } objects[MAX_OBJECTS];
 static Model rbj_enemy[MAX_ENEMIES];  // the room's animations per enemy slot (Kendo in 101)
@@ -138,6 +140,7 @@ static int game_tick_acc;           // accumulates GAME_HZ per DS frame
 static const char *message_text;    // open message, NULL = none
 static uint8_t lock_open[128];      // door locks opened (key id & 0x7F)
 static SaveSlot saves[SAVE_SLOTS];  // re2ds.sav as last read
+static InvSlot item_box[BOX_SLOTS]; // the item box (the same in every save room)
 static uint16_t save_count;         // saves of this game so far
 static int last_slot;               // the slot saved to or loaded from
 
@@ -418,6 +421,8 @@ void game_object_set(const uint8_t *ins)
     if (n >= MAX_OBJECTS)
         return; // 255: no model
     objects[n].placed = 1;
+    objects[n].type = ins[2];
+    objects[n].flags = (ins[10] | ins[11] << 8) | 1;
     for (int k = 0; k < 3; k++) {
         objects[n].pos[k] = (int16_t)(ins[14 + 2 * k] | ins[15 + 2 * k] << 8);
         objects[n].dir[k] = (int16_t)(ins[20 + 2 * k] | ins[21 + 2 * k] << 8);
@@ -465,6 +470,24 @@ void game_object_member_set(int n, int member, int value)
         objects[n].dir[1] = (int16_t)value;
 }
 
+// FUN_8002bc00: (x, z) inside a camera's view area (the first switch zone
+// whose cam0 is that camera), with the PS1's edge tests
+static int in_view_area(int cam, int x, int z)
+{
+    for (int i = 0; i < room.header->num_switches; i++) {
+        const RoomSwitch *s = &room.switches[i];
+        if (s->cam0 != cam)
+            continue;
+        int64_t ax = x - s->x[0], az = z - s->z[0];
+        int64_t x1 = s->x[1] - s->x[0], z1 = s->z[1] - s->z[0];
+        int64_t x2 = s->x[2] - s->x[0], z2 = s->z[2] - s->z[0];
+        int64_t x3 = s->x[3] - s->x[0], z3 = s->z[3] - s->z[0];
+        return x1 * az <= z1 * ax && x3 * az >= z3 * ax && (z1 - z2) * (ax - x2) <= (x1 - x2) * (az - z2) &&
+               (x3 - x2) * (az - z2) <= (z3 - z2) * (ax - x2);
+    }
+    return 1; // no zone for this camera
+}
+
 static void draw_objects(void)
 {
     if (!obj_data)
@@ -474,6 +497,12 @@ static void draw_objects(void)
         uint32_t list = rd32(m + 4);
         int tex = m[0] | m[1] << 8;
         if (!objects[n].placed || objects[n].hidden || !list || tex >= obj_tex_count || obj_tex_state[tex] != 1)
+            continue;
+        // the PS1 (FUN_80033f70) draws a room object only while it stands in
+        // the view area of the shown camera, unless flag 0x10 is set: things
+        // behind a wall in another part of the room stay hidden
+        if (objects[n].type != 1 && !(objects[n].flags & 0x10) &&
+            !in_view_area(cur_cam, objects[n].pos[0], objects[n].pos[2]))
             continue;
         glPushMatrix();
         glTranslatef32(objects[n].pos[0], objects[n].pos[1], objects[n].pos[2]);
@@ -1694,6 +1723,7 @@ static void new_game(void)
     player.saved_once = 0;
     // Leon starts with the knife and the H&K VP70 (rounds: unverified)
     inventory_reset();
+    memset(item_box, 0, sizeof(item_box));
     inventory_add(0x01, 0);
     inventory_add(0x02, 18);
     inventory_equipped = 1;
@@ -1791,6 +1821,7 @@ static void use_typewriter(void)
     if (ribbon >= 0 && --inventory[ribbon].count == 0) // the ribbon used is gone before the state is kept
         inventory[ribbon].item = 0;
     memcpy(s->inventory, inventory, sizeof(s->inventory));
+    memcpy(s->box, item_box, sizeof(s->box));
     memcpy(s->locks, lock_open, sizeof(s->locks));
     script_state_get(s->script);
     s->bgm_saved = music_table_get(s->bgm, sizeof(s->bgm)) > 0;
@@ -1817,6 +1848,7 @@ static void load_game(int n)
         music_table_put(s->bgm, sizeof(s->bgm));
     memcpy(lock_open, s->locks, sizeof(lock_open));
     memcpy(inventory, s->inventory, sizeof(inventory));
+    memcpy(item_box, s->box, sizeof(item_box));
     inventory_equipped = s->equipped;
     save_count = s->saves;
     last_slot = n;
@@ -1954,6 +1986,9 @@ static void trigger(Aot *a)
         break;
     case SCE_SAVE:
         use_typewriter();
+        break;
+    case SCE_ITEMBOX:
+        menu_item_box(item_box, BOX_SLOTS, choice_frame);
         break;
     default:
         break;

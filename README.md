@@ -92,8 +92,12 @@ The tools are shell scripts and Python, so on Windows they run in **WSL** (Windo
 for Linux, Ubuntu); devkitPro supports Linux as well. melonDS itself runs as a normal Windows
 program.
 
-1. **Install WSL with Ubuntu.** In PowerShell as administrator run `wsl --install`, restart,
-   then open *Ubuntu* from the Start menu and pick a user name and password.
+1. **Install WSL with Ubuntu.** In PowerShell as administrator run `wsl --install` and
+   restart Windows. Ubuntu is then an app of its own: press the Windows key and type
+   *Ubuntu*, or type `wsl` in PowerShell (in Windows Terminal it is also in the ▾ menu next
+   to the tabs). The first start asks for a new Linux user name and password (not your
+   Windows password). If Ubuntu does not show up, `wsl -l -v` lists what is installed and
+   `wsl --install -d Ubuntu` installs it.
 2. **Install the tools** in the Ubuntu terminal:
    ```bash
    sudo apt update
