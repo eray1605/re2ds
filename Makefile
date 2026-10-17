@@ -70,7 +70,11 @@ clean:
 else
 #---------------------------------------------------------------------------------
 
-$(OUTPUT).nds: $(OUTPUT).elf $(NITRO_FILES)
+# every file and folder in nitrofiles/, so the ROM is rebuilt when assets are
+# reconverted (the folder itself only changes when entries are added/removed)
+NITRO_DEPS := $(if $(NITRO_FILES),$(shell find $(NITRO_FILES)))
+
+$(OUTPUT).nds: $(OUTPUT).elf $(NITRO_DEPS)
 $(OUTPUT).elf: $(OFILES)
 $(OFILES_SOURCES) : $(HFILES)
 
