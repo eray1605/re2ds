@@ -2,7 +2,9 @@
 the DS sound format (source/formats.h, SoundBankHeader). Every bank is keyed
 by sound number (door: 0 = opens, 1 = closes; se_on / FUN_80057364).
 
-Every tone becomes 16-bit PCM at the rate the PS1 plays it for its key range:
+Every tone becomes 8-bit PCM (header field 2 = 1; half the size of 16-bit,
+which made the banks 59 MB of the ROM) at the rate the PS1 plays it for its
+key range:
 the SPU plays a sample at 44100 Hz when the key-on note equals the tone's
 centre note, so rate = 44100 * 2^((note - centre - fine/128) / 12). The door
 program keys on note 60 (door opens) and 61 (door closes); each tone of the
@@ -26,6 +28,12 @@ import struct
 import sys
 
 SOUND_MAGIC = 0x31534252  # "RBS1"
+FORMAT_8BIT = 1
+
+
+def to_8bit(samples):
+    """16-bit samples -> signed 8-bit bytes (rounded)."""
+    return bytes((max(-128, min(127, (v + 128) >> 8)) & 0xFF) for v in samples)
 F0 = (0, 60, 115, 98, 122)
 F1 = (0, 0, -52, -55, -60)
 
@@ -124,18 +132,17 @@ def write_bank(tone, ps, vags, picks, dst):
         note = t.get("note", t["lo"] if t["lo"] == t["hi"] else t["centre"])
         rate = int(round(44100 * 2 ** ((note - t["centre"] - t["fine"] / 128) / 12)))
         samples = decode_vag(vags.get(t["vag"], b""))
-        while len(samples) % 2:
-            samples.append(0)
-        entries.append((t["lo"], t["hi"], min(rate, 65535), len(pcm), 2 * len(samples)))
-        pcm += struct.pack(f"<{len(samples)}h", *samples)
-    head = struct.pack("<IHH", SOUND_MAGIC, len(entries), 0)
+        samples += [0] * (-len(samples) % 4)  # whole words
+        entries.append((t["lo"], t["hi"], min(rate, 65535), len(pcm), len(samples)))
+        pcm += to_8bit(samples)
+    head = struct.pack("<IHH", SOUND_MAGIC, len(entries), FORMAT_8BIT)
     table = b"".join(struct.pack("<BBHII", lo, hi, rate, 0, size) for lo, hi, rate, _, size in entries)
     data_start = len(head) + len(table)
     table = b"".join(struct.pack("<BBHII", lo, hi, rate, data_start + off, size)
                      for lo, hi, rate, off, size in entries)
     with open(dst, "wb") as f:
         f.write(head + table + pcm)
-    print(f"{dst}: " + ", ".join(f"notes {lo}-{hi}: {size // 2} samples @ {rate} Hz"
+    print(f"{dst}: " + ", ".join(f"notes {lo}-{hi}: {size} samples @ {rate} Hz"
                                  for lo, hi, rate, _, size in entries))
 
 
