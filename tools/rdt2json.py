@@ -186,10 +186,12 @@ def script_instructions_from(data, pos):
 
 
 # Message text (RDT lang1). Characters below 0x60 index this table; the DS
-# engine gets plain ASCII with "\n" for line breaks.
+# engine gets plain ASCII with "\n" for line breaks, "\f" for a new page and
+# "\v" for a yes / no question (source/menu.c).
 MSG_CHARS = (" .___()_____0123456789:_,\"!?_ABCDEFGHIJKLMNOPQRSTUVWXYZ[/]'-_abc"
              "defghijklmnopqrstuvwxyz_________")
 MSG_NEWLINE, MSG_END = 0xFC, 0xFE
+MSG_PAGE, MSG_CHOICE = 0xFD, 0xFB
 MSG_ARG_CODES = set(range(0xEA, 0xFC)) - {0xF3} | {0xFD}   # control codes with one argument
 
 
@@ -214,6 +216,12 @@ def read_messages(data, offset):
                 text += MSG_CHARS[c]
             elif c == MSG_NEWLINE:
                 text += "\n"
+            elif c == MSG_PAGE:      # wait for a button, then a new page
+                text += "\f"
+                pos += 1
+            elif c == MSG_CHOICE:    # yes / no; the answer goes to flag 11:0x1F
+                text += "\v"
+                pos += 1
             elif c in MSG_ARG_CODES:
                 pos += 1
         if pos >= len(data) or data[pos] != MSG_END:

@@ -39,6 +39,8 @@ int model_load(Model *m, const char *path)
     return m->header->magic == MODEL_MAGIC;
 }
 #include "../source/door.c"
+void game_aot_on(int n) { (void)n; }
+int game_busy(void) { return 0; }
 void game_show_message(const char *t) { (void)t; }
 int game_message_open(void) { return 0; }
 void game_cut_change(int c) { (void)c; }

@@ -95,6 +95,12 @@ python3 -I tools/resp2ds.py --core "$DISC/COMMON/DATA/CORE00.ESP" "$DISC/COMMON/
 # the title screen (PRESS ANY BUTTON, NEW GAME / LOAD GAME)
 python3 -I tools/title2ds.py "$DISC/COMMON/DATA/TIT_BG.TIM" "$DISC/COMMON/DATA/TMOJI.TIM" build/ds/title > /dev/null
 
+# the map pages and their rooms (status screen, R)
+python3 -I tools/map2ds.py "$DISC/SLES_009.72" "$DISC/COMMON/DATA/MAPS.PIX" build/ds/menu/maps.bin > /dev/null
+
+# the ROM's icon: the title screen's eye and the logo's 2
+python3 -I tools/icon2ds.py "$DISC/COMMON/DATA/TIT_BG.TIM" "$DISC/COMMON/DATA/TMOJI.TIM" build/icon.bmp
+
 # the documents (items 0x68-0x80): one picture per page
 python3 -I tools/files2ds.py "$DISC/COMMON/DATA/FILES.TIM" build/ds/files > /dev/null
 

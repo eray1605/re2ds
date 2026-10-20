@@ -40,6 +40,12 @@ NITRO      := nitrofiles
 GAME_TITLE := RE2 DS Prototype
 GAME_SUBTITLE1 := Disc 1 (Leon)
 GAME_SUBTITLE2 := re2ds
+# the ROM's icon, made from the disc by tools/icon2ds.py (build_assets.sh); without it
+# the default libnds icon is used
+_ICON := $(dir $(abspath $(firstword $(MAKEFILE_LIST))))build/icon.bmp
+ifneq ($(wildcard $(_ICON)),)
+GAME_ICON := $(_ICON)
+endif
 
 ARCH     := -marm -mthumb-interwork -march=armv5te -mtune=arm946e-s
 CFLAGS   := -g -Wall -O2 -ffunction-sections -fdata-sections $(ARCH) $(INCLUDE) -DARM9

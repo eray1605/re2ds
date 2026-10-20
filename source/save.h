@@ -31,6 +31,8 @@ typedef struct {
     uint8_t bgm[BGM_TABLE_BYTES];
     // version 3: the documents found (bit n = item 0x68 + n)
     uint32_t files;
+    // version 4: the map's visited rooms (bit n = piece n of page p)
+    uint32_t map_seen[20];
 } SaveSlot;
 
 int save_init(void);                     // mounts the SD card; 0 if there is none

@@ -10,6 +10,8 @@
 
 static int messages, cut_changes, pos_sets;
 
+void game_aot_on(int n) { (void)n; }
+int game_busy(void) { return 0; }
 void game_show_message(const char *text) { messages++; (void)text; }
 int game_message_open(void) { return 0; }
 void game_cut_change(int cam) { cut_changes++; (void)cam; }

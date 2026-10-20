@@ -55,6 +55,21 @@ people. Arriving sets bit `done` of flag array 5. Implementation: `source/plc.c`
 RBJ section of the RDT: pairs (mask + EMR offset, EDD offset), both relative to the RBJ start;
 mask bit 0 = the player, bit n ≥ 2 = enemy slot n − 2. Leon's climb animations are 6–9.
 
+**The partner** (Ada, Sherry): `sce_em_set` with slot `0xff` creates it (the PS1 keeps it
+at `0x800c7a14`), `work_set 2` selects it for `plc_*` and the member commands, and its room
+animations are the RBJ set with mask bit 1. Room 301's scene with Ben waits for Ada's
+`plc_dest` to arrive; while she was missing the scene stood still.
+
+**Messages** (lang1): `0xFC` new line, `0xFD` + byte a new page (waits for a button), `0xFB` +
+byte a yes / no question; the answer is bit `0x1F` of flag array 11 (`0x800de0c4`, set = no),
+the same bit the typewriter's question uses (`FUN_8004e2ac`).
+
+**aot_on** (`scd_op_47`) calls the AOT's type handler (`0x8009f490`) as if the player had used
+it: rooms hand out puzzle rewards (item AOTs) and change rooms (door AOTs) this way. Type 14
+(`0x8004edb0`) starts a computer program (`0x80036a90`, `data[0] | data[2] << 4`, & 3): 0 the
+hall's door lock service (`0x80037c6c`: "Hall side doors LOCKED", the Blue Card Key, item
+`0x35`, sets flag 4:`0x46`), 1 the fingerprint check (`0x800384dc`).
+
 ## 3. Voices (xa_on)
 
 - `xa_on kind, n` (`0x59` → `FUN_8001260c`) sets `0x800c77d4` bit `0x20`; `wsleeping` waits for
