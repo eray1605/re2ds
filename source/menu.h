@@ -29,6 +29,14 @@ void menu_item_box(InvSlot *box, int box_slots, void (*frame_fn)(void));
 // show the item's picture (as on the PS1 when picking it up) until the
 // message closes or, without a message, until the next input
 void menu_picture(int item);
+// another picture on the lower screen (the map): 256 x 192, 8 bpp; palette may be NULL
+// to keep the current one; menu_overlay_end brings the status screen back
+void menu_overlay(const uint8_t *pixels, const uint16_t *palette);
+void menu_overlay_end(void);
+// During play the lower screen shows the map (main.c) unless the player chose
+// the status screen (Y) or the menu needs it (inventory, a message, a picture).
+int menu_lower_map(void);       // 1: the lower screen is the map's now
+void menu_lower_toggle(void);   // map <-> status screen during play
 // ammunition for the weapon in hand in the inventory; load it (the reload)
 int inventory_spare_ammo(void);
 void inventory_reload(void);

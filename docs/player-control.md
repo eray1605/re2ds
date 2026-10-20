@@ -267,6 +267,27 @@ Custom handgun (`PL00W04.PLW`): key 7 sound 3 + magazine, key 23 sound 3 + load.
 
 ---
 
+### Continuous fire: SMG and flamethrower (`0x800442cc`, observed)
+
+Phases from `0x8009f148`: 0 raise (shared `0x8003fd80`), 1 aim `0x80044308`, 2 fire
+`0x80044584`, 3 lower (shared), 4 reload `0x80044a70`. Their PLW moves (posture straight /
+up / down, tables `0x80010d54` / `0x60` / `0x6c`):
+
+| Use | Straight | Up | Down |
+|-----|---------:|---:|-----:|
+| aim (held) | 12 | 15 | 18 |
+| fire (looped while A is held) | 10 | 13 | 16 |
+| stop | 11 | 14 | 17 |
+
+Reload = move 19 (`0x70013`) with the usual EDD events: SMG key 8 sound 4, key 30 sound 3 +
+load; flamethrower key 11 sound 3, key 25 sound 3 + load. While firing Leon turns `0x20` a
+frame; the hit check (`FUN_8003dd8c`) runs every frame and registers once per lock time of
+the damage table (SMG 1, flamethrower 5). Ammunition (`FUN_80065594`): the SMG calls it on
+every third keyframe, the flamethrower every frame, but only every 8th call takes a round;
+a count of `0xff` means unlimited (SMG, rocket launcher). Frame handlers: SMG `0x80041d08`
+(flash + fire at 70 / 1000 / −60 every 3 keys, a casing every 6), flamethrower `0x80041e4c`
+(effect 3 sub `0x1d` at 150 / 1200 every 3 keys; sound 0 on key 1, `0x0b` on key 11).
+
 ## 6. Open points
 
 - Which of the actions `0x10`/`0x20` is "up" and which "down": check in an emulator.

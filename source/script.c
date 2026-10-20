@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "script.h"
+#include "enemy.h"
 
 #define NUM_THREADS 12
 #define MAX_BLOCKS 16
@@ -259,12 +260,13 @@ static void op_aot_reset(const uint8_t *ins)
 }
 
 // ------------------------------------------------------------ work object
-// The object work_set selected: 1 = Leon, 3 = enemy, 4 = room object.
+// The object work_set selected: 1 = Leon, 2 = the partner, 3 = enemy, 4 = room object.
 // Members 0x0B-0x0D position, 0x0F facing (RE2 units).
 static int work_member(const Thread *t, int member, int *value)
 {
     switch (t->work_type) {
     case 1: return game_player_member(member, value);
+    case 2: return game_enemy_member(PARTNER_SLOT, member, value);
     case 3: return game_enemy_member(t->work_index, member, value);
     case 4: return game_object_member(t->work_index, member, value);
     }
@@ -275,6 +277,7 @@ static void work_member_set(const Thread *t, int member, int value)
 {
     switch (t->work_type) {
     case 1: game_player_member_set(member, value); break;
+    case 2: game_enemy_member_set(PARTNER_SLOT, member, value); break;
     case 3: game_enemy_member_set(t->work_index, member, value); break;
     case 4: game_object_member_set(t->work_index, member, value); break;
     }
@@ -594,10 +597,10 @@ static void run_thread(Thread *t)
             break;
         case OP_MEMBER_CMP: { // pad, member, compare op, s16 value
             int value;
-            if (t->work_type != 3)
+            if (t->work_type != 3 && t->work_type != 2)
                 cond = 1; // player / objects: state not modelled yet
             else
-                cond = game_enemy_member(t->work_index, ins[2], &value) &&
+                cond = game_enemy_member(t->work_type == 2 ? PARTNER_SLOT : t->work_index, ins[2], &value) &&
                        compare((int16_t)value, ins[3], rd16(ins + 4));
             break;
         }
@@ -716,6 +719,10 @@ static void run_thread(Thread *t)
             game_movie(ins[1]);
             flag_set(0, 0x16, 0);
             break;
+        case OP_AOT_ON: // scd_op_47: calls the AOT's handler (0x8009f490 by type)
+            game_aot_on(ins[1]);
+            t->pc = next;
+            return; // the PS1 runs the handler's program before the thread goes on
         case OP_SCA_ID_SET:
             game_set_box_flag(ins[1], ru16(ins + 2));
             break;

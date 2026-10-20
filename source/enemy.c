@@ -90,6 +90,8 @@ int game_player_damage(int damage);       // 0 hurt, 1 down to 0 HP once (breaks
 void game_player_grabbed(int on);
 void game_player_pose(const Model *set, int anim, int key, int32_t x, int32_t z, int16_t dir);
 void game_player_died(void);              // death animation over
+void game_player_hurt(int kind);          // hit while not held: 0 light, 1 front, 2 from behind
+void game_player_killed(void);            // killed while not held
 // blood sprite (effect.h kinds), sprayed toward dir (DS units)
 void game_blood(int kind, int32_t x, int32_t y, int32_t z, int16_t dir, int speed, int32_t floor_y);
 
@@ -164,6 +166,16 @@ typedef struct {
     int16_t pose_anim;
     uint8_t pose_blend, pose_valid;
     uint8_t no_blend;           // plc flag 0x40: the next animation starts without easing
+    // dogs (dog_tick)
+    int32_t floor_y;            // the floor it stands on (y changes in a jump)
+    int16_t speed, vspeed;      // forward / vertical speed per tick (obj+0x144 / 0x146)
+    int16_t misses;             // ticks running without Leon in front, x10 (obj+0x21a)
+    int16_t turned;             // turned so far in a U-turn or a bounce (obj+0x158), DS units
+    int16_t circ_x, circ_z;     // offset from Leon it circles toward (obj+0x228 / 0x22a)
+    int16_t turn_rate;          // turning while hunting (obj+0x224), RE2 units
+    int16_t aggr;               // aggression (obj+0x16a)
+    uint8_t cooldown;           // ticks before it turns to Leon again (obj+0x21d)
+    uint8_t airborne;           // in a jump (obj+0x219)
 } Enemy;
 
 // The grab: one zombie at a time (PS1 flag 0x80 in 0x800c79c7). Zombie and
@@ -181,6 +193,9 @@ static struct {
 } grab = { .enemy = -1 };
 static uint8_t voice_first, voice_second; // PS1 0x800d0818 / 0x800d0819
 
+static uint8_t dog_alert;       // a dog has jumped at Leon: the others hunt too (0x800c77f0 & 0x20)
+static int8_t crow_lock = -1;   // the crow attacking now (0x800c77f0 & 1)
+static int8_t claw_lock = -1;   // the licker clawing now (0x8010752c)
 static EnemyType types[MAX_TYPES];
 static Enemy enemies[MAX_ENEMIES];
 static const Model *room_sets[MAX_ENEMIES]; // the room's animations per slot (RBJ masks)
@@ -189,6 +204,16 @@ static const Model *room_sets[MAX_ENEMIES]; // the room's animations per slot (R
 // move them, otherwise they stand.
 #define FIRST_PERSON_TYPE 0x40
 static int is_person(const Enemy *e) { return types[e->type].type >= FIRST_PERSON_TYPE; }
+static int is_dog(const Enemy *e);
+static void dog_spawn(Enemy *e);
+static int is_crow(const Enemy *e);
+static void crow_spawn(Enemy *e);
+static int is_licker(const Enemy *e);
+static void licker_spawn(Enemy *e);
+static int is_spider(const Enemy *e);
+static void spider_spawn(Enemy *e);
+static int is_tyrant(const Enemy *e);
+static void tyrant_spawn(Enemy *e);
 
 // the set e->anim / e->key refer to
 static const Model *anim_model(const Enemy *e) { return e->anim_set ? e->anim_set : &types[e->type].model; }
@@ -224,6 +249,9 @@ void enemy_room_reset(void)
     memset(enemies, 0, sizeof(enemies));
     grab.enemy = -1;
     voice_first = voice_second = 0;
+    dog_alert = 0;
+    crow_lock = -1;
+    claw_lock = -1;
 }
 
 // Vertices and polygons in all display lists of a model (packed GX lists from
@@ -381,6 +409,8 @@ static void enter_state(Enemy *e, int state)
 void enemy_spawn(int slot, int type, int flags, int voice, int32_t x, int32_t y, int32_t z, int16_t dir_re2)
 {
     enemy_spawn_calls++;
+    if (slot == 0xFF)
+        slot = PARTNER_SLOT;
     if (slot < 0 || slot >= MAX_ENEMIES) {
         enemy_last_error = 5;
         return;
@@ -415,6 +445,26 @@ void enemy_spawn(int slot, int type, int flags, int voice, int32_t x, int32_t y,
     e->sight_timer = slot & 7;
     e->routine = 1;
 
+    if (is_dog(e)) {
+        dog_spawn(e);
+        return;
+    }
+    if (is_crow(e)) {
+        crow_spawn(e);
+        return;
+    }
+    if (is_licker(e)) {
+        licker_spawn(e);
+        return;
+    }
+    if (is_spider(e)) {
+        spider_spawn(e);
+        return;
+    }
+    if (is_tyrant(e)) {
+        tyrant_spawn(e);
+        return;
+    }
     // start state by spawn variant (zombie init 0x80100674)
     int state = ST_LURK;
     switch (flags & EF_VARIANT) {
@@ -688,6 +738,30 @@ static int can_grab(const Enemy *e, const EnemyTarget *p, uint32_t d)
     return d < GRAB_DISTANCE && grab.enemy < 0 && p->can_grab && in_cone(e, p->x, p->z, 0x200);
 }
 
+// Types without their own behaviour yet (spiders, the alligator, G, plants,
+// ...) run the zombie's, but their models have no grab (set 2 is the
+// zombie's animations for Leon): within reach they strike instead, 10 HP
+// (x1.5) every 40 ticks.
+#define TYPE_ZOMBIE_LAST 0x1F
+static int is_zombie(const Enemy *e) { return types[e->type].type <= TYPE_ZOMBIE_LAST; }
+static int strike(Enemy *e, const EnemyTarget *p, uint32_t d)
+{
+    if (is_zombie(e) || d >= GRAB_DISTANCE || !p->can_grab || !in_cone(e, p->x, p->z, 0x200))
+        return 0;
+    if (e->cooldown) {
+        e->cooldown--;
+        return 0;
+    }
+    e->cooldown = 40;
+    sound_at(e, SND_BITE);
+    game_blood(0, p->x, p->y - 1500, p->z, e->dir, 20, p->y);
+    if (game_player_damage(10) == 2)
+        game_player_killed();
+    else
+        game_player_hurt(((p->dir - e->dir + 8192) & 32767) < 16384 ? 2 : 1);
+    return 1;
+}
+
 // World position of an animation offset (speed x/y/z) of the grab, turned
 // like the PS1's RotMatrixY(dir) (x' = c x + s z, z' = -s x + c z).
 static void turned_offset(const Model *m, int anim, int key, int16_t dir, int32_t *x, int32_t *z)
@@ -874,7 +948,9 @@ static void chase(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
     int32_t px = p->x, pz = p->z;
     int32_t gx = e->has_goal ? e->goal_x : px, gz = e->has_goal ? e->goal_z : pz; // path
     // decision (0x8010167c): grab, or eat Leon's body
-    if (can_grab(e, p, d)) {
+    if (strike(e, p, d))
+        return;
+    if (is_zombie(e) && can_grab(e, p, d)) {
         start_grab(e, i, p);
         return;
     }
@@ -942,7 +1018,9 @@ lunge:
 // arms up, toward Leon (0x80102218); back to shuffling after a while
 static void lunge(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
 {
-    if (can_grab(e, p, d)) {
+    if (strike(e, p, d))
+        return;
+    if (is_zombie(e) && can_grab(e, p, d)) {
         start_grab(e, i, p);
         return;
     }
@@ -1033,6 +1111,1426 @@ static void script_mode(Enemy *e, int i)
             turn_toward(e, t->x, t->z, 0x10);
         anim_step(e, NULL);
         break;
+    default:
+        anim_step(e, NULL);
+        break;
+    }
+}
+
+// ---------------------------------------------------------------- dog
+// Cerberus (type 0x20; dog overlay of CDEMD0.EMS, linked at 0x80100000,
+// states in table 0x80105288; docs/enemy-others.md). Unlike the zombie it
+// moves by a speed of its own (obj+0x144, FUN_80014c68), not by the
+// animation's root motion. All its animations are in set 0.
+#define TYPE_DOG 0x20
+#define DOG_IDLE 0              // walks about, sniffs (state 0, 0x80100708 / 0x801004cc)
+#define DOG_CIRCLE 1            // runs round Leon at a distance (0x801007a8)
+#define DOG_HUNT 2              // runs at him (0x80100aa4, sub states 0x801052ec)
+#define DOG_ATTACK 3            // jumps and bites (0x80101170, sub states 0x8010530c)
+#define DOG_HURT 9              // thrown back by a hit, gets up (0x801031d8, 0x8010335c, 0x8010347c)
+#define D_SNIFF 0x00
+#define D_WALK 0x01
+#define D_RUN 0x02              // turning: 0x0D left, 0x0C right (0x801054cc)
+#define D_RUN_LEFT 0x0D
+#define D_RUN_RIGHT 0x0C
+#define D_GET_UP 0x07
+#define D_THROWN 0x11
+#define D_DOWN 0x12
+#define D_JUMP 0x14
+#define D_LAND 0x15
+#define D_BOUNCE 0x16
+#define DOG_GRAVITY 40
+#define DOG_BITE 20             // x1.5 (FUN_8003cf38): 30 HP
+#define SND_DOG_HIT 1
+#define SND_DOG_JUMP 3
+#define SND_DOG_DIE 7
+#define SND_DOG_LAND 10
+#define SND_DOG_LAND_HARD 11
+
+// health (0x801051d4) + rand & 3
+static const uint8_t dog_hp[16] = { 129, 95, 95, 95, 129, 80, 95, 95, 80, 95, 69, 80, 69, 95, 69, 80 };
+// circling: offsets from Leon, x and z picked apart (0x801052cc)
+static const int16_t dog_offset[8] = { 1024, 0, -512, 0, -1024, 0, 512, 0 };
+// pause before it turns to Leon again after a bite (0x80105244)
+static const uint8_t dog_pause[8] = { 7, 31, 15, 15, 15, 15, 7, 31 };
+// thrown back along Leon's facing plus one of these (0x801053c0), RE2 units
+static const int16_t dog_throw[8] = { 0x80, -0xC0, -0x80, 0xC0, -0x100, 0x100, 0x100, -0x100 };
+// damage by weapon (near / middle / far), docs/enemy-others.md; 0 = the
+// weapon's own (zombie) values
+static const uint16_t dog_damage[20][3] = {
+    [1] = { 10, 10, 10 },      // knife
+    [2] = { 18, 16, 15 }, [3] = { 18, 16, 15 }, [4] = { 18, 16, 15 },
+    [5] = { 200, 200, 200 }, [6] = { 300, 300, 300 },
+    [7] = { 59, 40, 30 }, [8] = { 300, 75, 65 },
+    [0x0C] = { 26, 26, 26 },   // bowgun
+    [0x0F] = { 10, 10, 10 },   // sub machine gun
+};
+
+static int is_dog(const Enemy *e) { return types[e->type].type == TYPE_DOG; }
+
+static void dog_anim(Enemy *e, int anim, int key) { set_anim(e, SET_GAIT, anim, key); }
+
+// keeps the keyframe when only the gait changes (the PS1 writes the
+// animation number alone, obj+0x14c)
+static void dog_run_anim(Enemy *e, int delta)
+{
+    int want = delta < 0 ? D_RUN_LEFT : delta > 0 ? D_RUN_RIGHT : D_RUN;
+    if (e->anim != types[e->type].set_start[SET_GAIT] + want)
+        dog_anim(e, want, e->key);
+}
+
+static void dog_speed_up(Enemy *e, int by, int max)
+{
+    if (e->speed < max && (e->speed += by) > max)
+        e->speed = max;
+}
+
+static void dog_slow_down(Enemy *e, int by, int min)
+{
+    if (e->speed > min && (e->speed -= by) < min)
+        e->speed = min;
+}
+
+// how far to turn toward (x, z), at most rate RE2 units (FUN_80014fb4); DS units
+static int turn_delta(const Enemy *e, int32_t x, int32_t z, int rate)
+{
+    int diff = ((angle_to(e, x, z) - e->dir + 16384) & 32767) - 16384;
+    int step = rate * 8;
+    return diff > step ? step : diff < -step ? -step : diff;
+}
+
+// dist along dir (DS units) against the room's walls; 1 if it got all the way
+static int move_dir(Enemy *e, int i, int16_t dir, int32_t dist)
+{
+    int32_t mx = (dist * cosLerp(dir)) >> 12, mz = -((dist * sinLerp(dir)) >> 12);
+    int moved = 1;
+    if (!game_blocked(e->x, e->z, e->x + mx, e->z, e->floor_y) && !crowded(i, e->x + mx, e->z))
+        e->x += mx;
+    else
+        moved = 0;
+    if (!game_blocked(e->x, e->z, e->x, e->z + mz, e->floor_y) && !crowded(i, e->x, e->z + mz))
+        e->z += mz;
+    else
+        moved = 0;
+    return moved;
+}
+
+// in the air: falls; 1 when it lands
+static int dog_fall(Enemy *e)
+{
+    e->y += e->vspeed;
+    e->vspeed += DOG_GRAVITY;
+    if (e->vspeed > 0 && e->y >= e->floor_y) {
+        e->y = e->floor_y;
+        e->airborne = 0;
+        return 1;
+    }
+    return 0;
+}
+
+static void dog_enter(Enemy *e, int state)
+{
+    e->state = state;
+    e->sub = 0;
+}
+
+static void dog_spawn(Enemy *e)
+{
+    e->hp = dog_hp[rnd() & 15] + (rnd() & 3);
+    e->floor_y = e->y;
+    // start state by spawn variant (init 0x801000f4, table 0x8010527c)
+    switch (e->flags & EF_VARIANT) {
+    case 1: dog_anim(e, D_WALK, rnd() & 0x3F); dog_enter(e, DOG_CIRCLE); break;
+    case 2: case 6: dog_anim(e, D_RUN, rnd() & 15); dog_enter(e, DOG_HUNT); break;
+    default: dog_anim(e, D_WALK, rnd() & 0x3F); dog_enter(e, DOG_IDLE); break;
+    }
+}
+
+static int same_floor(const Enemy *e, const EnemyTarget *p) { return abs(p->y - e->floor_y) < 1000; }
+
+// state 0: walks about at 30 a tick, now and then stops to sniff for 90 ticks
+// (0x801004cc; the PS1 walks between the room's waypoints); wakes when Leon
+// comes within 4000 on its floor or another dog has attacked, hunts at a shot
+static void dog_idle(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
+{
+    if (same_floor(e, p) && (d < 4000 || dog_alert || (p->noise & NOISE_SHOT))) {
+        dog_enter(e, (p->noise & NOISE_SHOT) ? DOG_HUNT : DOG_CIRCLE);
+        return;
+    }
+    switch (e->sub) {
+    case 0:
+        e->speed = 30;
+        e->timer = rnd() + 60;
+        dog_anim(e, D_WALK, e->key);
+        e->sub = 1;
+        // fall through
+    case 1:
+        anim_step(e, NULL);
+        if (!move_dir(e, i, e->dir, e->speed) || e->timer-- == 0) {
+            if (!(rnd() & 3)) { // sniffs
+                e->sub = 2;
+                e->timer = 90;
+                dog_anim(e, D_SNIFF, 0);
+            } else {            // another way
+                e->sub = 3;
+                e->turned = (int16_t)(((rnd() << 7) - 16384) | 1);
+            }
+        }
+        break;
+    case 2:
+        anim_step(e, NULL);
+        if (e->timer-- == 0)
+            e->sub = 0;
+        break;
+    case 3: { // turns 16 a tick (FUN_80014ef8), walking on
+        int step = e->turned > 0 ? 128 : -128;
+        if (abs(e->turned) <= 128) {
+            step = e->turned;
+            e->sub = 0;
+        }
+        e->dir = (e->dir + step) & 32767;
+        e->turned -= step;
+        anim_step(e, NULL);
+        move_dir(e, i, e->dir, e->speed);
+        break;
+    }
+    }
+}
+
+// state 1: runs at a point up to 1024 beside Leon, turning 16 a tick. Within
+// 3000 its aggression rises by 1 a tick (21 while he runs); with him straight
+// ahead (+-11 degrees) and more than 600 away it jumps. Above 64, at a shot or
+// when another dog attacked: hunts.
+static void dog_circle(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
+{
+    if (e->sub == 0) {
+        e->sub = 1;
+        e->speed = 30;
+        e->aggr = 0;
+        e->circ_x = dog_offset[rnd() & 7];
+        e->circ_z = dog_offset[rnd() & 7];
+        dog_anim(e, D_WALK, e->key);
+    }
+    e->dir = (e->dir + turn_delta(e, p->x + e->circ_x, p->z + e->circ_z, 16)) & 32767;
+    move_dir(e, i, e->dir, e->speed);
+    anim_step(e, NULL);
+    int ahead = in_cone(e, p->x, p->z, 0x80);
+    if (d < 3000) {
+        e->aggr += (p->noise & NOISE_RUN) ? 21 : 1;
+        if (ahead && d > 600 && p->can_grab && same_floor(e, p)) {
+            dog_enter(e, DOG_ATTACK);
+            return;
+        }
+    } else {
+        if (e->aggr)
+            e->aggr--;
+        if (ahead && (p->noise & NOISE_RUN))
+            e->aggr += 20;
+    }
+    if (e->aggr > 64 || (p->noise & NOISE_SHOT) || dog_alert)
+        dog_enter(e, DOG_HUNT);
+}
+
+// Can it jump at Leon now (FUN_80104b6c)? 1 yes; -1 he is not ahead
+// (+-22.5 degrees); -2 he is dead; -4 he is ahead but cannot be bitten now
+// (held, hurt); 0 too far or on another floor.
+static int dog_can_attack(const Enemy *e, const EnemyTarget *p, uint32_t d)
+{
+    if (p->dead)
+        return -2;
+    if (d >= 4000 || !same_floor(e, p))
+        return 0;
+    if (!in_cone(e, p->x, p->z, 0x100))
+        return -1;
+    return p->can_grab ? 1 : -4;
+}
+
+// state 2: runs at Leon, faster up to 240 a tick, turning up to 96 a tick.
+// Every tick he is not ahead counts 10; past 450 it slows down, turns round
+// (180 degrees, drifting on) and runs again (sub 2, 0x80100dd0).
+static void dog_hunt(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
+{
+    int32_t gx = e->has_goal ? e->goal_x : p->x, gz = e->has_goal ? e->goal_z : p->z;
+    int delta = 0;
+    switch (e->sub) {
+    case 0:
+        e->sub = 1;
+        e->turn_rate = 0x60;
+        e->misses = 0;
+        dog_run_anim(e, 0);
+        // fall through
+    case 1: {
+        dog_speed_up(e, 40, 240);
+        if (e->cooldown)
+            e->cooldown--;
+        else
+            delta = turn_delta(e, gx, gz, e->turn_rate);
+        e->dir = (e->dir + delta) & 32767;
+        move_dir(e, i, e->dir, e->speed);
+        dog_run_anim(e, delta);
+        anim_step(e, NULL);
+        int r = dog_can_attack(e, p, d);
+        if (r == 1) {
+            dog_enter(e, DOG_ATTACK);
+            return;
+        }
+        if (r == -2) {
+            dog_enter(e, DOG_IDLE);
+            return;
+        }
+        if (r < 0)
+            e->misses += 10;
+        if (e->misses > 450 || r == -4) {
+            if (p->hp > 20)
+                e->misses = 0;
+            e->sub = 2;
+            e->timer2 = 1; // slowing down
+            e->turned = 0;
+        }
+        break;
+    }
+    case 2: // U-turn
+        if (e->timer2 == 1) {
+            dog_slow_down(e, 6, 10);
+            if (e->speed < 11)
+                e->timer2 = 2;
+        } else {
+            dog_speed_up(e, 6, 240);
+        }
+        delta = turn_delta(e, gx, gz, 0x60);
+        move_dir(e, i, (e->dir - e->turned) & 32767, e->speed); // drifts on
+        e->turned += delta;
+        e->dir = (e->dir + delta) & 32767;
+        dog_run_anim(e, delta);
+        anim_step(e, NULL);
+        if (abs(e->turned) > 0x7FF * 8 || delta == 0)
+            e->sub = 1;
+        break;
+    }
+}
+
+// The bite (FUN_80104c84): Leon within 1000 of its head (700 when he is down
+// to 20 HP or less) on its floor, while it rises.
+static int dog_bites(Enemy *e, const EnemyTarget *p)
+{
+    int32_t hx = e->x + ((600 * cosLerp(e->dir)) >> 12), hz = e->z - ((600 * sinLerp(e->dir)) >> 12);
+    float dx = (float)(p->x - hx), dz = (float)(p->z - hz);
+    int range = p->hp > 20 ? 1000 : 700;
+    if (!p->can_grab || !same_floor(e, p) || dx * dx + dz * dz >= (float)range * range)
+        return 0;
+    game_blood(0, p->x, p->y - 1400, p->z, e->dir, 20, p->y);
+    int r = game_player_damage(DOG_BITE);
+    if (r == 2) {
+        game_player_killed();
+    } else {
+        int behind = ((p->dir - e->dir + 8192) & 32767) < 16384; // FUN_800152b0
+        game_player_hurt(behind ? 2 : 1);
+    }
+    return 1;
+}
+
+// state 3: crouches 8 ticks moving 65 a tick, then leaps (280 forward, 280 up,
+// gravity 40); bites on the way up. Missed: lands and hunts again. Bit:
+// bounces off backward, turning round, and pauses before the next run.
+static void dog_attack(Enemy *e, int i, const EnemyTarget *p)
+{
+    switch (e->sub) {
+    case 0: // FUN_80101304
+        e->sub = 1;
+        e->timer = 8;
+        e->speed = 65;
+        e->vspeed = -280;
+        dog_anim(e, D_JUMP, 0);
+        // fall through
+    case 1:
+        move_dir(e, i, e->dir, e->speed);
+        anim_step(e, NULL);
+        if (--e->timer == 0) {
+            e->sub = 2;
+            e->speed = 280;
+            e->airborne = 1;
+            dog_alert = 1;
+            sound_at(e, SND_DOG_JUMP);
+        }
+        break;
+    case 2: // in the air (0x801013ec)
+        move_dir(e, i, e->dir, e->speed);
+        if (e->vspeed < 0 && dog_bites(e, p)) {
+            e->sub = 5;
+            e->turned = 0;
+            e->speed >>= 2;
+            dog_anim(e, D_BOUNCE, 0);
+            break;
+        }
+        if (e->vspeed < 0) {
+            e->y += e->vspeed;
+            e->vspeed += DOG_GRAVITY;
+            anim_step(e, NULL);
+            break;
+        }
+        e->sub = 3; // missed (0x80101348)
+        e->misses += 20;
+        dog_anim(e, D_LAND, 0);
+        // fall through
+    case 3: // comes down (FUN_801014d8)
+        move_dir(e, i, e->dir, e->speed);
+        anim_step(e, NULL);
+        if (dog_fall(e)) {
+            sound_at(e, SND_DOG_LAND);
+            e->sub = 4;
+        }
+        break;
+    case 4:
+        dog_slow_down(e, 64, 0);
+        move_dir(e, i, e->dir, e->speed);
+        if (anim_step(e, NULL))
+            dog_enter(e, DOG_HUNT);
+        break;
+    case 5: // bounces off (0x801015e8)
+        move_dir(e, i, (e->dir + 16384) & 32767, e->speed);
+        if (e->airborne && dog_fall(e)) {
+            sound_at(e, SND_DOG_LAND);
+            e->sub = 6;
+        }
+        if (e->turned < 0x800 * 8) {
+            e->dir = (e->dir + 0x80 * 8) & 32767;
+            e->turned += 0x80 * 8;
+        }
+        if (e->key < 0x11)
+            anim_step(e, NULL);
+        else
+            e->speed = 0;
+        break;
+    case 6:
+        if (e->turned < 0x800 * 8) {
+            e->dir = (e->dir + 0x80 * 8) & 32767;
+            e->turned += 0x80 * 8;
+        }
+        if (anim_step(e, NULL)) {
+            dog_enter(e, DOG_HUNT);
+            e->cooldown = dog_pause[rnd() & 7];
+        }
+        break;
+    }
+}
+
+// Shot (0x801031d8): thrown back along Leon's facing (240 a tick, 10 less
+// every tick; half that and falling first when hit in the air), lies, gets up
+// and hunts. Hit again meanwhile it only bleeds. Killed: the same throw,
+// then it stays down.
+static void dog_shot(Enemy *e, int16_t player_dir, int dying)
+{
+    if (e->state == DOG_HURT || e->state == ST_DYING) {
+        if (dying && e->state != ST_DYING) {
+            e->state = ST_DYING;
+            if (e->sub == 4) { // was getting up: down again
+                dog_anim(e, D_DOWN, 0);
+                e->sub = 3;
+            }
+            sound_at(e, SND_DOG_DIE);
+        }
+        return;
+    }
+    e->push_dir = (player_dir + dog_throw[rnd() & 7] * 8) & 32767;
+    if (e->airborne) {
+        e->speed >>= 1;
+        e->sub = 1;
+    } else {
+        e->speed = 240;
+        e->sub = 2;
+    }
+    e->state = dying ? ST_DYING : DOG_HURT;
+    dog_anim(e, D_THROWN, 0);
+    sound_at(e, dying ? SND_DOG_DIE : SND_DOG_HIT);
+}
+
+static void dog_thrown(Enemy *e, int i)
+{
+    switch (e->sub) {
+    case 1: // falls (0x8010335c)
+        move_dir(e, i, e->push_dir, e->speed);
+        anim_step(e, NULL);
+        if (dog_fall(e)) {
+            sound_at(e, SND_DOG_LAND_HARD);
+            e->sub = 2;
+        }
+        break;
+    case 2: // slides (0x8010347c)
+        move_dir(e, i, e->push_dir, e->speed);
+        dog_slow_down(e, 10, 0);
+        if (anim_step(e, NULL)) {
+            dog_anim(e, D_DOWN, 0);
+            e->sub = 3;
+        }
+        break;
+    case 3: // down
+        if (e->speed) {
+            move_dir(e, i, e->push_dir, e->speed);
+            dog_slow_down(e, 10, 0);
+        }
+        if (e->key + 1 >= types[e->type].model.anims[e->anim].count) {
+            if (e->state == ST_DYING) {
+                e->state = ST_DEAD;
+                return;
+            }
+            dog_anim(e, D_GET_UP, 0);
+            e->sub = 4;
+        } else {
+            anim_step(e, NULL);
+        }
+        break;
+    case 4: // gets up
+        if (anim_step(e, NULL)) {
+            e->speed = 0;
+            dog_enter(e, DOG_HUNT);
+        }
+        break;
+    }
+}
+
+// Paws on the floor: the EDD flag 0x40000 of these keyframes plays sound 8
+// (em20 entry 0x80100460): walk, run (straight / turning), anim 9, the leap
+static const uint8_t dog_steps[][3] = {
+    { D_WALK, 5, 39 }, { D_RUN, 1, 15 }, { D_RUN_LEFT, 1, 15 }, { D_RUN_RIGHT, 1, 15 }, { 9, 11, 22 }, { D_JUMP, 2, 2 },
+};
+#define SND_DOG_STEP 8
+
+static void dog_step_sound(const Enemy *e, int anim, int key)
+{
+    int n = anim - types[e->type].set_start[SET_GAIT];
+    for (unsigned k = 0; k < sizeof(dog_steps) / sizeof(dog_steps[0]); k++)
+        if (dog_steps[k][0] == n && (key == dog_steps[k][1] || key == dog_steps[k][2])) {
+            sound_at(e, SND_DOG_STEP);
+            return;
+        }
+}
+
+static void dog_tick(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
+{
+    int anim = e->anim, key = e->key;
+    dog_step_sound(e, anim, key);
+    switch (e->state) {
+    case DOG_IDLE: dog_idle(e, i, p, d); break;
+    case DOG_CIRCLE: dog_circle(e, i, p, d); break;
+    case DOG_HUNT: dog_hunt(e, i, p, d); break;
+    case DOG_ATTACK: dog_attack(e, i, p); break;
+    case DOG_HURT:
+    case ST_DYING: dog_thrown(e, i); break;
+    default: anim_step(e, NULL); break;
+    }
+}
+
+// ---------------------------------------------------------------- crow
+// Crow (type 0x21; overlay slot 1 at 0x8010d000, think / move tables
+// 0x801118c4 / 0x80111900 by state; docs/enemy-others.md). 10 HP, so every
+// hit kills it. It flies 1800..4800 above Leon's feet, dives at him and pecks
+// until he shakes it off. One crow attacks at a time (0x800c77f0 & 1).
+#define TYPE_CROW 0x21
+#define CROW_PERCH 0            // sits, wakes when Leon comes near (0x8010d6c0 / 0x8010d7a0)
+#define CROW_TAKEOFF 2          // (0x8010dc34)
+#define CROW_FLY 4              // flies about over him (0x8010e0ac / 0x8010e1b0, climbs 5, sinks 6)
+#define CROW_DIVE 13            // dives at his head (0x8010f1d0 / 0x8010f244)
+#define CROW_ON 14              // on him, pecks (0x8010f4ec / 0x8010f5b0)
+#define CROW_FALL 10            // hit or dead: falls to the floor (0x8010efb0)
+#define C_PERCH 0x00
+#define C_GLIDE 0x03
+#define C_FLAP 0x04
+#define C_PECK 0x05
+#define C_TAKEOFF 0x07
+#define C_HIT 0x09
+#define C_DOWN 0x0B
+#define CROW_PECK 5             // x1.5 (FUN_8003cf38): 7 HP
+#define CROW_SHAKE 100          // -1 per tick, -3 more per key pressed (FUN_8001532c)
+#define SND_CROW_CAW 1
+#define SND_CROW_PECK 2
+#define SND_CROW_HIT 3
+#define SND_CROW_FLOOR 5
+#define SND_CROW_PERCHED 6
+
+
+static int is_crow(const Enemy *e) { return types[e->type].type == TYPE_CROW; }
+
+static void crow_anim(Enemy *e, int anim, int key) { set_anim(e, SET_GAIT, anim, key); }
+
+static void crow_spawn(Enemy *e)
+{
+    e->hp = 10;
+    e->floor_y = e->y;
+    crow_anim(e, C_PERCH, rnd() & 7);
+    dog_enter(e, CROW_PERCH);
+}
+
+static void crow_release(Enemy *e, int i)
+{
+    if (crow_lock == i)
+        crow_lock = -1;
+    e->cooldown = 30; // 0x21c: no new attack for a while
+}
+
+// flies along its facing at its speed, rising / sinking by vspeed
+static void crow_move(Enemy *e, int i)
+{
+    if (!move_dir(e, i, e->dir, e->speed))
+        e->dir = (e->dir + 0x400 * 8 + (rnd() << 5)) & 32767; // bumped a wall: turns away
+    e->y += e->vspeed;
+}
+
+static void crow_tick(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
+{
+    e->floor_y = p->y; // it lands on Leon's floor
+    int32_t gx = e->has_goal ? e->goal_x : p->x, gz = e->has_goal ? e->goal_z : p->z;
+    switch (e->state) {
+    case CROW_PERCH:
+        if (e->sub == 0) { // waiting to fly off (state 1: 0..7 ticks)
+            if (anim_step(e, NULL) && !(rnd() & 3)) {
+                crow_anim(e, rnd() & 1 ? C_PERCH : 1, 0);
+                if (!(rnd() & 1))
+                    sound_at(e, SND_CROW_PERCHED);
+            }
+            if (d < 1800 || ((p->noise & NOISE_RUN) && d < 5400) || (p->noise & NOISE_SHOT)) {
+                e->sub = 1;
+                e->timer = rnd() & 7;
+            }
+        } else if (e->timer-- <= 0) {
+            dog_enter(e, CROW_TAKEOFF);
+        } else {
+            anim_step(e, NULL);
+        }
+        break;
+    case CROW_TAKEOFF:
+        if (e->sub == 0) {
+            int k = rnd() & 7;
+            if (rnd() & 1)
+                sound_at(e, SND_CROW_CAW);
+            crow_anim(e, C_TAKEOFF, k);
+            e->speed = (rnd() & 0x1F) + 100;
+            e->vspeed = -10;
+            e->timer = 9 - k;
+            e->sub = 1;
+        }
+        if (--e->timer <= 0) { // climbs in steps (0x8010dc34 cases 1-4)
+            static const int8_t climb[4][2] = { { -80, 6 }, { -60, 4 }, { -100, 9 }, { -80, 127 } };
+            int s = e->sub - 1 < 4 ? e->sub - 1 : 3;
+            e->vspeed = climb[s][0];
+            e->timer = climb[s][1];
+            if (e->sub < 5)
+                e->sub++;
+        }
+        e->dir = (e->dir + turn_delta(e, p->x, p->z, 0x20)) & 32767;
+        crow_move(e, i);
+        if (e->speed < 300)
+            e->speed++;
+        if (anim_step(e, NULL))
+            dog_enter(e, CROW_FLY);
+        break;
+    case CROW_FLY:
+        if (e->sub == 0) { // glides or flaps for 0..31 ticks (0x8010e1b0)
+            int flap = rnd() & 1;
+            crow_anim(e, flap ? C_FLAP : C_GLIDE, e->key);
+            e->aggr = flap ? 3 : 2; // speed gain
+            e->timer = rnd() & 0x1F;
+            e->sub = 1;
+            if (!(rnd() & 7))
+                sound_at(e, SND_CROW_CAW);
+        }
+        // height band (states 5 / 6): 1800..4800 above his feet
+        if (e->y > p->y - 1800)
+            e->vspeed = -40;
+        else if (e->y < p->y - 4800)
+            e->vspeed = 40;
+        else if (!(rnd() & 15))
+            e->vspeed = (rnd() & 1) ? 40 : -40;
+        if (p->dead) { // circles a little
+            e->dir = (e->dir + 64) & 32767;
+        } else if (e->sub == 2) { // sharp turn, slowing down (state 8, 0x8010e964)
+            e->dir = (e->dir + turn_delta(e, gx, gz, 0x60)) & 32767;
+            if (in_cone(e, gx, gz, 0x60) || e->timer2-- == 0)
+                e->sub = 0;
+        } else {
+            e->dir = (e->dir + turn_delta(e, gx, gz, 0x20)) & 32767;
+            // circling him wide (FUN_801111bc counts it in obj+0x21e): turn sharply
+            if (in_cone(e, p->x, p->z, 0x100))
+                e->misses = 0;
+            else if (++e->misses > 10) {
+                e->misses = 0;
+                e->sub = 2;
+                e->timer2 = rnd() & 0x3F;
+            }
+        }
+        crow_move(e, i);
+        if (e->sub == 2) {
+            if (e->speed > 100)
+                e->speed -= 4;
+        } else if (e->speed < 300) {
+            e->speed += e->aggr;
+        }
+        anim_step(e, NULL);
+        if (e->sub == 1 && e->timer-- == 0)
+            e->sub = 0;
+        if (e->cooldown) {
+            e->cooldown--;
+            break;
+        }
+        // attack (FUN_801111bc): 900..8100 away, in sight, ahead +-22.5 degrees
+        if (!p->dead && crow_lock < 0 && d >= 900 && d < 8100 && e->sees && in_cone(e, p->x, p->z, 0x100)) {
+            crow_lock = i;
+            dog_enter(e, CROW_DIVE);
+        }
+        break;
+    case CROW_DIVE: { // at his head (0x8010f244), turns fast
+        int32_t head = p->y - 2880;
+        if (e->sub == 0) {
+            crow_anim(e, C_FLAP, 0);
+            e->speed = 0;
+            e->vspeed = 0;
+            e->timer = 0;
+            e->sub = 1;
+        }
+        if (e->timer-- <= 0) {
+            sound_at(e, SND_CROW_CAW);
+            e->timer = 14;
+        }
+        e->dir = (e->dir + turn_delta(e, p->x, p->z, 0x180)) & 32767;
+        if (e->speed < 300)
+            e->speed += 12;
+        if (d < 900 && e->speed > 100)
+            e->speed = 100;
+        if (e->y < head - 60)
+            e->y += 60;
+        else if (e->y > head + 60)
+            e->y -= 60;
+        anim_step(e, NULL);
+        if (p->dead || !in_cone(e, p->x, p->z, 0xC0) || !e->sees || !p->can_grab) {
+            crow_release(e, i);
+            dog_enter(e, CROW_FLY);
+            break;
+        }
+        if (d < 650 && abs(e->y - head) < 99) {
+            dog_enter(e, CROW_ON);
+            break;
+        }
+        move_dir(e, i, e->dir, e->speed);
+        break;
+    }
+    case CROW_ON: // pecks (td0ac): every 2..9 ticks; shaken off when the count runs out
+        if (e->sub == 0) {
+            crow_anim(e, C_PECK, 0);
+            e->turned = CROW_SHAKE;
+            e->timer = 4;
+            e->sub = 1;
+        }
+        // sits on his head, facing his back
+        e->x = p->x + ((250 * cosLerp(p->dir)) >> 12);
+        e->z = p->z - ((250 * sinLerp(p->dir)) >> 12);
+        e->y = p->y - 2400;
+        e->dir = (p->dir + 16384) & 32767;
+        anim_step(e, NULL);
+        e->turned -= 1 + (p->pressed ? 3 : 0);
+        if (e->timer-- <= 0) {
+            game_blood(0, p->x, p->y - 2300, p->z, e->dir, 15, p->y);
+            sound_at(e, SND_CROW_PECK);
+            int r = game_player_damage(CROW_PECK);
+            if (r == 2)
+                game_player_killed();
+            else
+                game_player_hurt(0);
+            e->timer = (rnd() & 7) + 2;
+            if (r)
+                e->turned = -1;
+        }
+        if (e->turned < 0 || p->dead) { // flies off
+            crow_release(e, i);
+            e->speed = 150;
+            e->vspeed = -60;
+            e->dir = (p->dir + 16384 + (rnd() << 5) - 4096) & 32767;
+            dog_enter(e, CROW_FLY);
+        }
+        break;
+    case CROW_FALL:
+    case ST_DYING: // falls to the floor (0x8010efb0 cases 1-3), lies
+        if (e->sub == 0) {
+            crow_anim(e, C_HIT, 0);
+            e->vspeed = 0;
+            e->sub = 1;
+        }
+        if (e->sub == 1) {
+            anim_step(e, NULL);
+            e->vspeed += 20;
+            e->y += e->vspeed;
+            move_dir(e, i, e->push_dir, e->speed);
+            if (e->y >= e->floor_y - 250) {
+                e->y = e->floor_y - 250;
+                sound_at(e, SND_CROW_FLOOR);
+                crow_anim(e, C_DOWN, 0);
+                e->timer = rnd() & 15;
+                e->sub = 2;
+            }
+        } else if (e->state == ST_DYING) { // 11 keys of the flutter, then still (0x8010f900 case 5)
+            if (e->key >= 11)
+                e->state = ST_DEAD;
+            else
+                anim_step(e, NULL);
+        } else if (anim_step(e, NULL)) { // stunned: up again
+            dog_enter(e, CROW_TAKEOFF);
+        }
+        break;
+    default:
+        anim_step(e, NULL);
+        break;
+    }
+}
+
+// Hit (0x8010f900): knocked away from Leon at 100 a tick, falls (gravity 20)
+static void crow_shot(Enemy *e, int i, int16_t dir)
+{
+    if (crow_lock == i)
+        crow_lock = -1;
+    e->state = ST_DYING;
+    e->sub = 0;
+    e->speed = 100;
+    e->push_dir = dir;
+    sound_at(e, SND_CROW_HIT);
+}
+
+// ---------------------------------------------------------------- licker
+// Licker (types 0x22 and the tougher 0x24; overlay of CDEMD0.EMS at
+// 0x80100000, states in table 0x80107488; docs/enemy-others.md). It is blind
+// and goes by sound (FUN_80100db0: any step within 3000, running or a shot
+// within 9000). Attacks: the claw (state 9), the tongue (state 10) and the
+// jump (state 11). Only one licker claws at a time (0x8010752c).
+// The PS1 lets them crawl on ceilings and walls (spawn status bits 8..11);
+// here they stay on the floor.
+#define TYPE_LICKER 0x22
+#define TYPE_LICKER2 0x24
+#define LICK_IDLE 0             // listens (state 0, 0x801017c8)
+#define LICK_TURN 2             // turns to the sound (0x801019a4)
+#define LICK_STALK 6            // crawls at him (0x80101efc / 0x8010291c)
+#define LICK_CLAW 9             // (0x801020bc)
+#define LICK_TONGUE 10          // (0x801023c4)
+#define LICK_JUMP 11            // (0x80103cec)
+#define LICK_HURT 12            // flinches, pushed back (0x8010574c)
+#define LICK_CLAW_DAMAGE 25     // x1.5: 37 HP
+#define LICK_TONGUE_DAMAGE 15   // x1.5: 22 HP
+#define SND_LICK_CLAW 5
+#define SND_LICK_HIT 7
+#define SND_LICK_JUMP 8
+#define SND_LICK_JUMP_HIT 10
+
+enum { LA_CRAWL, LA_TURN, LA_IDLE, LA_LISTEN, LA_CROUCH, LA_CLAW, LA_TONGUE, LA_HIT, LA_DIE, LA_DEAD,
+       LA_JUMP, LA_AIR, LA_LAND, LA_COUNT };
+// animations of type 0x22 and 0x24 (the second lacks some of the first's)
+static const uint8_t lick_anims[2][LA_COUNT] = {
+    { 1, 2, 3, 4, 6, 7, 21, 22, 28, 11, 31, 32, 33 },
+    { 1, 2, 3, 4, 6, 7, 15, 16, 20, 11, 23, 24, 25 },
+};
+// health (0x80107124)
+static const uint8_t lick_hp[16] = { 97, 111, 91, 85, 120, 125, 109, 111, 111, 109, 91, 111, 125, 120, 97, 111 };
+// the claw's reach by keyframe 17..24 (0x80107382)
+static const uint16_t claw_reach[8] = { 2500, 3500, 4600, 4500, 4200, 3500, 3000, 2500 };
+// damage by weapon (near / middle / far), 0 = the weapon's own
+static const uint16_t lick_damage[2][20][3] = {
+    { [2] = { 14, 13, 12 }, [3] = { 14, 13, 12 }, [4] = { 14, 13, 12 }, [5] = { 200, 200, 200 },
+      [6] = { 200, 200, 200 }, [7] = { 50, 45, 40 }, [8] = { 110, 95, 80 }, [0x0F] = { 11, 11, 11 } },
+    { [2] = { 10, 9, 8 }, [3] = { 10, 9, 8 }, [4] = { 10, 9, 8 }, [5] = { 40, 40, 40 },
+      [6] = { 40, 40, 40 }, [7] = { 30, 27, 25 }, [8] = { 50, 47, 45 }, [0x0F] = { 8, 8, 8 } },
+};
+
+static int is_licker(const Enemy *e) { int t = types[e->type].type; return t == TYPE_LICKER || t == TYPE_LICKER2; }
+static int lick_kind(const Enemy *e) { return types[e->type].type == TYPE_LICKER2; }
+static void lick_anim(Enemy *e, int which, int key) { set_anim(e, SET_GAIT, lick_anims[lick_kind(e)][which], key); }
+
+static void licker_spawn(Enemy *e)
+{
+    e->hp = lick_hp[rnd() & 15];
+    if (lick_kind(e))
+        e->hp -= 20;
+    e->floor_y = e->y;
+    e->airborne = ((e->flags >> 8) & 0xF) != 0; // on the ceiling or a wall: drops to the floor
+    lick_anim(e, LA_IDLE, rnd() & 0x3F);
+    dog_enter(e, LICK_IDLE);
+}
+
+// heard him? (FUN_80100db0)
+static int licker_hears(const EnemyTarget *p, uint32_t d)
+{
+    if (p->dead)
+        return 0;
+    if (d < 3000)
+        return (p->noise & (NOISE_WALK | NOISE_RUN | NOISE_SHOT)) != 0;
+    return d < 9000 && (p->noise & (NOISE_RUN | NOISE_SHOT));
+}
+
+static void licker_hits(Enemy *e, const EnemyTarget *p, int damage)
+{
+    game_blood(0, p->x, p->y - 1500, p->z, e->dir, 25, p->y);
+    int r = game_player_damage(damage);
+    if (r == 2) {
+        game_player_killed();
+    } else {
+        int behind = ((p->dir - e->dir + 8192) & 32767) < 16384;
+        game_player_hurt(behind ? 2 : 1);
+    }
+    e->cooldown = 40; // obj+0x22e: no claw for a while
+    e->timer2 = 1;    // this attack has hit
+}
+
+// root motion of the crawl / attack animations
+static void licker_step(Enemy *e, int i)
+{
+    int32_t fwd;
+    int done = anim_step(e, &fwd);
+    (void)done;
+    move_dir(e, i, e->dir, fwd);
+}
+
+static void licker_tick(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
+{
+    if (e->airborne && e->state < LICK_HURT) { // drops down to his floor first
+        e->floor_y = p->y;
+        e->y += 120;
+        if (e->y >= e->floor_y) {
+            e->y = e->floor_y;
+            e->airborne = 0;
+        }
+        anim_step(e, NULL);
+        return;
+    }
+    if (e->cooldown)
+        e->cooldown--;
+    int last = e->key + 1 >= types[e->type].model.anims[e->anim].count;
+    switch (e->state) {
+    case LICK_IDLE:
+        anim_step(e, NULL);
+        if (licker_hears(p, d))
+            dog_enter(e, LICK_TURN);
+        break;
+    case LICK_TURN: // to him, 0x60 a tick
+        if (e->sub == 0) {
+            lick_anim(e, LA_TURN, 0);
+            e->sub = 1;
+            e->timer = 0;
+        }
+        e->dir = (e->dir + turn_delta(e, p->x, p->z, 0x60)) & 32767;
+        anim_step(e, NULL);
+        if (in_cone(e, p->x, p->z, 0x80))
+            dog_enter(e, LICK_STALK);
+        else if (++e->timer > 120 || p->dead)
+            dog_enter(e, LICK_IDLE);
+        break;
+    case LICK_STALK:
+        if (e->sub == 0) {
+            lick_anim(e, LA_CRAWL, e->key);
+            e->sub = 1;
+            e->timer = 0;
+        }
+        e->dir = (e->dir + turn_delta(e, e->has_goal ? e->goal_x : p->x, e->has_goal ? e->goal_z : p->z,
+                                       d < 4000 ? 0x40 : 0x10)) & 32767;
+        licker_step(e, i);
+        if (p->dead) {
+            dog_enter(e, LICK_IDLE);
+            break;
+        }
+        if (++e->timer < 8)
+            break; // crawls a little before it decides
+        if (d < 2000 && !e->cooldown && claw_lock < 0 && p->can_grab) {
+            dog_enter(e, in_cone(e, p->x, p->z, 0x300) ? LICK_CLAW : LICK_TURN);
+        } else if (d >= 2000 && d < 2800 && p->can_grab && in_cone(e, p->x, p->z, 0x154) && !(rnd() & 15)) {
+            dog_enter(e, LICK_TONGUE);
+        } else if (d >= 3500 && d < 6000 && p->can_grab && in_cone(e, p->x, p->z, 0x100) && !(rnd() & 31)) {
+            dog_enter(e, LICK_JUMP);
+        }
+        break;
+    case LICK_CLAW: // keys 17..24 reach the table's distance, +-22.5 degrees
+        if (e->sub == 0) {
+            claw_lock = i;
+            lick_anim(e, LA_CLAW, 0);
+            e->sub = 1;
+            e->timer2 = 0;
+        }
+        e->dir = (e->dir + turn_delta(e, p->x, p->z, 8)) & 32767;
+        licker_step(e, i);
+        if (e->key == 17)
+            sound_at(e, SND_LICK_CLAW);
+        if (!e->timer2 && e->key >= 17 && e->key <= 24 && p->can_grab && in_cone(e, p->x, p->z, 0x100) &&
+            d < claw_reach[e->key - 17] - 1500) // reach counts from its hips, Leon from his feet
+            licker_hits(e, p, LICK_CLAW_DAMAGE);
+        if (last) {
+            claw_lock = -1;
+            dog_enter(e, LICK_STALK);
+        }
+        break;
+    case LICK_TONGUE: // keys 1..5: within 2800, +-30 degrees
+        if (e->sub == 0) {
+            lick_anim(e, LA_TONGUE, 0);
+            e->sub = 1;
+            e->timer2 = 0;
+        }
+        e->dir = (e->dir + turn_delta(e, p->x, p->z, 8)) & 32767;
+        licker_step(e, i);
+        if (!e->timer2 && e->key >= 1 && e->key <= 5 && p->can_grab && d < 2800 && in_cone(e, p->x, p->z, 0x154))
+            licker_hits(e, p, LICK_TONGUE_DAMAGE);
+        if (last)
+            dog_enter(e, LICK_STALK);
+        break;
+    case LICK_JUMP:
+        switch (e->sub) {
+        case 0: // crouches
+            lick_anim(e, LA_CROUCH, 0);
+            e->sub = 1;
+            e->timer2 = 0;
+            break;
+        case 1:
+            if (anim_step(e, NULL)) {
+                sound_at(e, SND_LICK_JUMP);
+                lick_anim(e, LA_JUMP, 0);
+                e->sub = 2;
+            }
+            break;
+        case 2: // takes off, turning 6 a tick
+            e->dir = (e->dir + turn_delta(e, p->x, p->z, 6)) & 32767;
+            if (anim_step(e, NULL)) {
+                lick_anim(e, LA_AIR, 0);
+                e->speed = 550;
+                e->vspeed = -245;
+                e->sub = 3;
+            }
+            break;
+        case 3: // in the air: 550 forward (-8 a tick), 245 up (+35 a tick)
+            e->dir = (e->dir + turn_delta(e, p->x, p->z, 0x20)) & 32767;
+            move_dir(e, i, e->dir, e->speed);
+            e->speed = e->speed > 8 ? e->speed - 8 : 0;
+            e->y += e->vspeed;
+            e->vspeed += 35;
+            if (e->key + 1 < types[e->type].model.anims[e->anim].count)
+                e->key++;
+            if (!e->timer2 && e->key >= 11 && e->key <= 14 && d < 2200 && p->can_grab) {
+                // 80, or 100 if he has more than 110; survives with at least 40
+                int damage = p->hp > 110 ? 100 : 80;
+                int left = p->hp - (damage < 41 ? damage + (damage >> 1) : damage);
+                sound_at(e, SND_LICK_JUMP_HIT);
+                if (left >= 0 && left < 40)
+                    damage = p->hp - 40;
+                licker_hits(e, p, damage);
+            }
+            if (e->vspeed > 0 && e->y >= e->floor_y) {
+                e->y = e->floor_y;
+                lick_anim(e, LA_LAND, 0);
+                e->sub = 4;
+            }
+            break;
+        case 4:
+            if (anim_step(e, NULL))
+                dog_enter(e, LICK_STALK);
+            break;
+        }
+        break;
+    case LICK_HURT: // pushed along the shot, 6 slower a tick
+        move_dir(e, i, e->push_dir, e->speed);
+        e->speed = e->speed > 6 ? e->speed - 6 : 0;
+        if (e->y < e->floor_y) {
+            e->y += 60;
+            if (e->y > e->floor_y)
+                e->y = e->floor_y;
+        }
+        if (anim_step(e, NULL)) // FUN_801055cc: back at him
+            dog_enter(e, d < 2500 && in_cone(e, p->x, p->z, 0x140) ? LICK_STALK : LICK_TURN);
+        break;
+    case ST_DYING:
+        if (e->sub == 0) {
+            if (anim_step(e, NULL)) {
+                lick_anim(e, LA_DEAD, 0);
+                e->sub = 1;
+            }
+        } else if (last) {
+            e->state = ST_DEAD;
+        } else {
+            anim_step(e, NULL);
+        }
+        if (e->y < e->floor_y) {
+            e->y += 60;
+            if (e->y > e->floor_y)
+                e->y = e->floor_y;
+        }
+        break;
+    default:
+        anim_step(e, NULL);
+        break;
+    }
+}
+
+static void licker_shot(Enemy *e, int i, int16_t dir)
+{
+    if (claw_lock == i)
+        claw_lock = -1;
+    e->push_dir = dir;
+    if (e->hp < 0) {
+        sound_at(e, SND_LICK_JUMP);
+        lick_anim(e, LA_DIE, 0);
+        e->state = ST_DYING;
+        e->sub = 0;
+        return;
+    }
+    sound_at(e, SND_LICK_HIT);
+    if (e->state == LICK_JUMP && e->sub == 3)
+        return; // in the air it flies on
+    lick_anim(e, LA_HIT, 0);
+    e->speed = 100;
+    dog_enter(e, LICK_HURT);
+    e->sub = 1;
+}
+
+// ---------------------------------------------------------------- spider
+// Giant spider (type 0x25; overlay slot 1 at 0x8010d000, floor states in
+// table 0x801132e8; docs/enemy-others.md) and the small ones (0x26). The
+// spider moves by its own speed (no root motion). On ceilings and walls
+// (spawn variants 2..11) the PS1 lets it crawl there; here it drops to the
+// floor when Leon comes near.
+#define TYPE_SPIDER 0x25
+#define TYPE_SPIDERLING 0x26
+#define SP_IDLE 0               // decides (0x8010d708)
+#define SP_WANDER 4             // (0x8010da00)
+#define SP_TURN 5               // turns on the spot (0x8010db04)
+#define SP_CHARGE 7             // crouches, aims, rushes, bites (0x8010dc64)
+#define SP_SPIT 8               // spits poison (0x8010df0c)
+#define SP_EVADE 9              // jumps aside (0x8010e198)
+#define SP_HURT 10              // flinches (0x8010fcd8)
+#define SP_BITE 20              // x1.5 (FUN_80112974): 30 HP
+#define SP_SPIT_DAMAGE 5
+#define SND_SPIDER_BITE 1
+
+// health (0x801131cc) + rand & 3
+static const uint8_t spider_hp[16] = { 109, 109, 109, 109, 129, 109, 109, 129, 109, 109, 109, 129, 109, 99, 109, 109 };
+
+static int is_spider(const Enemy *e) { int t = types[e->type].type; return t == TYPE_SPIDER || t == TYPE_SPIDERLING; }
+static int is_spiderling(const Enemy *e) { return types[e->type].type == TYPE_SPIDERLING; }
+
+static void spider_spawn(Enemy *e)
+{
+    e->floor_y = e->y;
+    if (is_spiderling(e)) {
+        e->hp = 1;
+        set_anim(e, SET_GAIT, 1, rnd() & 7);
+    } else {
+        e->hp = spider_hp[rnd() & 15] + (rnd() & 3);
+        e->airborne = (e->flags & EF_VARIANT) >= 2 && (e->flags & EF_VARIANT) <= 11;
+        set_anim(e, SET_GAIT, 0, rnd() & 15);
+    }
+    dog_enter(e, SP_IDLE);
+}
+
+static void spider_bites(Enemy *e, const EnemyTarget *p, int damage)
+{
+    sound_at(e, SND_SPIDER_BITE);
+    game_blood(0, p->x, p->y - 1200, p->z, e->dir, 20, p->y);
+    if (game_player_damage(damage) == 2)
+        game_player_killed();
+    else
+        game_player_hurt(((p->dir - e->dir + 8192) & 32767) < 16384 ? 2 : 1);
+}
+
+// the small ones crawl at Leon and nip him when they touch
+static void spiderling_tick(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
+{
+    if (e->state == ST_DYING) {
+        if (anim_step(e, NULL))
+            e->state = ST_DEAD;
+        return;
+    }
+    if (e->cooldown)
+        e->cooldown--;
+    e->dir = (e->dir + turn_delta(e, p->x, p->z, 0x40)) & 32767;
+    anim_step(e, NULL);
+    if (d > 500)
+        move_dir(e, i, e->dir, 20);
+    else if (!e->cooldown && p->can_grab) {
+        e->cooldown = 30;
+        if (game_player_damage(2) == 2)
+            game_player_killed();
+    }
+}
+
+static void spider_tick(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
+{
+    if (is_spiderling(e)) {
+        spiderling_tick(e, i, p, d);
+        return;
+    }
+    if (e->airborne) { // waits up there, drops when Leon comes near
+        anim_step(e, NULL);
+        if (d < 4000 || (p->noise & NOISE_SHOT)) {
+            e->floor_y = p->y;
+            e->y += 150;
+            if (e->y >= e->floor_y) {
+                e->y = e->floor_y;
+                e->airborne = 0;
+            }
+        }
+        return;
+    }
+    if (e->cooldown)
+        e->cooldown--;
+    int facing = in_cone(e, p->x, p->z, 0x80);
+    switch (e->state) {
+    case SP_IDLE:
+        if (e->sub == 0) {
+            set_anim(e, SET_GAIT, 0, e->key);
+            e->sub = 1;
+        }
+        anim_step(e, NULL);
+        if (p->dead)
+            break;
+        if (p->noise & NOISE_SHOT) {
+            dog_enter(e, (rnd() & 1) ? SP_TURN : SP_EVADE);
+            break;
+        }
+        if (d < 8000 && !in_cone(e, p->x, p->z, 0x400)) {
+            dog_enter(e, SP_TURN);
+            break;
+        }
+        if (!e->cooldown && d < 7500 && facing && p->can_grab) {
+            if (d > 1000 && d < 6000 && ((0x340 >> (rnd() & 15)) & 1))
+                dog_enter(e, SP_SPIT);
+            else
+                dog_enter(e, SP_CHARGE);
+        } else if (d >= 8000 && !(rnd() & 63)) {
+            dog_enter(e, SP_WANDER);
+        }
+        break;
+    case SP_WANDER: // anim 3, turning +-0x18 for 10..63 ticks
+        if (e->sub == 0) {
+            set_anim(e, SET_GAIT, 3, 0);
+            e->timer = (rnd() + 10) & 0x3F;
+            e->turned = (rnd() & 1) ? 0x18 * 8 : -0x18 * 8;
+            e->sub = 1;
+        }
+        e->dir = (e->dir + e->turned) & 32767;
+        move_dir(e, i, e->dir, 40);
+        anim_step(e, NULL);
+        if (e->timer-- <= 0 || d < 8000)
+            dog_enter(e, SP_IDLE);
+        break;
+    case SP_TURN: // anim 2, 0x80 a tick, 60..91 ticks at most
+        if (e->sub == 0) {
+            set_anim(e, SET_GAIT, 2, 0);
+            e->timer = (rnd() & 0x1F) + 60;
+            e->sub = 1;
+        }
+        {
+            int delta = turn_delta(e, p->x, p->z, 0x80);
+            e->dir = (e->dir + delta) & 32767;
+            anim_step(e, NULL);
+            if (e->timer-- <= 0 || delta == 0)
+                dog_enter(e, SP_IDLE);
+        }
+        break;
+    case SP_CHARGE:
+        switch (e->sub) {
+        case 0: // crouches (anim 4), creeping on
+            set_anim(e, SET_GAIT, 4, 0);
+            e->sub = 1;
+            // fall through
+        case 1:
+            move_dir(e, i, e->dir, 100);
+            if (anim_step(e, NULL)) {
+                set_anim(e, SET_GAIT, 5, 0);
+                e->timer = (rnd() & 0x1F) + 20;
+                e->sub = 2;
+            }
+            break;
+        case 2: { // aims (0x40 a tick)
+            int delta = turn_delta(e, p->x, p->z, 0x40);
+            e->dir = (e->dir + delta) & 32767;
+            anim_step(e, NULL);
+            if (delta == 0) {
+                e->timer = (rnd() & 0x1F) + 10;
+                e->sub = 3;
+            } else if (e->timer-- <= 0) {
+                e->sub = 4;
+            }
+            break;
+        }
+        case 3: // rushes at 300, turning 0x10
+            e->dir = (e->dir + turn_delta(e, p->x, p->z, 0x10)) & 32767;
+            move_dir(e, i, e->dir, 300);
+            anim_step(e, NULL);
+            if (d < 1500 && p->can_grab && abs(p->y - e->y) < 0x10CC) {
+                spider_bites(e, p, SP_BITE);
+                e->sub = 4;
+            } else if (e->timer-- <= 0 || !in_cone(e, p->x, p->z, 0x200)) {
+                e->sub = 4;
+            }
+            break;
+        case 4: // stops (anim 7)
+            set_anim(e, SET_GAIT, 7, 0);
+            e->sub = 5;
+            // fall through
+        case 5:
+            move_dir(e, i, e->dir, 100);
+            if (anim_step(e, NULL)) {
+                e->cooldown = 15;
+                dog_enter(e, SP_IDLE);
+            }
+            break;
+        }
+        break;
+    case SP_SPIT: // anim 11; the spit flies at him (FUN_80112828)
+        if (e->sub == 0) {
+            set_anim(e, SET_GAIT, 11, 0);
+            e->sub = 1;
+        }
+        e->dir = (e->dir + turn_delta(e, p->x, p->z, 0x10)) & 32767;
+        if (e->key == 20 && d < 6000 && in_cone(e, p->x, p->z, 0x100) && p->can_grab) {
+            game_blood(1, e->x, e->y - 300, e->z, e->dir, 40, e->floor_y);
+            spider_bites(e, p, SP_SPIT_DAMAGE);
+        }
+        if (anim_step(e, NULL)) {
+            e->cooldown = 15;
+            dog_enter(e, SP_IDLE);
+        }
+        break;
+    case SP_EVADE: // jumps aside at 400..463 (anim 8)
+        if (e->sub == 0) {
+            set_anim(e, SET_GAIT, 8, 0);
+            e->push_dir = (angle_to(e, p->x, p->z) + (rnd() << 3) + ((rnd() & 1) ? 0x800 * 8 : 0) + 0x380 * 8) & 32767;
+            e->speed = (rnd() & 0x3F) + 400;
+            e->sub = 1;
+        }
+        e->dir = (e->dir + turn_delta(e, p->x, p->z, 0x60)) & 32767;
+        move_dir(e, i, e->push_dir, e->speed);
+        if (anim_step(e, NULL))
+            dog_enter(e, SP_IDLE);
+        break;
+    case SP_HURT: // anim 1, then jumps aside or decides again
+        if (anim_step(e, NULL))
+            dog_enter(e, (rnd() & 1) ? SP_EVADE : SP_IDLE);
+        break;
+    case ST_DYING: // anim 12, the legs curl up
+        if (e->key + 1 >= types[e->type].model.anims[e->anim].count)
+            e->state = ST_DEAD;
+        else
+            anim_step(e, NULL);
+        break;
+    default:
+        anim_step(e, NULL);
+        break;
+    }
+}
+
+static void spider_shot(Enemy *e)
+{
+    if (is_spiderling(e)) {
+        set_anim(e, SET_GAIT, 3, 0);
+        e->state = ST_DYING;
+        return;
+    }
+    e->airborne = 0;
+    if (e->y < e->floor_y)
+        e->y = e->floor_y;
+    if (e->hp < 0) {
+        set_anim(e, SET_GAIT, 12, 0);
+        e->state = ST_DYING;
+        e->sub = 0;
+        return;
+    }
+    if (e->state == SP_CHARGE && e->sub == 3)
+        return; // rushing: it keeps on
+    set_anim(e, SET_GAIT, 1, 0);
+    dog_enter(e, SP_HURT);
+    e->sub = 1;
+}
+
+// ---------------------------------------------------------------- Mr. X
+// The Tyrant (type 0x2a; overlay of CDEMD0.EMS at 0x80100000, states in
+// table 0x80104cb4; docs/enemy-others.md). 20000+ HP: shots only slow him
+// down. He walks at Leon (turning 0x30 a tick) whenever he is closer than
+// 5500 and, in reach and facing him, swipes or punches: three attacks
+// (states 25 / 26 / 27: keys, range and damage below). The animation numbers
+// are those of the state routines; a spawn with the hold status (0x4000)
+// stands until the room script clears it.
+#define TYPE_TYRANT 0x2a
+#define TY_STAND 0
+#define TY_WALK 1
+#define TY_ATTACK 3
+#define TY_PAUSE 4
+#define TY_WALK_ANIM 0
+#define TY_STAND_ANIM 1
+
+static const struct { uint8_t anim, key0, key1; uint16_t range; uint8_t damage; } ty_attack[3] = {
+    { 12, 0x2F, 0x32, 550, 40 },   // 0x801025b0: the big swing, 231 keys
+    { 15, 0x0E, 0x13, 950, 10 },   // 0x80102790: the quick one
+    { 3, 0x15, 0x19, 750, 30 },    // 0x801029d4: the backhand
+};
+
+static int is_tyrant(const Enemy *e) { return types[e->type].type == TYPE_TYRANT; }
+
+static void tyrant_spawn(Enemy *e)
+{
+    e->hp = 20000 + (rnd() & 0x7F);
+    e->floor_y = e->y;
+    set_anim(e, SET_GAIT, TY_STAND_ANIM, 0);
+    dog_enter(e, TY_STAND);
+}
+
+static void tyrant_tick(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
+{
+    int32_t fwd;
+    int near = d < ((e->flags & 0x300) == 0x100 ? 6500 : 5500);
+    switch (e->state) {
+    case TY_STAND:
+        anim_step(e, NULL);
+        if (!(e->flags & EF_HOLD) && near && !p->dead && same_floor(e, p))
+            dog_enter(e, TY_WALK);
+        break;
+    case TY_WALK:
+        if (e->sub == 0) {
+            set_anim(e, SET_GAIT, TY_WALK_ANIM, e->key);
+            e->sub = 1;
+            e->timer = 0;
+        }
+        if (!near || p->dead || (e->flags & EF_HOLD)) {
+            dog_enter(e, TY_STAND);
+            break;
+        }
+        e->dir = (e->dir + turn_delta(e, e->has_goal ? e->goal_x : p->x, e->has_goal ? e->goal_z : p->z, 0x30)) & 32767;
+        if (d > 900) {
+            anim_step(e, &fwd);
+            move_dir(e, i, e->dir, fwd > 0 ? fwd : 0);
+        } else {
+            anim_step(e, NULL);
+        }
+        if (e->cooldown) {
+            e->cooldown--;
+        } else if (d < 1500 && p->can_grab && in_cone(e, p->x, p->z, 0x100)) {
+            e->aggr = d < 900 ? 0 : d < 1200 ? 1 : 2;           // closer: the big swing
+            if (rnd() & 1)
+                e->aggr = rnd() % 3;
+            dog_enter(e, TY_ATTACK);
+        }
+        break;
+    case TY_ATTACK: {
+        const typeof(ty_attack[0]) *a = &ty_attack[e->aggr % 3];
+        if (e->sub == 0) {
+            set_anim(e, SET_GAIT, a->anim, 0);
+            e->sub = 1;
+            e->timer2 = 0;
+        }
+        e->dir = (e->dir + turn_delta(e, p->x, p->z, 8)) & 32767;
+        int done = anim_step(e, NULL);
+        if (!e->timer2 && e->key >= a->key0 && e->key <= a->key1 && p->can_grab && d < a->range + 600 &&
+            in_cone(e, p->x, p->z, 0x180)) {
+            game_blood(0, p->x, p->y - 1500, p->z, e->dir, 25, p->y);
+            if (game_player_damage(a->damage) == 2)
+                game_player_killed();
+            else
+                game_player_hurt(((p->dir - e->dir + 8192) & 32767) < 16384 ? 2 : 1);
+            e->timer2 = 1;
+        }
+        if (done) {
+            e->cooldown = 20;
+            dog_enter(e, TY_WALK);
+        }
+        break;
+    }
     default:
         anim_step(e, NULL);
         break;
@@ -1338,6 +2836,26 @@ void enemy_tick(const EnemyTarget *p)
             script_mode(e, i);
             continue;
         }
+        if (is_dog(e)) {
+            dog_tick(e, i, p, d);
+            continue;
+        }
+        if (is_crow(e)) {
+            crow_tick(e, i, p, d);
+            continue;
+        }
+        if (is_licker(e)) {
+            licker_tick(e, i, p, d);
+            continue;
+        }
+        if (is_spider(e)) {
+            spider_tick(e, i, p, d);
+            continue;
+        }
+        if (is_tyrant(e)) {
+            tyrant_tick(e, i, p, d);
+            continue;
+        }
         if (e->flinch) { // hit recoil: holds still a moment
             e->flinch--;
             anim_step(e, NULL);
@@ -1472,6 +2990,39 @@ int enemy_hit(int32_t x, int32_t y, int32_t z, int16_t dir, int range, int weapo
     Enemy *e = &enemies[best];
     float dist = sqrtf((float)best_d);
     int box = dist < 3000 ? 0 : dist < 6000 ? 1 : 2;
+    if (is_crow(e)) { // 10 HP, every weapon does 15 or more
+        e->hp -= damage[box];
+        game_blood(0, e->x, e->y - 200, e->z, dir, 15, e->floor_y);
+        crow_shot(e, best, dir);
+        return best;
+    }
+    if (is_tyrant(e)) { // he shrugs it off
+        e->hp -= damage[box];
+        game_blood(0, e->x, e->y - 1800, e->z, dir, 20, e->floor_y);
+        return best;
+    }
+    if (is_spider(e)) {
+        e->hp -= damage[box];
+        game_blood(1, e->x, e->y - 400, e->z, dir, 20, e->floor_y);
+        spider_shot(e);
+        return best;
+    }
+    if (is_licker(e)) {
+        const uint16_t *ld = lick_damage[lick_kind(e)][weapon > 0 && weapon < 20 ? weapon : 0];
+        e->hp -= ld[0] ? ld[box] : damage[box];
+        game_blood(0, e->x, e->y - 900, e->z, dir, 20, e->floor_y);
+        licker_shot(e, best, dir);
+        return best;
+    }
+    if (is_dog(e)) {
+        const uint16_t *dd = weapon > 0 && weapon < 20 && dog_damage[weapon][0] ? dog_damage[weapon] : damage;
+        e->hp -= dd[box];
+        game_blood(0, e->x, e->y - 700, e->z, dir, 20, e->floor_y);
+        if (weapon >= 5 && weapon <= 8 && box < 2)
+            game_blood(0, e->x, e->y - 600, e->z, dir + 0x800, 30, e->floor_y);
+        dog_shot(e, dir, e->hp < 0);
+        return best;
+    }
     e->hp -= damage[box];
     game_blood(0, e->x, e->y - 2300, e->z, dir, 20, e->y);
     // The shotgun (zombie tables 0x8010c764 / 0x8010ca48, weapons 7 and 8,

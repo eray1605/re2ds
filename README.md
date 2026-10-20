@@ -39,8 +39,8 @@ Playable from the opening movie through Leon's disc 1 rooms:
 - **Saving:** at the typewriters with an ink ribbon, 12 slots in `re2ds.sav` on the SD card;
   NEW GAME / LOAD GAME at the start and after dying.
 
-Still missing (see [ROADMAP.md](ROADMAP.md)): the item box, the map and files, the other enemy
-types, the remaining movies, Claire's disc.
+Still missing (see [ROADMAP.md](ROADMAP.md)): the bosses (alligator, G) and the other enemy
+types, options and ranking, Claire's disc.
 
 ## Repository layout
 
@@ -194,9 +194,12 @@ need them like that.
 | B | run (hold with up) |
 | A | action: doors, items, examine; fire while aiming |
 | R | aim (hold); up / down aims high / low |
-| START | status screen (inventory); skips a movie |
-| touch | select on the status screen |
-| L on the status screen | the documents (files) found so far |
+| B during a door | skips the door animation |
+| START | inventory (pauses the game); skips a movie |
+| Y | lower screen during play: the map (default) or the status screen |
+| touch the map | opens the inventory; on the map's title: the next floor you have been to |
+| touch | select in the inventory |
+| L in the inventory | the documents (files) found so far |
 | A / B while reading a document | next page / close (left: page back) |
 
 Debug:
