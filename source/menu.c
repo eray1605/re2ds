@@ -38,6 +38,10 @@ static int num_icons, num_names;
 static int focus, sel, row;            // row 0 = slots, 1 = commands
 static int cmd_sel;
 static const char *message;
+static const char *msg_page;    // the page of the message on screen
+static const char *msg_rest;    // where the next page starts, NULL: this is the last
+static int msg_choice;          // the last page asks yes / no
+static int msg_answer;          // 0 yes, 1 no
 static char info[96];                  // text box when no message is open
 static int ecg_phase;
 static int combine_from = -1;          // COMBINE picked on this slot: choosing the other
@@ -81,18 +85,25 @@ static void text(int x, int y, const char *s, int c)
     dirty = 1;
 }
 
+// Message control codes kept by tools/rdt2json.py: '\f' a new page (the
+// PS1 waits for a button, code 0xFD), '\v' a yes / no question (0xFB).
+#define MSG_PAGE '\f'
+#define MSG_CHOICE '\v'
+static int text_end(char c) { return !c || c == MSG_PAGE || c == MSG_CHOICE; }
+
 // word-wrapped text from (x, y), lines of up to 30 characters, until y_end
-static void text_wrapped(int x, int y, int y_end, const char *s, int c)
+// or the end of the page; returns where it stopped
+static const char *text_wrapped(int x, int y, int y_end, const char *s, int c)
 {
     char line[31];
-    while (*s && y + 8 <= y_end) {
+    while (!text_end(*s) && y + 8 <= y_end) {
         int len = 0, last_space = -1;
-        while (s[len] && s[len] != '\n' && len < 30) {
+        while (!text_end(s[len]) && s[len] != '\n' && len < 30) {
             if (s[len] == ' ')
                 last_space = len;
             len++;
         }
-        if (s[len] && s[len] != '\n' && last_space > 0)
+        if (!text_end(s[len]) && s[len] != '\n' && last_space > 0)
             len = last_space;
         memcpy(line, s, len);
         line[len] = 0;
@@ -102,14 +113,15 @@ static void text_wrapped(int x, int y, int y_end, const char *s, int c)
             s++;
         y += 9;
     }
+    return s;
 }
 
 // word-wrapped text in the box at the bottom (5 lines of 30 characters)
-static void text_box(const char *s, int c)
+static const char *text_box(const char *s, int c, int y_end)
 {
     fill(4, 150, 248, 40, C_BLACK);
     frame(4, 150, 248, 40, C_GREY);
-    text_wrapped(8, 153, 188, s, c);
+    return text_wrapped(8, 153, y_end, s, c);
 }
 
 static void icon(int x, int y, int item)
@@ -263,6 +275,8 @@ static void draw_picture(void)
         memcpy(fb + (y + j) * 256 + x, p + j * picture_w, picture_w);
 }
 
+static void draw_message(void);
+
 static void redraw(int hp)
 {
     memset(fb, col(C_BLACK), sizeof(fb));
@@ -274,9 +288,9 @@ static void redraw(int hp)
     draw_commands();
     draw_picture();
     if (message)
-        text_box(message, C_WHITE);
+        draw_message();
     else
-        text_box(info, C_LIGHT);
+        text_box(info, C_LIGHT, 188);
     dirty = 1;
 }
 
@@ -394,7 +408,35 @@ int menu_debug_on(void) { return debug_mode; }
 void menu_message(const char *t)
 {
     message = t;
+    msg_page = t;
+    msg_answer = 0;
     last_hp = -9999; // redraw
+}
+
+// The page of the message: the rest of a page that does not fit (4 lines)
+// comes as the next one. A question shows YES / NO under its last page.
+static void draw_message(void)
+{
+    const char *end = text_box(msg_page, C_WHITE, 188);
+    msg_choice = 0;
+    msg_rest = NULL;
+    if (*end == MSG_PAGE)
+        msg_rest = end + 1;
+    else if (*end && *end != MSG_CHOICE)
+        msg_rest = end; // did not fit
+    else if (*end == MSG_CHOICE) {
+        end = text_box(msg_page, C_WHITE, 179); // three lines and the answers
+        if (*end != MSG_CHOICE) { // three lines now, the rest with the answers next
+            msg_rest = end;
+            return;
+        }
+        msg_choice = 1;
+        text(56, 180, "YES", msg_answer == 0 ? C_YELLOW : C_DARK);
+        text(168, 180, "NO", msg_answer == 1 ? C_YELLOW : C_DARK);
+    }
+    if (msg_rest)
+        while (*msg_rest == ' ' || *msg_rest == '\n')
+            msg_rest++;
 }
 
 int menu_message_open(void) { return message != NULL; }
@@ -638,6 +680,23 @@ void menu_item_box(InvSlot *box, int box_slots, void (*frame_fn)(void))
     last_hp = -9999; // the status screen again
 }
 
+void menu_overlay(const uint8_t *pixels, const uint16_t *palette)
+{
+    if (palette)
+        memcpy(BG_PALETTE_SUB, palette, 512);
+    if (pixels) {
+        DC_FlushRange(pixels, 256 * 192);
+        dmaCopy(pixels, bgGetGfxPtr(bg), 256 * 192);
+    }
+}
+
+void menu_overlay_end(void)
+{
+    if (data)
+        memcpy(BG_PALETTE_SUB, data + 20, 512);
+    last_hp = -9999; // the status screen again
+}
+
 void menu_picture(int item)
 {
     picture = item;
@@ -652,6 +711,13 @@ void menu_focus(int on)
 }
 
 int menu_has_focus(void) { return focus; }
+
+static int lower_status;        // Y: the status screen during play instead of the map
+static int status_shown;        // the status screen is on the lower screen
+
+int menu_lower_map(void) { return !debug_mode && !focus && !message && !picture && !lower_status; }
+
+void menu_lower_toggle(void) { lower_status = !lower_status; }
 
 static void set_info(int slot)
 {
@@ -823,14 +889,54 @@ int menu_frame(uint32_t down, int hp)
     if (debug_mode)
         return 0;
     int changed = 0;
+    if (menu_lower_map()) {
+        // the map is shown: START or a touch below its title opens the inventory
+        touchPosition t = { 0 };
+        if (down & KEY_TOUCH)
+            touchRead(&t);
+        if ((down & KEY_START) || ((down & KEY_TOUCH) && t.py >= 30)) {
+            focus = 1;
+            set_info(sel);
+            game_menu_sound(SND_SELECT);
+            down = 0;
+        } else {
+            status_shown = 0;
+            pause_show(0);
+            return 0;
+        }
+    }
+    if (!status_shown) { // back from the map: the status screen's palette and picture
+        if (data)
+            memcpy(BG_PALETTE_SUB, data + 20, 512);
+        status_shown = 1;
+        changed = 1;
+    }
     if (picture && !message && down) { // a CHECK picture stays until the next input
         picture = 0;
         changed = 1;
     }
     if (message) {
-        if (down & (KEY_A | KEY_B | KEY_TOUCH)) {
-            message = NULL;
-            picture = 0;
+        if (msg_choice && (down & (KEY_LEFT | KEY_RIGHT))) {
+            msg_answer ^= 1;
+            game_menu_sound(SND_CURSOR);
+            changed = 1;
+        } else if (down & (KEY_A | KEY_B | KEY_TOUCH)) {
+            if (msg_rest && *msg_rest) { // the next page
+                msg_page = msg_rest;
+            } else {
+                if (msg_choice) { // the answer: flag 11:0x1F set = no (as the PS1's typewriter question)
+                    if (down & KEY_TOUCH) {
+                        touchPosition t;
+                        touchRead(&t);
+                        msg_answer = t.px >= 128;
+                    } else if (down & KEY_B) {
+                        msg_answer = 1;
+                    }
+                    flag_set(11, 0x1F, msg_answer);
+                }
+                message = NULL;
+                picture = 0;
+            }
             changed = 1;
         }
     } else if (down & KEY_TOUCH) {

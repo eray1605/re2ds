@@ -33,6 +33,7 @@ enum {
     SCE_EVENT = 5,
     SCE_SAVE = 9,              // typewriter
     SCE_ITEMBOX = 10,
+    SCE_TERMINAL = 14,         // a computer: data[0] | data[2] << 4 picks the program (0x80036a90)
 };
 
 // Script variables the engine keeps up to date
@@ -65,6 +66,8 @@ extern const uint8_t scd_op_size[256];
 
 // Engine hooks, implemented in main.c
 void game_show_message(const char *text);   // pauses play until closed
+void game_aot_on(int n);                     // aot_on: runs AOT n as if Leon had used it
+int game_busy(void);                         // a terminal runs: scripts and play wait
 int game_message_open(void);
 void game_cut_change(int cam);             // force a camera
 void game_set_player_pos(int32_t x, int32_t y, int32_t z);

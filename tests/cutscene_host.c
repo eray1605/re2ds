@@ -51,6 +51,8 @@ int game_blocked(int32_t a, int32_t b, int32_t c, int32_t d, int32_t y) { (void)
 int camera_sees(int32_t x, int32_t y, int32_t z, int32_t m) { (void)x; (void)y; (void)z; (void)m; return 1; }
 int camera_occluded(int32_t x, int32_t y, int32_t z) { (void)x; (void)y; (void)z; return 0; }
 int cull_models = 0;
+void game_aot_on(int n) { (void)n; }
+int game_busy(void) { return 0; }
 void game_show_message(const char *t) { printf("t%d  MESSAGE: %.60s\n", tick, t); }
 int game_message_open(void) { return 0; }
 void game_cut_change(int c) { printf("t%d  cut %d\n", tick, c); }
@@ -72,6 +74,8 @@ int game_player_damage(int dmg) { (void)dmg; return 0; }
 void game_player_grabbed(int on) { (void)on; }
 void game_player_pose(const Model *m, int a, int k, int32_t x, int32_t z, int16_t d) { (void)m; (void)a; (void)k; (void)x; (void)z; (void)d; }
 void game_player_died(void) {}
+void game_player_hurt(int kind) { (void)kind; }
+void game_player_killed(void) {}
 void game_blood(int k, int32_t x, int32_t y, int32_t z, int16_t d, int sp, int32_t f) { (void)k; (void)x; (void)y; (void)z; (void)d; (void)sp; (void)f; }
 int game_sight_blocked(int32_t a, int32_t b, int32_t c, int32_t d, int32_t e, int32_t f) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; return 0; }
 int game_enemy_member(int s, int m, int *v) { return enemy_member_get(s, m, v); }
@@ -107,8 +111,8 @@ void game_object_member_set(int n, int m, int v)
 void game_plc(int w, int i, const uint8_t *ins)
 {
     printf("t%d  plc %02x work %d.%d  %02x %02x %02x\n", tick, ins[0], w, i, ins[1], ins[2], ins[3]);
-    if (w == 3) {
-        enemy_plc(i, ins);
+    if (w == 3 || w == 2) {
+        enemy_plc(w == 2 ? PARTNER_SLOT : i, ins);
     } else if (w == 1) {
         PlcBody b = body();
         plc_command(&pl.plc, &b, ins);
@@ -128,7 +132,10 @@ int main(int argc, char **argv)
         strcpy(dot, "_rbj.bin");
         model_load(&rbj, path);
         for (int i = 0; i < MAX_ENEMIES; i++) {
-            snprintf(dot, 20, "_rbj_e%d.bin", i);
+            if (i == PARTNER_SLOT)
+                snprintf(dot, 20, "_rbj_p.bin");
+            else
+                snprintf(dot, 20, "_rbj_e%d.bin", i);
             if (model_load(&rbj_e[i], path))
                 enemy_set_room_set(i, &rbj_e[i]);
         }

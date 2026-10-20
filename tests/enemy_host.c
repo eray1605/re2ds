@@ -48,6 +48,8 @@ int game_blocked(int32_t fx, int32_t fz, int32_t x, int32_t z, int32_t y)
 int camera_sees(int32_t x, int32_t y, int32_t z, int32_t m) { (void)x; (void)y; (void)z; (void)m; return 1; }
 int camera_occluded(int32_t x, int32_t y, int32_t z) { (void)x; (void)y; (void)z; return 0; }
 int cull_models = 0; // POLY_CULL_NONE in the stubs
+void game_aot_on(int n) { (void)n; }
+int game_busy(void) { return 0; }
 void game_show_message(const char *t) { (void)t; }
 int game_message_open(void) { return 0; }
 void game_cut_change(int c) { (void)c; }
@@ -72,6 +74,8 @@ int game_player_damage(int dmg) { if (dmg < 41) dmg += dmg >> 1; host_hp -= dmg;
 void game_player_grabbed(int on) { host_held = on; printf("  grabbed %d\n", on); }
 void game_player_pose(const Model *m, int a, int k, int32_t x, int32_t z, int16_t d) { (void)m; (void)d; host_px = x; host_pz = z; if (getenv("TRACE")) printf("  leon anim %d key %d at %d %d\n", a, k, (int)x, (int)z); }
 void game_player_died(void) { host_dead = 1; printf("  died\n"); }
+void game_player_hurt(int kind) { printf("  hurt %d\n", kind); }
+void game_player_killed(void) { host_dead = 1; printf("  killed\n"); }
 void game_blood(int k, int32_t x, int32_t y, int32_t z, int16_t d, int sp, int32_t f) { (void)x; (void)z; (void)d; (void)sp; (void)f; if (getenv("TRACE")) printf("  blood %d at y %d\n", k, (int)y); }
 int game_enemy_member(int s, int m, int *v) { return enemy_member_get(s, m, v); }
 int game_player_member(int m, int *v) { (void)m; (void)v; return 0; }
@@ -102,7 +106,7 @@ int main(int argc, char **argv)
         int before = enemy_spawn_calls;
         script_tick();
         EnemyTarget p = { .x = host_held ? host_px : (getenv("PX") ? atoi(getenv("PX")) : 5899),
-                          .z = host_held ? host_pz : (getenv("PZ") ? atoi(getenv("PZ")) : 0), .can_grab = !host_held && !host_dead,
+                          .z = host_held ? host_pz : (getenv("PZ") ? atoi(getenv("PZ")) : 0), .y = getenv("PY") ? atoi(getenv("PY")) : 0, .hp = 200, .noise = getenv("NOISE") ? atoi(getenv("NOISE")) : 0, .can_grab = !host_held && !host_dead,
                           .pressed = getenv("MASH") && (t & 1), .dead = host_dead };
         enemy_tick(&p);
         if (getenv("SHOOT") && t % 15 == 0 && !host_held) { // Leon shoots the nearest zombie

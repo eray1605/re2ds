@@ -12,8 +12,8 @@ hold a room's cutscene motions (plc_motion mode 0), e.g. room 101's 14
 animations shared by Leon and Kendo.
 
 Writes an RMD1 file without display lists (the character's own are used)
-with all animations of a set: out.bin for the player's, out_e<slot>.bin for
-enemies. Rooms without such sets get no files.
+with all animations of a set: out.bin for the player's, out_p.bin for the
+partner's (Ada, Sherry), out_e<slot>.bin for enemies. Rooms without such sets get no files.
 
 Usage: python3 -I rbj2ds.py ROOM1010.RDT out.bin
 """
@@ -93,22 +93,26 @@ def write_set(d, emr, anims, out):
 def main():
     src, out = sys.argv[1], sys.argv[2]
     stem = out[:-4] if out.endswith(".bin") else out
-    for old in [out] + glob.glob(stem + "_e*.bin"):
+    for old in [out, stem + "_p.bin"] + glob.glob(stem + "_e*.bin"):
         if os.path.exists(old):
             os.remove(old)
     d = open(src, "rb").read()
-    player, enemies = None, {}
+    player, partner, enemies = None, None, {}
     for mask, emr, anims in read_sets(d):
         if mask & 1:
             player = (emr, anims)
+        if mask & 2:
+            partner = (emr, anims)
         for slot in range(MAX_SLOTS):
             if mask >> (slot + 2) & 1:
                 enemies[slot] = (emr, anims)
     if player:
         write_set(d, *player, out)
+    if partner:
+        write_set(d, *partner, f"{stem}_p.bin")
     for slot, s in sorted(enemies.items()):
         write_set(d, *s, f"{stem}_e{slot}.bin")
-    if not player and not enemies:
+    if not player and not partner and not enemies:
         print(f"{src}: no room animations")
 
 

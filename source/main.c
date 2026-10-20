@@ -88,7 +88,7 @@ static const uint8_t rbj_move_keys[4] = { 50, 15, 20, 20 };
 static uint8_t bg_ram[BG_BYTES] __attribute__((aligned(32)));
 
 typedef enum { ST_IDLE, ST_WALK, ST_RUN, ST_BACK, ST_TURN, ST_AIM, ST_FIRE, ST_RELOAD, ST_CLIMB, ST_JUMP, ST_FALL, ST_LAND,
-               ST_SCRIPT, ST_GRABBED, ST_DEAD } PlayerState; // script: plc.c; held / killed: enemy.c
+               ST_HURT, ST_SCRIPT, ST_GRABBED, ST_DEAD } PlayerState; // script: plc.c; held / killed: enemy.c
 
 typedef struct {
     uint8_t stage, room;
@@ -144,6 +144,8 @@ static InvSlot item_box[BOX_SLOTS]; // the item box (the same in every save room
 #define FIRST_FILE 0x68              // the documents: items 0x68-0x80
 #define NUM_FILES 25
 static uint32_t files_found;         // bit n: document FIRST_FILE + n
+#define MAP_PAGES 20
+static uint32_t map_seen[MAP_PAGES];  // the map: bit n = piece n of the page visited (PS1 array 9)
 static uint16_t save_count;         // saves of this game so far
 static int last_slot;               // the slot saved to or loaded from
 
@@ -163,7 +165,12 @@ static struct {
     int8_t aim_target;        // enemy the auto-aim turns to, -1 none
     int32_t aim_x, aim_z;
     uint8_t shot;             // fired this tick (zombies hear it)
+    uint8_t fire_held;        // R + A held (continuous fire)
+    uint8_t auto_stop;        // continuous fire: playing the stop move
+    uint8_t ammo_tick;        // continuous fire: uses a round every 8 calls (FUN_80065594)
     uint8_t saved_once;       // survived a bite once with 0 HP (PS1 0x800c7948 & 0x1000)
+    int16_t hurt_push;        // ST_HURT: pushed this far along his facing per tick ...
+    uint8_t hurt_ticks;       // ... for this many ticks
     Plc plc;                  // the room script moves him (ST_SCRIPT)
 } player;
 #define PLAYER_HP 200
@@ -208,6 +215,7 @@ static uint16_t die_palette[256];
 static void render_frame(void);
 static int floor_sound(void);
 static void check_camera_switch(void);
+static void move_forward(int32_t dist);
 static void update_height(void);
 static void update_occlusion(void);
 
@@ -563,7 +571,10 @@ static int load_room(int stage, int id)
         if (rbj_enemy[i].data)
             asset_free(rbj_enemy[i].data);
         rbj_enemy[i].data = NULL;
-        snprintf(path, sizeof(path), "nitro:/room/room%d%02x0_rbj_e%d.bin", stage, id, i);
+        if (i == PARTNER_SLOT) // the partner's set (RBJ mask bit 1)
+            snprintf(path, sizeof(path), "nitro:/room/room%d%02x0_rbj_p.bin", stage, id);
+        else
+            snprintf(path, sizeof(path), "nitro:/room/room%d%02x0_rbj_e%d.bin", stage, id, i);
         if (model_load(&rbj_enemy[i], path))
             enemy_set_room_set(i, &rbj_enemy[i]);
         else if (rbj_enemy[i].data)
@@ -1253,6 +1264,73 @@ static void place_player(int32_t x, int32_t y, int32_t z, int16_t dir, int cam)
     set_camera(cam < room.header->num_cameras ? cam : 0);
 }
 
+// ---------------------------------------------------------------- terminals
+// AOT type 14 (0x8004edb0) starts a computer program (0x80036a90): the door
+// lock service of the main hall (terminal_door_lock_service 0x80037c6c) for
+// data & 3 == 0. Its screens here are messages: the hall's side doors are
+// released (flag 4:0x46) with the Blue Card Key, which is used up.
+#define ITEM_BLUE_CARD_KEY 0x35
+static struct {
+    int active, step;
+} term;
+
+static void terminal_start(const Aot *a)
+{
+    int program = (a->data[0] | a->data[2] << 4) & 3;
+    if (program != 0) {
+        game_show_message("The computer does not respond.");
+        return; // 1: the fingerprint check (terminal_rodem_fingerprint), not ported yet
+    }
+    term.active = 1;
+    term.step = 0;
+}
+
+int game_busy(void) { return term.active; }
+
+// one step whenever no message is open
+static void terminal_step(void)
+{
+    switch (term.step++) {
+    case 0:
+        if (flag_get(4, 0x46)) {
+            game_show_message("DOOR LOCK SERVICE\n------------------------------\fHall side doors: RELEASED");
+            term.step = 9;
+        } else {
+            game_show_message("DOOR LOCK SERVICE\n------------------------------\fHall side doors: LOCKED\f"
+                              "The doors can be unlocked\nby a CARD KEY.");
+        }
+        break;
+    case 1:
+        if (!inventory_has(ITEM_BLUE_CARD_KEY)) {
+            term.active = 0;
+            break;
+        }
+        game_show_message("Will you use the Blue Card Key?\v");
+        break;
+    case 2:
+        if (flag_get(11, 0x1F)) { // no
+            term.active = 0;
+            break;
+        }
+        flag_set(4, 0x46, 1);
+        for (int i = 0; i < INV_SLOTS; i++)
+            if (inventory[i].item == ITEM_BLUE_CARD_KEY) {
+                inventory[i].item = 0;
+                inventory[i].count = 0;
+                if (inventory_equipped == i)
+                    inventory_equipped = -1;
+                break;
+            }
+        game_play_sound(2, 0x12); // the locks (FUN_80057364(0x2120000))
+        game_show_message("Checking up ID CARD.....\fOK!\nHall side doors lock released.");
+        term.step = 9;
+        break;
+    default:
+        term.active = 0;
+        break;
+    }
+}
+
 // ---------------------------------------------------------------- script hooks
 void game_show_message(const char *text)
 {
@@ -1329,8 +1407,8 @@ static void player_body_back(const PlcBody *b)
 
 void game_plc(int work_type, int index, const uint8_t *ins)
 {
-    if (work_type == 3) {
-        enemy_plc(index, ins);
+    if (work_type == 3 || work_type == 2) { // 2: the partner (Ada, Sherry)
+        enemy_plc(work_type == 2 ? PARTNER_SLOT : index, ins);
         return;
     }
     if (work_type != 1 || player.state >= ST_GRABBED)
@@ -1358,9 +1436,11 @@ static void script_move_tick(void)
     check_camera_switch();
 }
 
+static void pick_enemy_bank(void);
 void game_spawn_enemy(int slot, int type, int flags, int voice, int x, int y, int z, int dir_re2)
 {
     enemy_spawn(slot, type, flags, voice, x, y, z, dir_re2);
+    pick_enemy_bank(); // loads only when the room's set changes
 }
 
 // Enemy sounds get quieter with the distance to Leon (the PS1 places them in
@@ -1416,6 +1496,60 @@ void game_player_pose(const Model *set, int anim, int key, int32_t x, int32_t z,
     player.z = z;
     player.dir = dir;
     check_camera_switch();
+}
+
+// Hit by an enemy without being held (player routine 2, FUN_8003c3b0): the
+// PLD hurt animation, 3 from the front (pushed back 200 per tick while the
+// animation eases in, 3 ticks), 4 from behind (pushed forward), 5 a light hit
+// (0x8003c408 / 0x8003c528). Voice 1 / 2 / 0.
+#define PLD_DIE 2
+#define PLD_HURT_FRONT 3
+#define PLD_HURT_BACK 4
+#define PLD_HURT_LIGHT 5
+void game_player_hurt(int kind)
+{
+    if (player.state >= ST_SCRIPT)
+        return;
+    static const uint8_t anims[3] = { PLD_HURT_LIGHT, PLD_HURT_FRONT, PLD_HURT_BACK };
+    static const int16_t push[3] = { 0, -200, 200 };
+    player.state = ST_HURT;
+    player.slope = -1;
+    player.aim_raised = 0;
+    player.set = &leon;
+    player.anim = anims[kind];
+    player.key = 0;
+    player.hurt_push = push[kind];
+    player.hurt_ticks = 3;
+    game_player_voice(kind == 2 ? 2 : kind == 1 ? 1 : 0);
+}
+
+// Killed without being held (player routine 3, 0x8003ccd0): the PLD death
+// animation, voice 3; the death sequence (die_tick) starts with ST_DEAD.
+void game_player_killed(void)
+{
+    if (player.state == ST_DEAD || player.state == ST_GRABBED)
+        return;
+    player.state = ST_DEAD;
+    player.set = &leon;
+    player.anim = PLD_DIE;
+    player.key = 0;
+    game_player_voice(3);
+}
+
+static void hurt_tick(void)
+{
+    if (player.hurt_ticks) {
+        player.hurt_ticks--;
+        if (player.hurt_push)
+            move_forward(player.hurt_push);
+        check_camera_switch();
+    }
+    if (player.key + 1 >= leon.anims[player.anim].count) {
+        player.state = ST_IDLE;
+        set_anim(ANIM_IDLE);
+        return;
+    }
+    player.key++;
 }
 
 void game_player_died(void)
@@ -1721,23 +1855,34 @@ static bool nitro_init(void)
     return false;
 }
 
+// The enemy voices of the room pick its enemy sound set; enemies set later
+// by the room script (the dogs of 212, ...) may change it.
+static int enemy_bank_set = -2;
+static void pick_enemy_bank(void)
+{
+    int set = enemy_sound_set(enemy_pairs);
+    if (set == enemy_bank_set)
+        return;
+    enemy_bank_set = set;
+    sound_bank_free(enemy_bank);
+    enemy_bank = NULL;
+    if (set >= 0) {
+        char path[40];
+        snprintf(path, sizeof(path), "nitro:/sound/enem%02d.bin", set);
+        enemy_bank = sound_bank_load(path);
+    }
+}
+
 // The init script may test the arrival camera (VAR_CUT), e.g. room 107.
 static void enter_room(int stage, int id, int arrival_cam)
 {
-    load_room(stage, id);
+    load_room(stage, id); // enemy_room_reset: no voices yet
+    pick_enemy_bank();
     music_room(stage, id);
     script_camera_changed(-1, arrival_cam);
     script_room_enter(&room);
 
-    // the enemy voices of the room pick its enemy sound set
-    char path[40];
-    int set = enemy_sound_set(enemy_pairs);
-    sound_bank_free(enemy_bank);
-    enemy_bank = NULL;
-    if (set >= 0) {
-        snprintf(path, sizeof(path), "nitro:/sound/enem%02d.bin", set);
-        enemy_bank = sound_bank_load(path);
-    }
+    pick_enemy_bank();
 }
 
 // New game, and after Leon died (the PS1 shows "YOU DIED" and goes back to
@@ -1756,6 +1901,7 @@ static void new_game(void)
     inventory_reset();
     memset(item_box, 0, sizeof(item_box));
     files_found = 0;
+    memset(map_seen, 0, sizeof(map_seen));
     inventory_add(0x01, 0);
     inventory_add(0x02, 18);
     inventory_equipped = 1;
@@ -1843,6 +1989,280 @@ static void show_file(int k)
     REG_DISPCNT |= layers;
     if (cur_cam >= 0)
         show_camera_view(cur_cam); // the room picture again
+}
+
+// ---------------------------------------------------------------- map
+// R on the status screen: the map (menu/maps.bin, tools/map2ds.py). The PS1
+// (map screen 0x8006a4a4, drawing 0x800695ec) assembles a page from pieces,
+// one per room, cut from MAPS.PIX; rooms it has visited are drawn in another
+// colour, the current one blinks with Leon's marker in it. The PS1 shows
+// unvisited rooms only after the area's map was found (flag array 33); here
+// they are always shown, dimmed. Its colours are made at run time, so these
+// are our own. The PS1 screen is 320 x 240: everything is drawn at 4/5.
+#define MAP_MAGIC 0x31504D52 // "RMP1"
+#define MAP_SCALE(v) ((v) * 4 / 5)
+
+typedef struct {
+    uint8_t u, v, w, h;      // rectangle in the page image
+    int16_t x, y;            // on the PS1 screen
+    int16_t mx, my;          // origin of the player marker
+    uint8_t visited_flag, cleared_flag, hide[2];
+} MapPiece;
+typedef struct {
+    uint16_t first;
+    uint8_t count, found;
+    uint32_t offset, size;
+} MapPage;
+
+// The page of a room (FUN_80069cbc): stage counted from 0
+static int map_page(int stage, int room)
+{
+    int floor = player_floor();
+    switch (stage) {
+    case 0:
+        if (room == 0x11 || room == 0x17 || (room == 0x12 && floor == 3))
+            return 4;
+        if (room < 4)
+            return 0;
+        if (room < 8)
+            return 1;
+        if (room < 0x16)
+            return 3;
+        if (room == 0x16)
+            return floor == 4 ? 3 : 2;
+        return 0;
+    case 1:
+        if (room == 0x1b)
+            return 3;
+        return room < 0x11 ? 2 : 5;
+    case 2:
+        if (room < 2)
+            return 5;
+        return room != 8 ? 6 : 5;
+    case 3:
+        if ((room <= 1 && floor > 3) || (room == 3 && floor > 3) || room == 0xb || room == 2 || room == 9)
+            return 7;
+        return 8;
+    case 4:
+        if (room <= 2 || room == 8)
+            return 9;
+        if (room == 3 && flag_get(1, 1) && !flag_get(4, 0x62))
+            return 0xb;
+        if (room == 5) {
+            if (flag_get(4, 0xbe))
+                return flag_get(1, 1) ? 0xd : 0x10;
+            if (flag_get(4, 0x63))
+                return 0xc;
+        }
+        if (room > 5)
+            return room == 9 ? 0xc : 0xb;
+        return 10;
+    case 5:
+        if (room == 1)
+            return 0x10;
+        if (room == 3 && floor <= 2)
+            return 0xe;
+        if (room < 5)
+            return 0xd;
+        if (room == 5)
+            return 0xf;
+        return room < 0x12 ? 0x10 : 0x11;
+    case 6:
+        return flag_get(4, 0x89) ? 0x13 : 0x12;
+    }
+    return 0;
+}
+
+// The room's piece on its page (FUN_80069fb4)
+static int map_piece(int page, int room)
+{
+    switch (page) {
+    case 0: return room > 0x17 ? room - 0x14 : room;
+    case 1: return room - 4;
+    case 2: return room == 0x16 ? 0x11 : room;
+    case 3: return room == 0x1b ? 0xe : room > 0x11 ? room - 9 : room - 8;
+    case 4: return room == 0x17 ? 0 : room - 0x10;
+    case 5:
+        if (room == 8)
+            return 2;
+        if (room < 0x19)
+            return room < 0x11 ? room : room - 0xe;
+        return room - 0x10;
+    case 6: return room < 9 ? room - 2 : room - 3;
+    case 7: return room == 9 ? 4 : room == 0xb ? 5 : room;
+    case 8:
+        if (room < 2)
+            return room;
+        if (room < 6)
+            return room - 1;
+        if (room < 9)
+            return room - 2;
+        if (room < 0xb)
+            return room - 3;
+        return room > 0x10 ? room : room - 4;
+    case 9: return room == 8 ? 3 : room;
+    case 10: return room - 3;
+    case 11: return room != 3 ? room - 5 : 0;
+    case 12: return room != 9;
+    case 13: case 18: return room;
+    case 16:
+        if (room == 5)
+            return 0xc;
+        if (room == 1)
+            return 0xb;
+        return room != 0x11 ? room - 6 : 2;
+    case 17: return room == 0xe ? 6 : room - 0x12;
+    case 19: return room != 3;
+    }
+    return 0;
+}
+
+// on entering a room: its piece counts as visited
+static void map_mark_room(void)
+{
+    int page = map_page(cur_stage - 1, cur_room), piece = map_piece(page, cur_room);
+    if (page >= 0 && page < MAP_PAGES && piece >= 0 && piece < 32)
+        map_seen[page] |= 1u << piece;
+}
+
+// The pieces' pixel values are kinds, not shades: 1 the floor, 4 the walls,
+// 2 / 3 / 5 stairs and furniture, 8 doors, 14 / 15 highlights. Colours:
+// 1-15 the title, 16 + v unvisited, 32 + v visited, 48 + v the current room,
+// 64 / 65 Leon's marker and its outline.
+static uint16_t map_colour(int state, int v)
+{
+    static const uint8_t floor_rgb[3][3] = { { 5, 5, 7 }, { 3, 8, 18 }, { 20, 4, 4 } };
+    static const uint8_t wall_rgb[3][3] = { { 15, 15, 17 }, { 18, 24, 31 }, { 31, 18, 18 } };
+    const uint8_t *f = floor_rgb[state], *w = wall_rgb[state];
+    switch (v) {
+    case 1: return RGB15(f[0], f[1], f[2]);
+    case 4: return RGB15(w[0], w[1], w[2]);
+    case 2: case 3: case 5: return RGB15((f[0] + w[0]) / 2, (f[1] + w[1]) / 2, (f[2] + w[2]) / 2);
+    case 8: return RGB15(28, 24, 8);
+    case 14: case 15: return RGB15(31, 31, 31);
+    default: return RGB15(w[0] * v / 16, w[1] * v / 16, w[2] * v / 16);
+    }
+}
+
+static void map_palette(int blink)
+{
+    static uint16_t pal[256];
+    pal[0] = RGB15(0, 0, 0);
+    for (int v = 1; v < 16; v++) {
+        int c = v < 5 ? 10 : v * 2 + 1;
+        pal[v] = RGB15(c, c, c);
+        pal[16 + v] = map_colour(0, v);
+        pal[32 + v] = map_colour(1, v);
+        pal[48 + v] = blink ? map_colour(1, v) : map_colour(2, v);
+    }
+    pal[64] = blink ? RGB15(31, 31, 0) : RGB15(31, 31, 31);
+    pal[65] = RGB15(0, 0, 0);
+    menu_overlay(NULL, pal);
+}
+
+// The map during play (the lower screen, menu_lower_map): the current page,
+// redrawn when the room changes. A touch on the
+// title strip shows the next page with a visited room.
+static struct {
+    int page;                   // loaded page, -1 none
+    int shown_page;             // page on the screen (touch: another one)
+    int stage, room;            // the room the shown page was picked for
+    uint8_t *img;               // the page image, 256 x 256 (values 0-15)
+    uint8_t *screen;            // 256 x 192, what is on the lower screen
+    MapPiece pieces[32];
+    int count;
+    uint32_t key;               // what the screen shows (redraw when it changes)
+    int frame;
+} mapv = { .page = -1, .shown_page = -1 };
+
+static int map_load(int page)
+{
+    if (page == mapv.page)
+        return 1;
+    if (!mapv.img)
+        mapv.img = malloc(256 * 256);
+    if (!mapv.screen)
+        mapv.screen = malloc(256 * 192);
+    uint8_t *file = asset_load("nitro:/menu/maps.bin", NULL);
+    if (!mapv.img || !mapv.screen || !file || *(const uint32_t *)file != MAP_MAGIC) {
+        asset_free(file);
+        return 0;
+    }
+    const MapPage *pg = (const MapPage *)(file + 8) + page;
+    const MapPiece *pieces = (const MapPiece *)(file + 8 + MAP_PAGES * sizeof(MapPage));
+    decompress(file + pg->offset, mapv.img, LZ77);
+    mapv.count = pg->count < 32 ? pg->count : 32;
+    memcpy(mapv.pieces, pieces + pg->first, mapv.count * sizeof(MapPiece));
+    asset_free(file);
+    mapv.page = page;
+    return 1;
+}
+
+static void map_draw(int page, int here)
+{
+    uint8_t *out = mapv.screen;
+    const uint8_t *img = mapv.img;
+    memset(out, 0, 256 * 192);
+    // the title strip: the name and the scale across the top, the floor under the name
+    for (int y = 0; y < 30; y++)
+        memcpy(out + y * 256, img + y * 256, y < 16 ? 256 : 110);
+    for (int i = 0; i < mapv.count; i++) {
+        const MapPiece *p = &mapv.pieces[i];
+        int seen = (map_seen[page] >> i) & 1;
+        if (!seen && (p->hide[0] & 1))
+            continue; // the PS1 leaves it out in this scenario
+        int base = i == here ? 48 : seen ? 32 : 16;
+        int w = MAP_SCALE(p->w), h = MAP_SCALE(p->h), x0 = MAP_SCALE(p->x), y0 = MAP_SCALE(p->y);
+        for (int dy = 0; dy < h; dy++) {
+            int Y = y0 + dy;
+            if (Y < 0 || Y >= 192)
+                continue;
+            const uint8_t *src = img + (p->v + dy * 5 / 4) * 256 + p->u;
+            for (int dx = 0; dx < w; dx++) {
+                int X = x0 + dx, c = src[dx * 5 / 4];
+                if (c && X >= 0 && X < 256)
+                    out[Y * 256 + X] = base + c;
+            }
+        }
+    }
+    menu_overlay(out, NULL);
+}
+
+// once per DS frame while the lower screen is the map's; redraw: it was not
+static void map_live(int redraw)
+{
+    int page = map_page(cur_stage - 1, cur_room);
+    if (page < 0 || page >= MAP_PAGES)
+        return;
+    if (cur_stage != mapv.stage || cur_room != mapv.room || mapv.shown_page < 0) {
+        mapv.stage = cur_stage; // a new room: its own page again
+        mapv.room = cur_room;
+        mapv.shown_page = page;
+    }
+    if (keysDown() & KEY_TOUCH) {
+        touchPosition t;
+        touchRead(&t);
+        if (t.py < 30) // the title strip: the next page with a visited room
+            for (int k = 1; k < MAP_PAGES; k++) {
+                int p = (mapv.shown_page + k) % MAP_PAGES;
+                if (map_seen[p] || p == page) {
+                    mapv.shown_page = p;
+                    game_menu_sound(4);
+                    break;
+                }
+            }
+    }
+    int show = mapv.shown_page;
+    if (!map_load(show))
+        return;
+    // the current room blinks; no marker for Leon himself (the PS1 shows one)
+    int here = show == page ? map_piece(page, cur_room) : -1;
+    uint32_t key = (uint32_t)show << 26 ^ (uint32_t)(here & 31) << 21 ^ map_seen[show] * 2654435761u;
+    if (redraw || key != mapv.key) {
+        map_draw(show, here);
+        mapv.key = key;
+    }
+    map_palette((++mapv.frame >> 4) & 1);
 }
 
 // L on the status screen: the documents found so far
@@ -1939,6 +2359,7 @@ static void use_typewriter(void)
     memcpy(s->inventory, inventory, sizeof(s->inventory));
     memcpy(s->box, item_box, sizeof(s->box));
     s->files = files_found;
+    memcpy(s->map_seen, map_seen, sizeof(s->map_seen));
     memcpy(s->locks, lock_open, sizeof(s->locks));
     script_state_get(s->script);
     s->bgm_saved = music_table_get(s->bgm, sizeof(s->bgm)) > 0;
@@ -1967,6 +2388,7 @@ static void load_game(int n)
     memcpy(inventory, s->inventory, sizeof(inventory));
     memcpy(item_box, s->box, sizeof(item_box));
     files_found = s->files;
+    memcpy(map_seen, s->map_seen, sizeof(map_seen));
     inventory_equipped = s->equipped;
     save_count = s->saves;
     last_slot = n;
@@ -2126,6 +2548,9 @@ static void use_door(const Aot *a)
     if (door_begin(door_type, door_variant)) {
         bgHide(bg_id);
         while (door_frame()) {
+            scanKeys();
+            if (keysDown() & KEY_B)
+                break; // B skips the door (as on the DS's Resident Evil)
             swiWaitForVBlank();
             music_frame();
             voice_frame();
@@ -2143,6 +2568,9 @@ static void trigger(Aot *a)
 {
     static char text[64];
     switch (a->type) {
+    case SCE_TERMINAL:
+        terminal_start(a);
+        break;
     case SCE_DOOR:
         use_door(a);
         break;
@@ -2191,6 +2619,13 @@ static void trigger(Aot *a)
     default:
         break;
     }
+}
+
+// aot_on (scd_op_47): the AOT's handler, as if Leon had used it
+void game_aot_on(int n)
+{
+    if (n >= 0 && n < NUM_AOTS && aots[n].type)
+        trigger(&aots[n]);
 }
 
 // Triggers without AOT_SAT_MANUAL fire when Leon walks into them; manual ones
@@ -2281,8 +2716,20 @@ static const Weapon weapons[] = {
     { 0x06, 0, { 900, 900, 900 }, 50, { 7, 22 }, { 4, 3 }, 1, { 0 }, 0 },              // custom magnum
     { 0x07, 0, { 200, 60, 40 }, 30, { 28, 42 }, { 3, 3 }, 0, { 23, 26, 26 }, 4 },      // shotgun
     { 0x08, 0, { 300, 80, 60 }, 40, { 27, 42, 56 }, { 3, 3, 3 }, 0, { 0 }, 0 },        // custom shotgun
+    { 0x0F, 0, { 4, 4, 4 }, 0, { 8, 30 }, { 4, 3 }, 1, { 0 }, 0 },                      // sub machine gun
+    { 0x10, 4000, { 15, 15, 15 }, 0, { 11, 25 }, { 3, 3 }, 1, { 0 }, 0 },               // flamethrower
 };
 enum { PLW_RELOAD = 16 };
+// The sub machine gun and the flamethrower fire as long as A is held (handler
+// 0x800442cc, phases 0x8009f148): their PLW has aim 12 / 15 / 18, fire 10 /
+// 13 / 16 (looped) and stop 11 / 14 / 17 for straight / up / down (tables
+// 0x80010d54 / 60 / 6c), the reload is move 19. The hit check runs every
+// tick; it registers once per lock time (damage table: SMG 1, flamethrower 5
+// ticks). Ammunition (FUN_80065594): the SMG takes a round on every third
+// keyframe, the flamethrower fuel every tick, but only every 8th call counts.
+enum { PLW_AUTO_RELOAD = 19 };
+static const uint8_t auto_fire[3] = { 10, 13, 16 }, auto_hold[3] = { 12, 15, 18 }, auto_stop[3] = { 11, 14, 17 };
+static int is_auto(int item) { return item == 0x0F || item == 0x10; }
 #define SND_EMPTY 1               // ARMS sound 1: the click (FUN_80057364(0x1010001))
 #define HAND_BONE 11
 static int leon_weapon = -1;      // item whose model / sound bank are loaded
@@ -2454,18 +2901,20 @@ static void shot_effects(const Weapon *w)
 
 // phase 4 (0x8004237c): plays move 16, sounds and loading on its keyframes;
 // back to aiming at the end
+static int reload_move(const Weapon *w) { return PLW_FIRST + (w && is_auto(w->item) ? PLW_AUTO_RELOAD : PLW_RELOAD); }
+
 static void start_reload(void)
 {
     player.state = ST_RELOAD;
     player.set = &leon;
-    player.anim = PLW_FIRST + PLW_RELOAD;
+    player.anim = reload_move(weapon_in_hand());
     player.key = 0;
 }
 
 static void reload_tick(void)
 {
     const Weapon *w = weapon_in_hand();
-    if (!w || PLW_FIRST + PLW_RELOAD >= leon.header->num_anims) { // no move for it: at once
+    if (!w || reload_move(w) >= leon.header->num_anims) { // no move for it: at once
         if (w)
             sound_play(weapon_bank, w->reload_sound[w->load_event], 127, 64);
         inventory_reload();
@@ -2484,7 +2933,7 @@ static void reload_tick(void)
     } else {
         player.state = ST_AIM;
         player.aim_raised = 1;
-        player.anim = PLW_FIRST + plw_hold[player.aim_posture];
+        player.anim = PLW_FIRST + (is_auto(w->item) ? auto_hold : plw_hold)[player.aim_posture];
         player.key = 0;
     }
 }
@@ -2495,18 +2944,93 @@ static void fire(void)
     InvSlot *slot = &inventory[inventory_equipped];
     if (!w)
         return;
-    if (w->item != 0x01) {
-        if (slot->count == 0)
-            return;
-        slot->count--;
-    }
+    if (w->item != 0x01 && slot->count == 0)
+        return;
     player.state = ST_FIRE;
     player.set = &leon;
-    player.anim = PLW_FIRST + plw_fire[player.aim_posture];
     player.key = 0;
     player.shot = 1;
+    if (is_auto(w->item)) { // continuous: auto_fire_tick does the rest
+        player.anim = PLW_FIRST + auto_fire[player.aim_posture];
+        player.auto_stop = 0;
+        player.key = -1;
+        return;
+    }
+    if (w->item != 0x01)
+        slot->count--;
+    player.anim = PLW_FIRST + plw_fire[player.aim_posture];
     sound_play(weapon_bank, 0, 127, 64);
     enemy_hit(player.x, player.y, player.z, player.dir, w->range, w->item, w->damage, player.aim_posture == 2);
+}
+
+// One tick of continuous fire (phase 2, 0x80044584, frame handlers SMG
+// 0x80041d08 / flamethrower 0x80041e4c): the fire move loops while A is held;
+// let go or out of ammunition: the stop move, then aiming again.
+static void auto_fire_tick(const Weapon *w)
+{
+    InvSlot *slot = &inventory[inventory_equipped];
+    const ModelAnim *a = &leon.anims[player.anim];
+    if (player.auto_stop) {
+        if (player.key + 1 < a->count) {
+            player.key++;
+        } else {
+            player.state = ST_AIM;
+            player.anim = PLW_FIRST + auto_hold[player.aim_posture];
+            player.key = 0;
+        }
+        return;
+    }
+    if (!player.fire_held || slot->count == 0) {
+        player.auto_stop = 1;
+        player.anim = PLW_FIRST + auto_stop[player.aim_posture];
+        player.key = 0;
+        return;
+    }
+    if (player.anim != PLW_FIRST + auto_fire[player.aim_posture]) { // the aim changed
+        player.anim = PLW_FIRST + auto_fire[player.aim_posture];
+        player.key = 0;
+        if (w->item == 0x10)
+            sound_play(weapon_bank, 0x0D, 127, 64);
+    } else {
+        player.key = (player.key + 1) % a->count;
+    }
+    int k = player.key;
+    // ammunition
+    if (w->item == 0x10 || k % 3 == 0) {
+        if (++player.ammo_tick >= 8) {
+            player.ammo_tick = 0;
+            slot->count--;
+        }
+    }
+    player.shot = 1;
+    // the hit check, once per lock time
+    if (w->item == 0x0F || k % 5 == 0)
+        enemy_hit(player.x, player.y, player.z, player.dir, w->range, w->item, w->damage, player.aim_posture == 2);
+    int32_t p[3];
+    if (w->item == 0x0F) {
+        if (k % 3 == 1) { // a shot: flash and fire at the muzzle
+            const int32_t muzzle[3] = { 70, 1000, -60 };
+            leon_point(HAND_BONE, muzzle, p);
+            roomfx_spawn(1, 0x01, p[0], p[1], p[2], GUN_FX(0x10), 0);
+            roomfx_spawn(3, 0x0C, p[0], p[1], p[2], GUN_FX(0x10), 0);
+            sound_play(weapon_bank, 0, 127, 64);
+        }
+        if (k % 6 == 1) { // a casing
+            const int32_t port[3] = { 170, 280, 80 };
+            leon_point(HAND_BONE, port, p);
+            throw_casing(CASING_HANDGUN, 0x4B0, p);
+        }
+    } else {
+        if (k % 3 == 1) { // the flame
+            const int32_t nozzle[3] = { 150, 1200, 0 };
+            leon_point(HAND_BONE, nozzle, p);
+            roomfx_spawn(3, 0x1D, p[0], p[1], p[2], GUN_FX(0x12), player.dir / 8);
+        }
+        if (k == 1)
+            sound_play(weapon_bank, 0, 127, 64);
+        if (k == 11)
+            sound_play(weapon_bank, 0x0B, 127, 64);
+    }
 }
 
 // aiming / firing per DS frame; returns 1 while the weapon is up
@@ -2536,14 +3060,15 @@ static int update_aim(uint32_t held, uint32_t down)
         int diff = ((want - (player.dir & 32767) + 16384) & 32767) - 16384, step = TURN_PER_FRAME(0xD8);
         player.dir += diff > step ? step : diff < -step ? -step : diff;
     } else {
-        int turn = TURN_PER_FRAME(player.state == ST_FIRE ? 8 : 64);
+        int turn = TURN_PER_FRAME(player.state == ST_FIRE ? (is_auto(w->item) ? 0x20 : 8) : 64);
         if (held & KEY_RIGHT)
             player.dir += turn;
         if (held & KEY_LEFT)
             player.dir -= turn;
     }
+    player.fire_held = (held & KEY_A) && (held & KEY_R);
     if (player.state == ST_AIM && player.aim_raised)
-        player.anim = PLW_FIRST + plw_hold[player.aim_posture], player.key = 0;
+        player.anim = PLW_FIRST + (is_auto(w->item) ? auto_hold : plw_hold)[player.aim_posture], player.key = 0;
     // phase 1 (0x80040128): a loaded weapon fires; an empty one reloads on a
     // new press if there is ammunition, else it clicks
     if ((held & KEY_A) && (held & KEY_R) && player.state == ST_AIM && player.aim_raised) {
@@ -2727,8 +3252,17 @@ static void try_special_move(uint32_t pressed)
 static void update_player_tick(void)
 {
     PlayerState st = player.state;
+    if (st == ST_DEAD && player.set == &leon) { // killed outside a grab: falls
+        if (player.key + 1 < leon.anims[player.anim].count)
+            player.key++;
+        return;
+    }
     if (st >= ST_GRABBED)
         return; // enemy.c moves him
+    if (st == ST_HURT) {
+        hurt_tick();
+        return;
+    }
     if (st == ST_SCRIPT) {
         script_move_tick();
         return;
@@ -2739,6 +3273,10 @@ static void update_player_tick(void)
     }
     if (st == ST_RELOAD) {
         reload_tick();
+        return;
+    }
+    if (st == ST_FIRE && weapon_in_hand() && is_auto(weapon_in_hand()->item)) {
+        auto_fire_tick(weapon_in_hand());
         return;
     }
     if (st == ST_AIM || st == ST_FIRE) {
@@ -2946,6 +3484,11 @@ int main(void)
             open_files();
             down = 0;
         }
+        // Y during play: the lower screen shows the map or the status screen
+        if (!menu_open && !menu_has_focus() && !menu_message_open() && (down & KEY_Y)) {
+            menu_lower_toggle();
+            game_menu_sound(4);
+        }
         if (!menu_open) {
             int had_message = menu_message_open();
             paused = menu_frame(down, player.hp) || had_message;
@@ -2954,12 +3497,20 @@ int main(void)
             if (paused)
                 down = 0;
         }
+        static int map_was_shown;
+        int map_shown = !menu_open && menu_lower_map();
+        if (map_shown)
+            map_live(!map_was_shown);
+        map_was_shown = map_shown;
         if (!paused)
             update_menu(down);
         if (!menu_open && !paused) {
             pending_keys |= down;
             update_player_frame(keysHeld(), down);
-            for (game_tick_acc += GAME_HZ; game_tick_acc >= DS_HZ && !message_text; game_tick_acc -= DS_HZ) {
+            if (term.active && !menu_message_open())
+                terminal_step();
+            for (game_tick_acc += GAME_HZ; game_tick_acc >= DS_HZ && !message_text && !term.active;
+                 game_tick_acc -= DS_HZ) {
                 update_player_tick();
                 EnemyTarget target = {
                     .x = player.x, .y = player.y, .z = player.z, .dir = player.dir,
@@ -2970,6 +3521,7 @@ int main(void)
                                                 KEY_B | KEY_X | KEY_Y | KEY_L | KEY_R)) != 0,
                     .can_grab = player.state < ST_CLIMB,
                     .dead = player.state == ST_DEAD,
+                    .hp = player.hp,
                 };
                 enemy_tick(&target);
                 update_pose();
@@ -2977,13 +3529,14 @@ int main(void)
                 effect_tick();
                 roomfx_tick();
                 player.shot = 0;
-                if (player.state < ST_SCRIPT && player.state != ST_AIM && player.state != ST_FIRE && player.state != ST_RELOAD &&
+                if (player.state < ST_HURT && player.state != ST_AIM && player.state != ST_FIRE && player.state != ST_RELOAD &&
                     !flag_get(2, 7))
                     check_aots(pending_keys);
                 if (!near_aot && !message_text)
                     try_special_move(pending_keys);
                 pending_keys = 0;
                 script_tick();
+                map_mark_room();
             }
         }
         if (menu_open)

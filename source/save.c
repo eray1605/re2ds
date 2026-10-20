@@ -11,7 +11,7 @@
 #include "save.h"
 
 #define SAVE_MAGIC 0x31565352  // "RSV1"
-#define SAVE_VERSION 3
+#define SAVE_VERSION 4
 // version 1 slots ended before bgm_saved (padded to the struct's 4-byte alignment)
 #define SLOT_V1_SIZE ((offsetof(SaveSlot, bgm_saved) + 3) & ~(size_t)3)
 

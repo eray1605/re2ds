@@ -58,22 +58,29 @@ Disc 2 (Claire) has the same structure.
   handguns, magnums, shotguns and the knife (frame handlers as data), auto-aim, grab and
   struggle, death sequence; the shotgun's impact on zombies by distance (thrown backward,
   heavy recoil).
-- Open: grenade launcher, bowgun, SMG and the rest, crawlers and bursting heads (shotgun
+- Done as well: the sub machine gun and the flamethrower (continuous fire, handler
+  `0x800442cc`), hurt and killed by enemies without a grab (PLD animations 2–5).
+- Open: grenade launcher, bowgun, rocket launcher, crawlers and bursting heads (shotgun
   and magnum), pushing objects, the death scenes of other enemies.
 
-### Phase 4 – enemies (XL) – zombies done
+### Phase 4 – enemies (XL) – zombies, dogs, crows, lickers, spiders done
 - Done: zombies with the original AI, path zones, hits, falling, dying, eating, people moved
-  by scripts.
-- Open: dog, crow and licker (analysis in [docs/enemy-others.md](docs/enemy-others.md)),
-  spider, moth, plant, alligator, G (all stages), Mr. X; head shots and severed parts as in
-  [docs/damage.md](docs/damage.md).
+  by scripts; dogs, crows, lickers (on the floor) and spiders after their overlays
+  ([docs/enemy-others.md](docs/enemy-others.md)). Other types run the zombie AI and strike
+  instead of grabbing.
+- Mr. X walks and punches (first version).
+- Open: lickers and spiders on ceilings / walls, moth, plant, cockroach, alligator, G (all
+  stages); head shots and severed parts as in [docs/damage.md](docs/damage.md).
 
 ### Phase 5 – menus and saving (L) – started
 - Done: inventory on the lower screen, equip / check (with the item pictures) / combine;
   saving at the typewriters with ink ribbons (12 slots on the SD card), loading at the start
   and after dying; the item box (64 slots, shared by all save rooms, kept in the save); the
   documents (`FILES.TIM`, read when found, again with L on the status screen).
-- Open: map, options, ending and ranking. (The title screen with NEW GAME / LOAD GAME is done.)
+- Done as well: the map (`MAPS.PIX` and the PS1's page and room tables, `tools/map2ds.py`;
+  live on the lower screen during play, START for the inventory, Y switches; visited rooms
+  are kept in the save); B skips door animations.
+- Open: options, ending and ranking. (The title screen with NEW GAME / LOAD GAME is done.)
 
 ### Phase 6 – sound (L) – done for disc 1
 - Room sound effects, enemy voices, footsteps, weapon sounds, music sequencer, voice clips.

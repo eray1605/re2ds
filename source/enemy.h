@@ -1,15 +1,18 @@
 // re2ds - enemies and other characters set by the room scripts (sce_em_set).
 //
 // Models come from tools/em2ds.py (model/emXX.bin, _tex.bin, _sets.bin).
-// Every type behaves like a zombie (docs/enemy-zombie.md): lurking,
-// chasing, lying and getting up as the spawn variant says. No attacks yet.
+// Zombies (docs/enemy-zombie.md) and dogs (docs/enemy-others.md) have their
+// own behaviour; the other types still behave like zombies.
 #pragma once
 
 #include <stdint.h>
 
 #include "assets.h"
 
-#define MAX_ENEMIES 8
+// sce_em_set slots 0..7, plus the partner (Ada, Sherry: slot 0xff in the
+// scripts, work_set 2), moved by the room scripts like the people
+#define MAX_ENEMIES 9
+#define PARTNER_SLOT 8
 
 void enemy_room_reset(void);   // frees all enemy models (room change)
 // the room's path zones (tools/blk2ds.py, kept by the caller), NULL if none
@@ -35,6 +38,7 @@ typedef struct {
     int pressed;                // a key went down since the last tick (struggling free)
     int can_grab;               // walks or stands under control (not climbing, not held)
     int dead;
+    int hp;
 } EnemyTarget;
 void enemy_tick(const EnemyTarget *player); // once per game tick
 int enemy_grabbing(void);       // a zombie holds Leon
