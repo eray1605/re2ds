@@ -58,6 +58,7 @@ void game_set_player_dir(int16_t d) { (void)d; }
 void game_set_box_flag(int b, int f) { if (host_room.data && b >= 0 && b < host_room.header->num_boxes) ((RoomBox *)host_room.boxes)[b].flag = f; printf("  box %d flag %04x\n", b, f & 0xFFFF); }
 void game_bgm_control(int i, int o, int t, int l, int r) { (void)i; (void)o; (void)t; (void)l; (void)r; }
 void game_bgmtbl_set(int s, int r, int m, int u) { (void)s; (void)r; (void)m; (void)u; }
+void game_item_get(int item, int count) { printf("  item get %02x x%d\n", item, count); }
 void game_movie(int n) { (void)n; }
 void game_play_sound(int bank, int sound) { (void)bank; (void)sound; }
 void game_spawn_enemy(int s, int t, int v, int voice, int x, int y, int z, int d)
@@ -65,6 +66,7 @@ void game_spawn_enemy(int s, int t, int v, int voice, int x, int y, int z, int d
     printf("  spawn slot %d type %02x flags %04x voice %d at %d %d %d dir %d\n", s, t, v, voice, x, y, z, d);
     enemy_spawn(s, t, v, voice, x, y, z, d);
 }
+void game_enemy_motion(int s, int m, int c) { enemy_set_motion(s, m, c); }
 // Leon for the grab test: stands still at PX, 0
 static int host_hp = 200, host_held, host_dead;
 static int32_t host_px, host_pz;
@@ -89,7 +91,7 @@ void game_espr_kill(int id, int type) { (void)id; (void)type; }
 void game_floor_sound_set(int n, int on) { (void)n; (void)on; }
 int game_object_member(int n, int m, int *v) { (void)n; (void)m; (void)v; return 0; }
 void game_object_member_set(int n, int m, int v) { (void)n; (void)m; (void)v; }
-void game_plc(int w, int i, const uint8_t *ins) { if (w == 3) enemy_plc(i, ins); }
+int game_plc(int w, int i, const uint8_t *ins) { return w == 3 ? enemy_plc(i, ins) : 1; }
 void game_enemy_member_set(int s, int m, int v) { printf("  member_set enemy %d member %d = %04x\n", s, m, v & 0xFFFF); enemy_member_set(s, m, v); }
 int game_sight_blocked(int32_t a, int32_t b, int32_t c, int32_t d, int32_t e, int32_t f) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; return 0; }
 int main(int argc, char **argv)
@@ -104,6 +106,17 @@ int main(int argc, char **argv)
     int ticks = getenv("TICKS") ? atoi(getenv("TICKS")) : 100;
     for (int t = 0; t < ticks; t++) {
         int before = enemy_spawn_calls;
+        if (getenv("MEMBERS")) { // tick:slot:member:value,... e.g. 5:0:0x17:1
+            char buf[256], *save = NULL;
+            snprintf(buf, sizeof(buf), "%s", getenv("MEMBERS"));
+            for (char *it = strtok_r(buf, ",", &save); it; it = strtok_r(NULL, ",", &save)) {
+                int at, slot, member, value;
+                if (sscanf(it, "%i:%i:%i:%i", &at, &slot, &member, &value) == 4 && at == t)
+                    enemy_member_set(slot, member, value);
+            }
+        }
+        if (getenv("EVENT") && t == 5) // e.g. EVENT=3: the room's event function 3
+            script_start_event((int)strtol(getenv("EVENT"), NULL, 0));
         script_tick();
         EnemyTarget p = { .x = host_held ? host_px : (getenv("PX") ? atoi(getenv("PX")) : 5899),
                           .z = host_held ? host_pz : (getenv("PZ") ? atoi(getenv("PZ")) : 0), .y = getenv("PY") ? atoi(getenv("PY")) : 0, .hp = 200, .noise = getenv("NOISE") ? atoi(getenv("NOISE")) : 0, .can_grab = !host_held && !host_dead,

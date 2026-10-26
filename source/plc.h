@@ -14,14 +14,25 @@
 enum {
     PLC_ANIM_ROOM = 0,    // animation from the room's set (RBJ, obj+0x190)
     PLC_ANIM_OWN = 1,     // animation from the character's own set
+    PLC_ANIM_SET2 = 2,    // ... from its second set (obj+0x180: Leon's walking moves)
+    PLC_ANIM_SET3 = 3,    // ... from its third set (obj+0x188)
     PLC_WALK = 4,         // turn to the destination, then walk there
     PLC_RUN = 5,
     PLC_STAND = 6,        // what the others end in
     PLC_BACK = 7,         // walk backward to the destination
+    PLC_BACK_STRAIGHT = 8, // backward without turning first (FUN_80061a9c)
     PLC_FACE = 9,         // turn to face the destination (walking on the spot)
+    PLC_WALK_CLIMB = 0x12, // as walking; the PS1 also climbs a box on the way (FUN_80061d08)
     PLC_PAUSED = 0x14,    // plc_stop
     PLC_TURN_TO = 0x15,   // turn to the facing in dest_x
 };
+
+// plc_dest modes that move or turn and set the arrival bit when done
+static inline int plc_moves(int mode)
+{
+    return mode == PLC_WALK || mode == PLC_RUN || mode == PLC_BACK || mode == PLC_BACK_STRAIGHT ||
+           mode == PLC_FACE || mode == PLC_WALK_CLIMB || mode == PLC_TURN_TO;
+}
 
 typedef struct {
     uint8_t active;          // routine 4: the room script moves the character
@@ -47,6 +58,7 @@ typedef struct {
     const Model *room_set;   // mode 0: the room's animations for it (may be NULL)
     const Model *own_set;    // modes 1, walking, standing
     int own_first;           // mode 1 animation n = own_first + n
+    int own_first2, own_first3; // the same for modes 2 and 3 (FUN_80061618 / 0x80061640)
     int walk_anim, idle_anim; // absolute in own_set
     int table;               // speed / turn tables: 16 + player type, em type - 0x40
     int no_blend;            // out: the animation started without easing in

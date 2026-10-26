@@ -20,6 +20,7 @@ void game_set_player_dir(int16_t dir) { (void)dir; }
 void game_set_box_flag(int box, int flag) { (void)box; (void)flag; }
 void game_bgm_control(int i, int o, int t, int l, int r) { (void)i; (void)o; (void)t; (void)l; (void)r; }
 void game_bgmtbl_set(int s, int r, int m, int u) { (void)s; (void)r; (void)m; (void)u; }
+void game_item_get(int item, int count) { printf("  item get %02x x%d\n", item, count); }
 void game_movie(int n) { (void)n; }
 void game_play_sound(int bank, int sound) { (void)bank; (void)sound; }
 int game_enemy_member(int s, int m, int *v) { (void)s; (void)m; (void)v; return 0; }
@@ -35,8 +36,9 @@ void game_espr_kill(int id, int type) { (void)id; (void)type; }
 void game_floor_sound_set(int n, int on) { (void)n; (void)on; }
 int game_object_member(int n, int m, int *v) { (void)n; (void)m; (void)v; return 0; }
 void game_object_member_set(int n, int m, int v) { (void)n; (void)m; (void)v; }
-void game_plc(int w, int i, const uint8_t *ins) { (void)w; (void)i; (void)ins; }
+int game_plc(int w, int i, const uint8_t *ins) { (void)w; (void)i; (void)ins; return 1; }
 void game_spawn_enemy(int s, int t, int v, int voice, int x, int y, int z, int d) { (void)voice; if (getenv("SHOW_SPAWNS")) printf("  spawn slot %d type %02x variant %d at %d %d %d dir %d\n", s, t, v, x, y, z, d); }
+void game_enemy_motion(int s, int m, int c) { (void)s; (void)m; (void)c; }
 
 const char *room_message(const Room *room, int n)
 {
@@ -71,6 +73,8 @@ int main(int argc, char **argv)
         room.init_script = room.header->size_init ? data + room.header->off_init : NULL;
         room.exec_script = room.header->size_exec ? data + room.header->off_exec : NULL;
         messages = cut_changes = pos_sets = 0;
+        if (getenv("SYS19")) // the PS1's boot-time system flag (main.c, system_flags)
+            flag_set(0, 0x19, 1);
         script_room_enter(&room);
         int unknown_after_init = script_unknown_ops;
         int aot_count = 0, doors = 0;
@@ -89,6 +93,11 @@ int main(int argc, char **argv)
         printf("%-28s aots %2d (doors %d)  threads max %2d now %2d  unknown %d/%d  msgs %d cut %d pos %d\n",
                strrchr(argv[i], '/') + 1, aot_count, doors, max_threads, script_threads_running,
                unknown_after_init, script_unknown_ops, messages, cut_changes, pos_sets);
+        if (getenv("ITEMS")) // item AOTs after the scripts ran: item, amount, picked flag, model
+            for (int k = 0; k < NUM_AOTS; k++)
+                if (aots[k].active && aots[k].type == SCE_ITEM)
+                    printf("    item %02x x%d picked %02x model %d\n", aots[k].data[0], aots[k].data[2],
+                           aots[k].data[4], aots[k].data[6]);
         extern int script_unknown_at;
         if (script_unknown_ops)
             printf("    unknown op %d at %d\n", script_unknown_at >> 16, script_unknown_at & 0xFFFF);

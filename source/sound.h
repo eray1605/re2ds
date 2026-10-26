@@ -18,3 +18,5 @@ void voice_play(int stage, int clip);  // stage 0: the common clips (xa_on 1, n)
 int voice_playing(void);     // the clip has not finished yet
 void voice_frame(void);      // once per DS frame: counts down, frees the clip
 void voice_stop(void);
+const char *voice_key(void); // the playing clip's name ("s2_13"), NULL if none
+uint32_t voice_ms(void);     // how far into it

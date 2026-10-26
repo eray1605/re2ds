@@ -23,6 +23,7 @@ else
 fi
 [ -x tools/bss2ppm ] || $CC -O2 -o tools/bss2ppm tools/bss2ppm.c $AV
 [ -x tools/lz77 ] || $CC -O2 -o tools/lz77 tools/lz77.c
+[ -x tools/rmvdelta ] || $CC -O2 -o tools/rmvdelta tools/rmvdelta.c
 
 python3 -I tools/pld2json.py "$DISC/PL0/PLD/PL00.PLD" build/leon/leon --plw "$DISC/PL0/PLD/PL00W00.PLW"
 python3 -I tools/model2ds.py build/leon/leon.json "$DISC/PL0/PLD/PL00.PLD" build/ds/model/leon
@@ -129,5 +130,10 @@ for m in PL0/ZMOVIE/TITLEL:titlel:15 PL0/ZMOVIE/OPN1STL:opn1:15 PL0/ZMOVIE/OPN2N
     [ -f "$src" ] && echo "$src build/ds/movie/${rest%%:*}.bin ${rest##*:}"
 done | xargs -P 4 -n 3 sh -c 'python3 -I tools/str2ds.py "$0" "$1" --fps "$2" > /dev/null'
 
-cp -R build/ds/bg build/ds/room build/ds/model build/ds/mask build/ds/sound build/ds/door build/ds/effect build/ds/music build/ds/menu build/ds/movie build/ds/die build/ds/voice build/ds/files build/ds/title nitrofiles/
+# subtitles for the voices and movies: speech recognition over the converted
+# audio (whisper.cpp; skipped without whisper-cli and its model, see README)
+mkdir -p build/ds/subs
+python3 -I tools/subs2ds.py build/ds build/ds/subs/subs.txt build/subs_work
+
+cp -R build/ds/bg build/ds/room build/ds/model build/ds/mask build/ds/sound build/ds/door build/ds/effect build/ds/music build/ds/menu build/ds/movie build/ds/die build/ds/voice build/ds/files build/ds/title build/ds/subs nitrofiles/
 du -sh nitrofiles nitrofiles/*

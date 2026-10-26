@@ -8,3 +8,4 @@ nitrofiles/
 tools/bss2ppm
 __pycache__/
 tools/lz77
+tools/rmvdelta

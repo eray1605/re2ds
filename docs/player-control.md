@@ -95,8 +95,9 @@ routine 1 = new state, routines 2 and 3 = 0.
 | 3       | `0x8003a324` | `0x8003a4a4` | walking backward                 |
 | 4       | `0x8003abf8` | `0x8003adfc` | turning on the spot              |
 | 5       | `0x8003f790` | `0x80040800` | **aiming / firing** (see 5.)     |
-| 6–9, B  | …            | …            | not analysed yet                 |
-| A (10)  | –            | –            | set from "walking" with flag `0x2000` in `0x800c77d4` (assumed: stairs / scene) |
+| 6, 8, 9, B | …         | …            | not analysed yet                 |
+| 7       | –            | `0x8003b124` | stairs (set by `FUN_8004bc44`, see engine-notes.md 10) |
+| A (10)  | –            | –            | pushing an object (flag `0x2000` in `0x800c77d4`) |
 
 Transitions (observed, the same in states 0–4):
 
@@ -145,7 +146,8 @@ On PAL, Leon turns on the spot at 80/4096 × 360° × 25 ≈ **176°/s** (NTSC: 
   limp, heavy limp.
 - `FUN_8001581c` plays the keyframe and **takes the displacement from the animation data**
   (root motion).
-- `FUN_800289d4(obj, …, 0x200)` checks collision with the room geometry.
+- `FUN_800289d4(obj, …, 0x200)` steps the keyframe pointer (`obj+0x178`); the room
+  collision runs after the state routines (engine-notes.md, section 10).
 - Footstep sound when the frame flag `0x4000` is set (`FUN_8005797c`).
 
 **DS port:** the walking speed lives in the animation data of the PLD file
@@ -250,14 +252,26 @@ Per frame:
   - keyframe 1: `0x030a0e00` and `0x01000e00` at (138, 615, 8) – muzzle flash and fire
     (CORE00.ESP effects 3 and 1),
   - keyframe 3: `0x03080900` twice at (350, 40, -15) – smoke, and `0x02000700` with the
-    facing + 1300 – the casing (effect 2).
+    facing + 1300 – the casing (effect 2). A thrown effect bounces on the floor
+    (`FUN_8002038c`: up at 40 %, on at 60 %) and on walls (`FUN_8002047c`), each time calling
+    `FUN_80057364(obj+0x12 << 16 | 1)`. The effect object starts with a copy of the effect's
+    24-byte movement entry (`FUN_8001b8fc`; the decompiler shows it at `0x800d0838`, 0x18
+    before the slot's first u16), so `+0x0c`/`+0x0e` are its start speeds and `+0x12` is the
+    entry's sound: CORE00.ESP effect 2 sub 0 (handgun casing) `0x0102`, sub 2 (shotgun shell)
+    `0x0109` – bank 1 (the weapon's ARMSnn) sound 2 / 9. ARMS02 sound 2 is a 0.29 s clink. The DS plays it
+    once per casing, on its first floor contact.
 
 ### Phase 4 – reloading (`0x8004237c`)
 
 - Animation `0x70010` = PLW move 16.
 - On each keyframe the EDD flags of the entry at `obj+0x178` are tested:
   - `0x100000`: play weapon bank sound `(flags & 0xf0000) >> 16`,
-  - `0x200000` (and `+0x154` bit 1): drop the magazine (`FUN_8003f050`),
+  - `0x200000` (and `+0x154` bit 1): drop the magazine (`FUN_8003f050`): for the items of
+    table `0x8009efc7` (2-6, `0x0F`, `0x10`) a part of the weapon model (row of `0x8009efe0`:
+    part 16, speed 0, `+0x400` direction) falls from the hand (`FUN_8003f218`: +20 a frame),
+    bounces once at half speed on the floor with weapon sound `0x0e` (the clink) and is gone
+    at the next contact. The DS keeps the magazine on the model and plays only the clink when
+    it would land.
   - `0x400000`: load the magazine (`FUN_80065780`: moves rounds from the ammunition item
     into the weapon, up to its capacity; an empty ammunition item is removed).
 - At the end of the animation → phase 1.
@@ -291,7 +305,7 @@ a count of `0xff` means unlimited (SMG, rocket launcher). Frame handlers: SMG `0
 ## 6. Open points
 
 - Which of the actions `0x10`/`0x20` is "up" and which "down": check in an emulator.
-- States 6–11 (probably stairs, pushing, damage, death, grabbed).
+- States 6, 8, 9, 11 (damage, death, grabbed, ...).
 - Contents of the table `0x8009eed8` (frames per weapon) and the animation tables.
 - The R3000 has a one-instruction load delay that Ghidra does not model. Cross-check the
   assembly where it matters.
