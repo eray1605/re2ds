@@ -27,6 +27,7 @@
 #include "music.h"
 #include "menu.h"
 #include "sound.h"
+#include "subs.h"
 
 // Leon's first playable room and the camera the converter picked a spawn for
 #define START_STAGE 1
@@ -571,6 +572,8 @@ static int load_room(int stage, int id)
         if (rbj_enemy[i].data)
             asset_free(rbj_enemy[i].data);
         rbj_enemy[i].data = NULL;
+        if (i >= RBJ_SLOTS && i != PARTNER_SLOT)
+            continue; // no room sets there: spare the file system the misses
         if (i == PARTNER_SLOT) // the partner's set (RBJ mask bit 1)
             snprintf(path, sizeof(path), "nitro:/room/room%d%02x0_rbj_p.bin", stage, id);
         else
@@ -1131,13 +1134,13 @@ static int32_t penetration(const RoomBox *b, int32_t x, int32_t z)
 
 // A step is blocked only if it pushes Leon deeper into an obstacle, so he
 // can always walk out of one he starts in (door exits lie close to walls).
-// mask: BOX_PLAYER for Leon, BOX_ENEMY for the enemies.
-static int blocked_for(uint16_t mask, int32_t from_x, int32_t from_z, int32_t x, int32_t z)
+// mask: BOX_PLAYER for Leon, BOX_ENEMY for the enemies; floors: the floor
+// bits a box must all be on to count.
+static int blocked_for(uint16_t mask, uint32_t floors, int32_t from_x, int32_t from_z, int32_t x, int32_t z)
 {
-    uint32_t floor_bit = 1u << player_floor();
     for (int i = 0; i < room.header->num_boxes; i++) {
         const RoomBox *b = &room.boxes[i];
-        if (!(b->floors & floor_bit) || is_slope(b) || !(b->flag & mask))
+        if ((b->floors & floors) != floors || is_slope(b) || !(b->flag & mask))
             continue;
         int32_t depth = penetration(b, x, z);
         if (depth > 0 && depth >= penetration(b, from_x, from_z))
@@ -1146,36 +1149,72 @@ static int blocked_for(uint16_t mask, int32_t from_x, int32_t from_z, int32_t x,
     return 0;
 }
 
-static int blocked(int32_t from_x, int32_t from_z, int32_t x, int32_t z)
+// Slopes and stairs rise from the bottom edge (type >> 4) & 3 selects (0: x
+// min, 1: x max, 2: z min, 3: z max). A slope (PS1 0x8004ba54) rises one floor
+// to the floor (type >> 6) & 31; stairs rise by that many floors
+// (OpenBiohazard2 game/player.go).
+static int slope_inside(const RoomBox *b, int32_t x, int32_t z)
 {
-    return blocked_for(BOX_PLAYER, from_x, from_z, x, z);
+    return b->w && b->d && x >= b->x && x <= b->x + b->w && z >= b->z && z <= b->z + b->d;
 }
 
-// Height on slopes and stairs (OpenBiohazard2 game/player.go): the box rises
-// by ((type >> 6) & 31) floor heights from its bottom edge, which
-// (type >> 4) & 3 selects (0: x min, 1: x max, 2: z min, 3: z max). The bottom
-// height is taken when Leon steps onto the box.
+// height above the bottom edge at (x, z)
+static int32_t slope_rise(const RoomBox *b, int32_t x, int32_t z)
+{
+    int32_t frac; // 0..4096 from the bottom edge
+    switch ((b->type >> 4) & 3) {
+    case 0: frac = ((x - b->x) << 12) / b->w; break;
+    case 1: frac = ((b->x + b->w - x) << 12) / b->w; break;
+    case 2: frac = ((z - b->z) << 12) / b->d; break;
+    default: frac = ((b->z + b->d - z) << 12) / b->d; break;
+    }
+    int floors = b->shape == SHAPE_SLOPE ? 1 : (b->type >> 6) & 31;
+    return (floors * FLOOR_HEIGHT * frac) >> 12;
+}
+
+// The floors Leon's collision counts for a step to (x, z): his own, or on
+// stairs both floors his height there lies between. The PS1 walks stairs as
+// a sequence without room collision; walked freely, a wall of one floor that
+// reaches over the steps would stop him (room 103: a floor 2 wall over the
+// top steps, going up only - going down he started inside it and walked out).
+// The walls beside the stairs are on all their floors and still count.
+static uint32_t player_floors(int32_t x, int32_t z)
+{
+    if (player.slope >= 0) {
+        const RoomBox *b = &room.boxes[player.slope];
+        if (b->shape == SHAPE_STAIRS && slope_inside(b, x, z)) {
+            int32_t h = -(player.slope_base + slope_rise(b, x, z)); // above floor 0
+            int lo = h > 0 ? h / -FLOOR_HEIGHT : 0, hi = h > 0 ? (h - FLOOR_HEIGHT - 1) / -FLOOR_HEIGHT : 0;
+            return (1u << (lo > 31 ? 31 : lo)) | (1u << (hi > 31 ? 31 : hi));
+        }
+    }
+    return 1u << player_floor();
+}
+
+static int blocked(int32_t from_x, int32_t from_z, int32_t x, int32_t z)
+{
+    return blocked_for(BOX_PLAYER, player_floors(x, z), from_x, from_z, x, z);
+}
+
+// Height on slopes and stairs. A slope's bottom is the floor below its top;
+// on stairs the bottom height is taken when Leon steps onto them.
 static void update_height(void)
 {
     for (int i = 0; i < room.header->num_boxes; i++) {
         const RoomBox *b = &room.boxes[i];
-        if (!is_slope(b) || b->w == 0 || b->d == 0)
+        if (!is_slope(b) || !slope_inside(b, player.x, player.z))
             continue;
-        if (player.x < b->x || player.x > b->x + b->w || player.z < b->z || player.z > b->z + b->d)
+        // a slope is set at its own height: only for Leon on one of its floors
+        // (room 409 has its ramps four floors up)
+        if (b->shape == SHAPE_SLOPE && !(b->floors >> player_floor() & 1))
             continue;
-        int32_t frac;   // 0..4096 from the bottom edge
-        switch ((b->type >> 4) & 3) {
-        case 0: frac = ((player.x - b->x) << 12) / b->w; break;
-        case 1: frac = ((b->x + b->w - player.x) << 12) / b->w; break;
-        case 2: frac = ((player.z - b->z) << 12) / b->d; break;
-        default: frac = ((b->z + b->d - player.z) << 12) / b->d; break;
-        }
-        int32_t rise = ((b->type >> 6) & 31) * FLOOR_HEIGHT;
-        if (player.slope != i) {
-            player.slope = i;
-            player.slope_base = player.y - ((rise * frac) >> 12);
-        }
-        player.y = player.slope_base + ((rise * frac) >> 12);
+        int32_t rise = slope_rise(b, player.x, player.z);
+        if (b->shape == SHAPE_SLOPE)
+            player.slope_base = (((b->type >> 6) & 31) - 1) * FLOOR_HEIGHT;
+        else if (player.slope != i)
+            player.slope_base = player.y - rise;
+        player.slope = i;
+        player.y = player.slope_base + rise;
         return;
     }
     player.slope = -1;
@@ -1390,7 +1429,8 @@ static PlcBody player_body(void)
 {
     PlcBody b = { .x = player.x, .z = player.z, .dir = player.dir, .set = player.set,
                   .anim = player.anim, .key = player.key, .room_set = rbj.data ? &rbj : NULL,
-                  .own_set = &leon, .own_first = PLW_FIRST, .walk_anim = PLW_FIRST + 0,
+                  .own_set = &leon, .own_first = PLW_FIRST, .own_first2 = PLW_FIRST, .own_first3 = 0,
+                  .walk_anim = PLW_FIRST + 0,
                   .idle_anim = PLW_FIRST + 2, .table = 16 };
     return b;
 }
@@ -1405,14 +1445,12 @@ static void player_body_back(const PlcBody *b)
     player.key = b->key;
 }
 
-void game_plc(int work_type, int index, const uint8_t *ins)
+int game_plc(int work_type, int index, const uint8_t *ins)
 {
-    if (work_type == 3 || work_type == 2) { // 2: the partner (Ada, Sherry)
-        enemy_plc(work_type == 2 ? PARTNER_SLOT : index, ins);
-        return;
-    }
+    if (work_type == 3 || work_type == 2) // 2: the partner (Ada, Sherry)
+        return enemy_plc(work_type == 2 ? PARTNER_SLOT : index, ins);
     if (work_type != 1 || player.state >= ST_GRABBED)
-        return;
+        return 0;
     PlcBody b = player_body();
     plc_command(&player.plc, &b, ins);
     player_body_back(&b);
@@ -1422,6 +1460,7 @@ void game_plc(int work_type, int index, const uint8_t *ins)
         player.state = ST_IDLE; // plc_ret
         set_anim(ANIM_IDLE);
     }
+    return 1;
 }
 
 // one game tick of a scripted Leon
@@ -1442,6 +1481,8 @@ void game_spawn_enemy(int slot, int type, int flags, int voice, int x, int y, in
     enemy_spawn(slot, type, flags, voice, x, y, z, dir_re2);
     pick_enemy_bank(); // loads only when the room's set changes
 }
+
+void game_enemy_motion(int slot, int motion, int ctr) { enemy_set_motion(slot, motion, ctr); }
 
 // Enemy sounds get quieter with the distance to Leon (the PS1 places them in
 // 3D; this is the simple version).
@@ -1566,10 +1607,14 @@ void game_bgm_control(int id, int op, int type, int left, int right)
 // file. Entries 0-2 are the logo and the opening, 15 Claire's opening; 16
 // another cut of the ending. The in-game movies are converted at 10 fps
 // (tools/build_assets.sh). Afterwards the room picture comes back.
+// movie_on numbers. Each movie is named after the room that plays it (ROOM2040
+// calls 10: R204L, the licker; 4090 calls 11: R409; 1080 calls 8 and 9: R108L,
+// R109). Table 0x8009a578 (32-byte rows, file index into 0x8009146c at +0x18
+// of the row before) gives the same order.
 static const char *const movie_names[] = {
-    [3] = "r10b", [4] = "r200", [5] = "r505", [6] = "r505", [7] = "r108l", [8] = "r109",
-    [9] = "r204l", [10] = "r409", [11] = "r700l", [12] = "r703l", [13] = "r704l",
-    [14] = "opn2", [16] = "r704l",
+    [4] = "r10b", [5] = "r200", [6] = "r505", [7] = "r505", [8] = "r108l", [9] = "r109",
+    [10] = "r204l", [11] = "r409", [12] = "r700l", [13] = "r703l", [14] = "r704l",
+    [15] = "opn2", [17] = "r704l",
 };
 
 void game_movie(int n)
@@ -1582,6 +1627,55 @@ void game_movie(int n)
         show_camera_view(cur_cam);
     setBrightness(1, 0);
     game_tick_acc = 0; // no catching up on the ticks the movie took
+}
+
+// sce_item_get (scd_op_76): someone hands Leon an item (Marvin's card key in
+// room 202). The PS1 then shows its item screen; with no room here it goes
+// into the item box.
+// Into the inventory, else the first free slot of the item box; 0 if both are
+// full.
+static int store_item(int item, int count)
+{
+    if (inventory_add(item, count))
+        return 1;
+    for (int i = 0; i < BOX_SLOTS; i++)
+        if (!item_box[i].item) {
+            item_box[i].item = item;
+            item_box[i].count = count;
+            return 2;
+        }
+    return 0;
+}
+
+// An item that found no room yet: handed over as soon as there is some
+// (pending_item_frame), so a key the story needs is never lost.
+static int pending_item, pending_count;
+
+void game_item_get(int item, int count)
+{
+    static char text[64];
+    int where = store_item(item, count);
+    if (where == 1)
+        return;
+    if (where == 2)
+        snprintf(text, sizeof(text), "The %s was put in the item box.", item_name(item));
+    else {
+        pending_item = item;
+        pending_count = count;
+        snprintf(text, sizeof(text), "No room for the %s. Make room for it.", item_name(item));
+    }
+    game_show_message(text);
+}
+
+static void pending_item_frame(void)
+{
+    if (pending_item && store_item(pending_item, pending_count)) {
+        static char text[64];
+        snprintf(text, sizeof(text), "You took the %s.", item_name(pending_item));
+        pending_item = 0;
+        if (!menu_message_open())
+            game_show_message(text);
+    }
 }
 
 void game_bgmtbl_set(int stage, int room, int main, int sub)
@@ -1736,7 +1830,7 @@ int game_blocked(int32_t from_x, int32_t from_z, int32_t x, int32_t z, int32_t y
 {
     int32_t saved = player.y;
     player.y = y; // player_floor() reads it
-    int b = blocked_for(BOX_ENEMY, from_x, from_z, x, z);
+    int b = blocked_for(BOX_ENEMY, 1u << player_floor(), from_x, from_z, x, z);
     player.y = saved;
     return b;
 }
@@ -1880,9 +1974,21 @@ static void enter_room(int stage, int id, int arrival_cam)
     pick_enemy_bank();
     music_room(stage, id);
     script_camera_changed(-1, arrival_cam);
+    script_stage = stage - 1;
     script_room_enter(&room);
 
     pick_enemy_bank();
+}
+
+// System flag 0:0x19 (0x800c77b4 bit 0x40): the PS1 sets it at boot
+// (FUN_8002a8b8) and its new-game reset (FUN_8002b9f8) keeps it. About 30
+// rooms pick their items and enemies by it ("ck 00 19 01"): without it the
+// herbs, ammunition and zombies of the other set appear.
+static int easy_chosen; // NEW GAME on EASY (difficulty_screen: flag 0:0x1a)
+
+static void system_flags(void)
+{
+    flag_set(0, 0x19, 1);
 }
 
 // New game, and after Leon died (the PS1 shows "YOU DIED" and goes back to
@@ -1891,6 +1997,9 @@ static void new_game(void)
 {
     memset(&die, 0, sizeof(die));
     script_state_reset();
+    system_flags();
+    flag_set(0, 0x1a, easy_chosen);
+    pending_item = 0;
     music_table_reset();
     memset(lock_open, 0, sizeof(lock_open));
     save_count = 0;
@@ -2157,6 +2266,8 @@ static void map_palette(int blink)
     }
     pal[64] = blink ? RGB15(31, 31, 0) : RGB15(31, 31, 31);
     pal[65] = RGB15(0, 0, 0);
+    pal[240] = RGB15(31, 31, 31); // the subtitles (menu_subtitle)
+    pal[255] = RGB15(0, 0, 0);
     menu_overlay(NULL, pal);
 }
 
@@ -2381,6 +2492,7 @@ static void load_game(int n)
     const SaveSlot *s = &saves[n];
     memset(&die, 0, sizeof(die));
     script_state_set(s->script);
+    system_flags(); // saves from before it was set
     music_table_reset();
     if (s->bgm_saved) // saves from before version 2 keep the starting table
         music_table_put(s->bgm, sizeof(s->bgm));
@@ -2390,6 +2502,17 @@ static void load_game(int n)
     files_found = s->files;
     memcpy(map_seen, s->map_seen, sizeof(map_seen));
     inventory_equipped = s->equipped;
+    // Builds before sce_item_get played Marvin's scene (room 202, picked flag
+    // 5) without handing over the card key: give it now, unless the hall
+    // terminal has had it already (4:0x46).
+    int card = inventory_has(ITEM_BLUE_CARD_KEY);
+    for (int i = 0; i < BOX_SLOTS; i++)
+        card |= item_box[i].item == ITEM_BLUE_CARD_KEY;
+    pending_item = 0;
+    if (flag_get(FLAGS_ITEM_PICKED, 5) && !flag_get(4, 0x46) && !card && !store_item(ITEM_BLUE_CARD_KEY, 1)) {
+        pending_item = ITEM_BLUE_CARD_KEY; // no room at all: as soon as there is some
+        pending_count = 1;
+    }
     save_count = s->saves;
     last_slot = n;
     player.state = ST_IDLE;
@@ -2429,6 +2552,34 @@ static void show_title(const char *name)
 
 static int skip_movies;               // SELECT held at start: no title movie, no opening
 
+// After NEW GAME the PS1 asks NORMAL / EASY (TITLE.BIN 0x80191084: left /
+// right, the choice red). EASY sets 0x800c77b4 bit 0x20 (flag 0:0x1a): the
+// enemies other than zombies get less health. 1 = chosen, 0 = B (back).
+static int difficulty_screen(void)
+{
+    int sel = 0, shown = -1;
+    for (;;) {
+        if (sel != shown) {
+            show_title(sel ? "easy" : "normal");
+            shown = sel;
+        }
+        swiWaitForVBlank();
+        scanKeys();
+        uint32_t down = keysDown();
+        if (down & (KEY_LEFT | KEY_RIGHT | KEY_UP | KEY_DOWN)) {
+            sel ^= 1;
+            game_menu_sound(4);
+        } else if (down & (KEY_A | KEY_START)) {
+            game_menu_sound(5);
+            easy_chosen = sel;
+            return 1;
+        } else if (down & KEY_B) {
+            game_menu_sound(7);
+            return 0;
+        }
+    }
+}
+
 static int title_screen(void)
 {
     uint32_t layers = REG_DISPCNT & (DISPLAY_BG0_ACTIVE | DISPLAY_SPR_ACTIVE);
@@ -2462,6 +2613,10 @@ static int title_screen(void)
                 continue;
             }
             game_menu_sound(5);
+            if (sel == 0 && !difficulty_screen()) {
+                shown = -1; // back to NEW GAME / LOAD GAME
+                continue;
+            }
             break;
         }
     }
@@ -2734,6 +2889,7 @@ static int is_auto(int item) { return item == 0x0F || item == 0x10; }
 #define HAND_BONE 11
 static int leon_weapon = -1;      // item whose model / sound bank are loaded
 static void *weapon_bank;         // ARMSnn (PS1 bank 1): the shot is sound 0
+static int magazine_ticks;        // ticks until the dropped magazine lands, 0 = none
 
 static const Weapon *weapon_in_hand(void)
 {
@@ -2791,6 +2947,7 @@ static void update_weapon_model(void)
     build_hierarchy();
     apply_weapon_texture(tex_item);
     leon_weapon = item;
+    magazine_ticks = 0;
     sound_bank_free(weapon_bank);
     snprintf(path, sizeof(path), "nitro:/sound/arms%02x.bin", item);
     weapon_bank = item ? sound_bank_load(path) : NULL;
@@ -2839,12 +2996,15 @@ static void leon_point(int bone, const int32_t local[3], int32_t out[3])
 // tumbling handgun casing (frame 8 loops to 0), 9-16 the shotgun shell (17
 // loops to 9). Its sub effect table converts badly (all point at frame 22),
 // so the frames are named here.
+// The bounce sound is in the effect's movement entry: weapon sound 2 for the
+// casing (sub 0, 0x0102), 9 for the shell (sub 2, 0x0109).
 enum { CASING_HANDGUN = 0, CASING_SHELL = 9 };
+enum { SND_CASING = 2, SND_SHELL = 9 };
 static void throw_casing(int first, int dir_re2, const int32_t p[3])
 {
     int16_t dir = player.dir + dir_re2 * 8;
     roomfx_throw(2, first, 0, p[0], p[1], p[2], (30 * cosLerp(dir)) >> 12, -45, -((30 * sinLerp(dir)) >> 12),
-                 player.y, 4096 * 3 / 10);
+                 player.y, 4096 * 3 / 10, first == CASING_SHELL ? SND_SHELL : SND_CASING);
 }
 
 // The frame handlers 0x8009f0bc[weapon] as data: on a fire move keyframe,
@@ -2911,6 +3071,33 @@ static void start_reload(void)
     player.key = 0;
 }
 
+// The magazine (FUN_8003f050, EDD flag 0x200000 on the first reload event):
+// the weapons of table 0x8009efc7 drop it from the hand; it falls (speed 0,
+// +20 a frame, FUN_8003f218) and bounces once on the floor with ARMS sound
+// 0x0e, the clink. Here the model keeps its magazine; only the clink plays,
+// when it would land.
+#define SND_MAGAZINE 0x0E
+static int drops_magazine(int item) { return (item >= 0x02 && item <= 0x06) || item == 0x0F || item == 0x10; }
+
+static void drop_magazine(void)
+{
+    static const int32_t at[3] = { 0, 0, 0 };
+    int32_t p[3], vy = 0;
+    leon_point(HAND_BONE, at, p);
+    for (magazine_ticks = 0; p[1] <= player.y && magazine_ticks < 60; magazine_ticks++) {
+        vy += 20;
+        p[1] += vy;
+    }
+    if (!magazine_ticks)
+        magazine_ticks = 1;
+}
+
+// a casing hits the floor (FUN_8002038c, see roomfx.c)
+void game_casing_sound(int sound)
+{
+    sound_play(weapon_bank, sound, 110, 64);
+}
+
 static void reload_tick(void)
 {
     const Weapon *w = weapon_in_hand();
@@ -2924,6 +3111,8 @@ static void reload_tick(void)
     for (int k = 0; k < 3; k++)
         if (w->reload_key[k] && player.key == w->reload_key[k]) {
             sound_play(weapon_bank, w->reload_sound[k], 127, 64);
+            if (k == 0 && drops_magazine(w->item))
+                drop_magazine();
             if (k == w->load_event)
                 inventory_reload();
         }
@@ -3252,6 +3441,8 @@ static void try_special_move(uint32_t pressed)
 static void update_player_tick(void)
 {
     PlayerState st = player.state;
+    if (magazine_ticks && !--magazine_ticks)
+        sound_play(weapon_bank, SND_MAGAZINE, 127, 64);
     if (st == ST_DEAD && player.set == &leon) { // killed outside a grab: falls
         if (player.key + 1 < leon.anims[player.anim].count)
             player.key++;
@@ -3344,8 +3535,9 @@ static void print_status(void)
     printf("pos %6ld %6ld %6ld  \n", (long)player.x, (long)player.y, (long)player.z);
     printf("dir %5d floor %d slope %3d  \n", player.dir & 0x7FFF, player_floor(), player.slope);
     printf("skript: %d threads, %d unbek.  \n", script_threads_running, script_unknown_ops);
-    printf("HP %3d %s  gegner %d  \n", player.hp,
-           player.hp < 21 ? "Danger " : player.hp < 101 ? "Caution" : "Fine   ", enemy_count());
+    // fehler: enemy_last_error (enemy.h; 7 = no texture memory: invisible)
+    printf("HP %3d %s  gegner %d fehler %d  \n", player.hp,
+           player.hp < 21 ? "Danger " : player.hp < 101 ? "Caution" : "Fine   ", enemy_count(), enemy_last_error);
     printf("cull %s gx %4d/%4d   \n",
            cull_models == POLY_CULL_BACK ? "back " : cull_models == POLY_CULL_FRONT ? "front" : "aus  ",
            gx_vertices_last, gx_polygons_last);
@@ -3456,6 +3648,7 @@ int main(void)
 
     effect_load();
     menu_init();
+    subs_init();
     voice_bank = sound_bank_load("nitro:/sound/core00.bin");
     enemy_pairs = asset_load("nitro:/sound/enem_pairs.bin", NULL);
     // as the PS1 boots: the title movie (PL0/ZMOVIE/TITLEL.STR: the CAPCOM
@@ -3499,9 +3692,15 @@ int main(void)
         }
         static int map_was_shown;
         int map_shown = !menu_open && menu_lower_map();
+        if (menu_lower_dirty())
+            map_was_shown = 0;
         if (map_shown)
             map_live(!map_was_shown);
         map_was_shown = map_shown;
+        if (!menu_open)
+            menu_subtitle(voice_key() ? subs_at(voice_key(), voice_ms()) : NULL);
+        if (!menu_open && !paused)
+            pending_item_frame();
         if (!paused)
             update_menu(down);
         if (!menu_open && !paused) {

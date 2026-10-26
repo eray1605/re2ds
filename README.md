@@ -172,6 +172,23 @@ make
 ./start.command      # macOS: builds if needed and starts melonDS
 ```
 
+### Subtitles (optional)
+
+The English disc has no text for what is spoken. `tools/build_assets.sh` can make subtitles
+for the cutscene voices and the movies with speech recognition
+([whisper.cpp](https://github.com/ggml-org/whisper.cpp)) from your own disc's audio; they
+are shown on the lower screen. Without whisper the step is skipped.
+
+```bash
+brew install whisper-cpp            # Linux: build whisper.cpp, put whisper-cli on the PATH
+mkdir -p ~/.cache/whisper-cpp
+curl -L -o ~/.cache/whisper-cpp/ggml-small.en.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin
+```
+
+The first run takes a while (results are cached in `build/subs_work`). `WHISPER_CLI` and
+`WHISPER_MODEL` choose another program or model.
+
 ### After updating the code
 
 ```bash
@@ -259,6 +276,9 @@ PS1 functions and tables they reproduce (`FUN_8003ed74`, `0x8009f560`, …). The
 
 - [how-re2ds-works.md](docs/how-re2ds-works.md) – start here: the whole pipeline from the disc
   image to the ROM in plain language, what REA / Ghidra do, what each converter does
+- [selber-programmieren.md](docs/selber-programmieren.md) – (German) a step-by-step guide to
+  working on re2ds yourself: C basics, building, host tests, room scripts, reading the PS1
+  code in Ghidra, worked examples, git workflow
 - [player-control.md](docs/player-control.md) – input, the player state machine, turning,
   aiming, firing, reloading
 - [enemy-zombie.md](docs/enemy-zombie.md) – the zombie AI

@@ -32,6 +32,15 @@ typedef struct { uint8_t first, flags; uint16_t scale, speed, pad; } Sub; // see
 #define THROWN 8                   // instance flag: roomfx_throw (casings), lies a while after landing
 #define LIE_TICKS 60
 #define GRAVITY 6                  // as effect.c
+// A thrown casing bounces (FUN_8002038c): back up at 40 % of its speed, on at
+// 60 %, and each time it plays FUN_80057364(u16 +0x12 << 16 | 1). +0x12 is in
+// the effect's movement entry (CORE00.ESP effect 2, copied by FUN_8001b8fc):
+// 0x0102 for the handgun casing (sub 0), 0x0109 for the shotgun shell (sub 2),
+// i.e. bank 1 (the weapon's ARMSnn) sound 2 / 9. Here only the first contact
+// plays it, once a shot: the later bounces stay quiet.
+#define BOUNCE_UP 40
+#define BOUNCE_ON 60
+#define BOUNCE_MIN 40              // slower than this it stays down (about 3 clicks)
 
 typedef struct {
     const EffectEntry *e;
@@ -53,6 +62,7 @@ typedef struct {
     int32_t vx, vy, vz;           // falling sprites
     int32_t floor;                // thrown: lands here
     uint8_t lying;                // thrown: ticks left on the floor
+    uint8_t sound;                // thrown: weapon sound on each floor contact
     int32_t scale;                // 4096 = 1
 } Instance;
 
@@ -231,7 +241,7 @@ void roomfx_spawn(int id, int type, int32_t x, int32_t y, int32_t z, int size, i
 }
 
 void roomfx_throw(int id, int first, int row, int32_t x, int32_t y, int32_t z, int32_t vx, int32_t vy, int32_t vz,
-                  int32_t floor_y, int scale)
+                  int32_t floor_y, int scale, int sound)
 {
     Effect *f = find(id);
     if (!f || !upload(f) || first >= f->e->frames)
@@ -248,6 +258,7 @@ void roomfx_throw(int id, int first, int row, int32_t x, int32_t y, int32_t z, i
         n->row = row;
         n->first = n->frame = first;
         n->flags = THROWN;
+        n->sound = sound;
         n->timer = f->frames[first].time;
         n->x = x;
         n->y = y;
@@ -295,7 +306,17 @@ void roomfx_tick(void)
             n->vy += GRAVITY;
             if (n->y >= n->floor) {
                 n->y = n->floor;
-                n->lying = LIE_TICKS;
+                if (n->sound) {
+                    game_casing_sound(n->sound);
+                    n->sound = 0;
+                }
+                if (n->vy > BOUNCE_MIN) {
+                    n->vy = -n->vy * BOUNCE_UP / 100;
+                    n->vx = n->vx * BOUNCE_ON / 100;
+                    n->vz = n->vz * BOUNCE_ON / 100;
+                } else {
+                    n->lying = LIE_TICKS;
+                }
                 continue;
             }
         }

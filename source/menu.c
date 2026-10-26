@@ -712,6 +712,95 @@ void menu_focus(int on)
 
 int menu_has_focus(void) { return focus; }
 
+// ------------------------------------------------------------ subtitles
+// A box over the bottom of the lower screen, drawn with palette entries 240
+// (white) and 255 (black): the status screen's palette has them so, the map's
+// (main.c) and the movies' blank screen set them.
+#define SUB_Y 148
+#define SUB_H 44
+#define SUB_WHITE 240
+#define SUB_BLACK 255
+static uint8_t sub_fb[256 * SUB_H] __attribute__((aligned(32)));
+static const char *sub_shown;
+static int sub_blank;           // a movie: the lower screen is black but for the subtitles
+static int lower_dirty;
+
+static void sub_render(const char *s)
+{
+    memset(sub_fb, SUB_BLACK, sizeof(sub_fb));
+    for (int y = 3; *s && y + 8 <= SUB_H; y += 10) {
+        int len = 0, last_space = -1;
+        while (s[len] && len < 30) {
+            if (s[len] == ' ')
+                last_space = len;
+            len++;
+        }
+        if (s[len] && last_space > 0)
+            len = last_space;
+        int x = 8 + (30 - len) * 4; // centred
+        for (int k = 0; k < len; k++, x += 8) {
+            const u8 *g = default_font_bin + (uint8_t)s[k] * 8;
+            for (int j = 0; j < 8; j++)
+                for (int i = 0; i < 8; i++)
+                    if (g[j] >> i & 1)
+                        sub_fb[(y + j) * 256 + x + i] = SUB_WHITE;
+        }
+        s += len;
+        while (*s == ' ')
+            s++;
+    }
+}
+
+int menu_lower_map(void);
+
+void menu_subtitle(const char *t)
+{
+    if (debug_mode || message || focus || picture)
+        t = NULL; // the menu's own box or screen
+    if (t != sub_shown) {
+        if (t) {
+            sub_render(t);
+        } else if (bg >= 0) { // gone: the screen under it is drawn again
+            dmaFillWords(0xFFFFFFFF, (uint8_t *)bgGetGfxPtr(bg) + SUB_Y * 256, sizeof(sub_fb));
+            last_hp = -9999;
+            lower_dirty = 1;
+        }
+        sub_shown = t;
+    }
+    if (!t || bg < 0)
+        return;
+    if (!sub_blank && !menu_lower_map()) { // the status screen: into its picture
+        memcpy(fb + SUB_Y * 256, sub_fb, sizeof(sub_fb));
+        dirty = 1;
+    } else {
+        DC_FlushRange(sub_fb, sizeof(sub_fb));
+        dmaCopy(sub_fb, (uint8_t *)bgGetGfxPtr(bg) + SUB_Y * 256, sizeof(sub_fb));
+    }
+}
+
+void menu_subtitle_blank(int on)
+{
+    sub_blank = on;
+    if (on && bg >= 0) {
+        dmaFillWords(0xFFFFFFFF, bgGetGfxPtr(bg), 256 * 192);
+        BG_PALETTE_SUB[SUB_BLACK] = RGB15(0, 0, 0);
+        BG_PALETTE_SUB[SUB_WHITE] = RGB15(31, 31, 31);
+    }
+    if (!on) {
+        menu_subtitle(NULL);
+        menu_overlay_end();
+        dirty = 1;
+        lower_dirty = 1;
+    }
+}
+
+int menu_lower_dirty(void)
+{
+    int d = lower_dirty;
+    lower_dirty = 0;
+    return d;
+}
+
 static int lower_status;        // Y: the status screen during play instead of the map
 static int status_shown;        // the status screen is on the lower screen
 

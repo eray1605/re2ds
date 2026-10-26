@@ -38,7 +38,7 @@ static struct {
 static PlcBody body(void)
 {
     PlcBody b = { .x = pl.x, .z = pl.z, .dir = pl.dir, .set = pl.set, .anim = pl.anim, .key = pl.key,
-                  .room_set = rbj.data ? &rbj : NULL, .own_set = &leon, .own_first = PLW_FIRST,
+                  .room_set = rbj.data ? &rbj : NULL, .own_set = &leon, .own_first = PLW_FIRST, .own_first2 = PLW_FIRST,
                   .walk_anim = PLW_FIRST, .idle_anim = PLW_FIRST + 2, .table = 16 };
     return b;
 }
@@ -56,11 +56,12 @@ int game_busy(void) { return 0; }
 void game_show_message(const char *t) { printf("t%d  MESSAGE: %.60s\n", tick, t); }
 int game_message_open(void) { return 0; }
 void game_cut_change(int c) { printf("t%d  cut %d\n", tick, c); }
-void game_set_player_pos(int32_t x, int32_t y, int32_t z) { pl.x = x; pl.y = y; pl.z = z; printf("t%d  leon pos %d %d\n", tick, (int)x, (int)z); }
+void game_set_player_pos(int32_t x, int32_t y, int32_t z) { pl.x = x; pl.y = y; pl.z = z; printf("t%d  leon pos %d %d %d\n", tick, (int)x, (int)y, (int)z); }
 void game_set_player_dir(int16_t d) { pl.dir = d * 8; }
 void game_set_box_flag(int b, int f) { printf("t%d  box %d flag %04x\n", tick, b, f & 0xFFFF); }
 void game_bgm_control(int i, int o, int t, int l, int r) { (void)i; (void)o; (void)t; (void)l; (void)r; }
 void game_bgmtbl_set(int s, int r, int m, int u) { (void)s; (void)r; (void)m; (void)u; }
+void game_item_get(int item, int count) { printf("  item get %02x x%d\n", item, count); }
 void game_movie(int n) { (void)n; }
 void game_play_sound(int bank, int sound) { printf("t%d  sound bank %d #%d\n", tick, bank, sound); }
 void game_spawn_enemy(int s, int t, int v, int voice, int x, int y, int z, int d)
@@ -68,6 +69,7 @@ void game_spawn_enemy(int s, int t, int v, int voice, int x, int y, int z, int d
     printf("t%d  spawn slot %d type %02x flags %04x at %d %d\n", tick, s, t, v, x, z);
     enemy_spawn(s, t, v, voice, x, y, z, d);
 }
+void game_enemy_motion(int s, int m, int c) { enemy_set_motion(s, m, c); }
 void game_enemy_sound(int sound, int32_t x, int32_t z) { (void)sound; (void)x; (void)z; }
 void game_player_voice(int sound) { (void)sound; }
 int game_player_damage(int dmg) { (void)dmg; return 0; }
@@ -108,16 +110,17 @@ void game_object_member_set(int n, int m, int v)
     if (m >= 0x0B && m <= 0x0D) obj_pos[n][m - 0x0B] = (int16_t)v;
     if (m == 0x0F) { obj_dir[n] = (int16_t)v; printf("t%d  object %d dir %d\n", tick, n, obj_dir[n]); }
 }
-void game_plc(int w, int i, const uint8_t *ins)
+int game_plc(int w, int i, const uint8_t *ins)
 {
     printf("t%d  plc %02x work %d.%d  %02x %02x %02x\n", tick, ins[0], w, i, ins[1], ins[2], ins[3]);
-    if (w == 3 || w == 2) {
-        enemy_plc(w == 2 ? PARTNER_SLOT : i, ins);
-    } else if (w == 1) {
-        PlcBody b = body();
-        plc_command(&pl.plc, &b, ins);
-        back(&b);
-    }
+    if (w == 3 || w == 2)
+        return enemy_plc(w == 2 ? PARTNER_SLOT : i, ins);
+    if (w != 1)
+        return 0;
+    PlcBody b = body();
+    plc_command(&pl.plc, &b, ins);
+    back(&b);
+    return 1;
 }
 
 int main(int argc, char **argv)
@@ -151,6 +154,11 @@ int main(int argc, char **argv)
     for (tick = 0; tick < ticks; tick++) {
         if (tick == 20)
             script_start_event((int)strtol(argv[2], NULL, 0));
+        if (getenv("FLAG") && tick == atoi(getenv("FLAG_TICK") ? getenv("FLAG_TICK") : "20")) { // e.g. FLAG=5:0
+            int a, b;
+            if (sscanf(getenv("FLAG"), "%d:%x", &a, &b) == 2)
+                flag_set(a, b, 1);
+        }
         if (voice_left) voice_left--;
         script_tick();
         PlcBody b = body();
@@ -158,6 +166,15 @@ int main(int argc, char **argv)
         back(&b);
         EnemyTarget p = { .x = pl.x, .z = pl.z, .can_grab = 0 };
         enemy_tick(&p);
+        if (getenv("SHOOT") && tick > 20 && tick % 15 == 0) { // Leon shoots the nearest enemy
+            int32_t tx, tz;
+            int target = enemy_aim_target(pl.x, 0, pl.z, 0, &tx, &tz);
+            if (target >= 0) {
+                int16_t dir = (int16_t)((int)(atan2f((float)-(tz - pl.z), (float)(tx - pl.x)) * 32768.0f / 6.2831853f) & 32767);
+                static const uint16_t dmg[3] = { 16, 15, 14 };
+                printf("t%d  shot -> %d\n", tick, enemy_hit(pl.x, 0, pl.z, dir, 0, 2, dmg, 1));
+            }
+        }
         if (tick % 50 == 0) {
             printf("t%d  leon %d %d dir %d %s anim %d key %d | threads %d\n", tick, (int)pl.x, (int)pl.z,
                    pl.dir & 32767, pl.set == &rbj ? "room" : "own", pl.anim, pl.key, script_threads_running);
@@ -167,11 +184,13 @@ int main(int argc, char **argv)
                 if (enemy_member_get(i, 0x0B, &x) && enemy_member_get(i, 0x0D, &z) && enemy_member_get(i, 2, &r))
                     printf("        enemy %d at %d %d routine %d flags %04x\n", i, x, z, r, f & 0xFFFF);
             }
+            if (getenv("TRACE")) // state, animation and its frame count
+                enemy_debug_print(tick);
         }
         if (tick > 40 && !script_threads_running)
             break;
     }
-    printf("end at tick %d, flags 5:20 %d 5:21 %d 4:1a %d 4:1b %d\n", tick, flag_get(5, 0x20), flag_get(5, 0x21),
-           flag_get(4, 0x1a), flag_get(4, 0x1b));
+    printf("end at tick %d, flags 5:1e %d 7:00 %d 5:20 %d 5:21 %d 4:1a %d 4:1b %d 6:1c %d 4:07 %d\n", tick, flag_get(5, 0x1e), flag_get(7, 0), flag_get(5, 0x20), flag_get(5, 0x21),
+           flag_get(4, 0x1a), flag_get(4, 0x1b), flag_get(6, 0x1c), flag_get(4, 0x07));
     return 0;
 }

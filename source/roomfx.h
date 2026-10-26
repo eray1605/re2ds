@@ -17,9 +17,12 @@ void roomfx_on(const uint8_t *ins);
 // size = the sce_espr_on parameter's high byte (0 = 1:1)
 void roomfx_spawn(int id, int type, int32_t x, int32_t y, int32_t z, int size, int dir_re2);
 // a sprite thrown from (x, y, z) with a speed per tick, falling until floor_y,
-// where it lies a moment; plays the effect's frames from first (casings)
+// where it lies a moment; plays the effect's frames from first (casings).
+// Its first floor contact calls game_casing_sound(sound).
 void roomfx_throw(int id, int first, int row, int32_t x, int32_t y, int32_t z, int32_t vx, int32_t vy, int32_t vz,
-                  int32_t floor_y, int scale);
+                  int32_t floor_y, int scale, int sound);
+// main.c: a thrown sprite (casing) hits the floor: weapon bank sound
+void game_casing_sound(int sound);
 void roomfx_kill(int id, int type);      // sce_espr_kill
 void roomfx_tick(void);                  // once per game tick
 int roomfx_count(void);                  // sprites alive (one quad each)

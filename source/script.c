@@ -4,6 +4,7 @@
 
 #include "script.h"
 #include "enemy.h"
+#include "plc.h"
 
 #define NUM_THREADS 12
 #define MAX_BLOCKS 16
@@ -39,12 +40,12 @@ enum {
     OP_IF = 6, OP_ELSE = 7, OP_ENDIF = 8, OP_SLEEP = 9, OP_WSLEEP = 11, OP_WSLEEPING = 12,
     OP_FOR = 13, OP_NEXT = 14, OP_WHILE = 15, OP_EWHILE = 16, OP_DO = 17, OP_EDWHILE = 18,
     OP_SWITCH = 19, OP_CASE = 20, OP_DEFAULT = 21, OP_ESWITCH = 22, OP_GOTO = 23, OP_GOSUB = 24,
-    OP_RETURN = 25, OP_BREAK = 26, OP_CK = 33, OP_SET = 34, OP_CMP = 35, OP_SAVE = 36,
+    OP_RETURN = 25, OP_BREAK = 26, OP_WORK_COPY = 29, OP_CK = 33, OP_SET = 34, OP_CMP = 35, OP_SAVE = 36,
     OP_COPY = 37, OP_CALC = 38, OP_CALC2 = 39, OP_CUT_CHG = 41, OP_CUT_OLD = 42,
     OP_MESSAGE_ON = 43, OP_AOT_SET = 44, OP_OBJ_MODEL_SET = 45, OP_FLR_SET = 56, OP_SCE_ESPR_ON = 58, OP_SCE_ESPR_KILL = 76, OP_WORK_SET = 46, OP_SPEED_SET = 47, OP_ADD_SPEED = 48, OP_ADD_ASPEED = 49, OP_POS_SET = 50, OP_DIR_SET = 51,
     OP_MEMBER_SET = 52, OP_MEMBER_SET2 = 53, OP_SE_ON = 54, OP_SCA_ID_SET = 55, OP_DIR_CK = 57, OP_SCE_EM_SET = 68, OP_DOOR_AOT_SET = 59, OP_CUT_AUTO = 60, OP_MEMBER_COPY = 61, OP_MEMBER_CMP = 62,
     OP_AOT_RESET = 70, OP_AOT_ON = 71, OP_CUT_REPLACE = 75, OP_ITEM_AOT_SET = 78,
-    OP_SCE_TRG_CK = 80, OP_SCE_BGM_CONTROL = 81, OP_KEEP_ITEM_CK = 94, OP_AOT_SET_4P = 103, OP_DOOR_AOT_SET_4P = 104,
+    OP_SCE_TRG_CK = 80, OP_SCE_BGM_CONTROL = 81, OP_KEEP_ITEM_CK = 94, OP_SCE_ITEM_LOST = 98, OP_SCE_ITEM_GET = 118, OP_AOT_SET_4P = 103, OP_DOOR_AOT_SET_4P = 104,
     OP_ITEM_AOT_SET_4P = 105, OP_PLC_MOTION = 63, OP_PLC_DEST = 64, OP_PLC_RET = 66, OP_PLC_ROT = 88,
     OP_PLC_CNT = 91, OP_PLC_STOP = 102, OP_XA_ON = 89, OP_MOVIE_ON = 111, OP_SCE_BGMTBL_SET = 87,
 };
@@ -79,6 +80,7 @@ typedef struct {
 
 Aot aots[NUM_AOTS];
 int script_threads_running;
+int script_stage;
 int script_unknown_ops;
 int script_unknown_at = -1;   // diagnostics: op << 16 | pc of the last one
 
@@ -150,6 +152,18 @@ int inventory_add(int item, int amount)
             return 1;
         }
     return 0; // full
+}
+
+void inventory_remove(int item)
+{
+    for (int i = 0; i < INV_SLOTS; i++)
+        if (inventory[i].item == item) {
+            inventory[i].item = 0;
+            inventory[i].count = 0;
+            if (inventory_equipped == i)
+                inventory_equipped = -1;
+            return;
+        }
 }
 
 // ------------------------------------------------------------ save games
@@ -586,6 +600,21 @@ static void run_thread(Thread *t)
         case OP_COPY:
             *var(ins[1]) = *var(ins[2]);
             break;
+        case OP_WORK_COPY: { // scd_op_1d: variable, offset, size (0 = byte, else u16)
+            // Scenes write a variable into the parameters of the instruction
+            // that follows: positions in a loop (room 200 lowers Leon with
+            // pos_set), sound positions, the scroll value. The room data is in
+            // RAM and loaded again on the next visit, as on the PS1.
+            int at = next + ins[2], wide = ins[3] != 0;
+            if (!t->code_size || at + wide < t->code_size) {
+                uint8_t *dst = (uint8_t *)t->code + at;
+                int16_t v = *var(ins[1]);
+                dst[0] = (uint8_t)v;
+                if (wide)
+                    dst[1] = (uint8_t)(v >> 8);
+            }
+            break;
+        }
         case OP_CALC:
             *var(ins[3]) = calc(*var(ins[3]), ins[2], rd16(ins + 4));
             break;
@@ -594,6 +623,12 @@ static void run_thread(Thread *t)
             break;
         case OP_KEEP_ITEM_CK:
             cond = inventory_has(ins[1]);
+            break;
+        case OP_SCE_ITEM_GET: // item, count (scd_op_76: someone hands Leon an item)
+            game_item_get(ins[1], ins[2]);
+            break;
+        case OP_SCE_ITEM_LOST: // item (scd_op_62: placed, used up)
+            inventory_remove(ins[1]);
             break;
         case OP_MEMBER_CMP: { // pad, member, compare op, s16 value
             int value;
@@ -624,8 +659,13 @@ static void run_thread(Thread *t)
                 cam_map[ins[1]] = ins[2];
             break;
         case OP_MESSAGE_ON: {
+            // The English disc leaves the spoken lines (Marvin, Ada, ...) empty
+            // or only page codes: those show nothing.
             const char *text = cur_room ? room_message(cur_room, ins[2]) : NULL;
-            if (text && *text) {
+            int blank = 1;
+            for (const char *c = text; c && *c && blank; c++)
+                blank = *c == '\f' || *c == '\n' || *c == ' ';
+            if (text && !blank) {
                 game_show_message(text);
                 t->wait_message = 1;
                 t->pc = next;
@@ -690,19 +730,40 @@ static void run_thread(Thread *t)
             for (int k = 0; k < 6; k++)
                 t->speed[k] += t->speed[6 + k];
             break;
+        case OP_PLC_DEST: // pad, mode, arrival bit (flag array 5), x, z
+            // The scenes wait for the bit after each destination (room 202:
+            // do evt_next while ck 5:0x21 0); one arrival must not answer
+            // for the next walk, so it is cleared here for the moving modes.
+            // Nobody there to walk: arrived at once.
+            if (plc_moves(ins[2]))
+                flag_set(5, ins[3], 0);
+            if (!game_plc(t->work_type, t->work_index, ins))
+                flag_set(5, ins[3], 1);
+            break;
         case OP_PLC_MOTION:
-        case OP_PLC_DEST:
         case OP_PLC_RET:
         case OP_PLC_ROT:
         case OP_PLC_CNT:
         case OP_PLC_STOP:
             game_plc(t->work_type, t->work_index, ins);
             break;
-        case OP_SCE_EM_SET: // pad, slot, type, variant, status, floor, sound, model,
-                            // set flag, x, y, z, dir, motion, ctr flag
-            game_spawn_enemy(ins[2], ins[3], ru16(ins + 4), ins[7], rd16(ins + 10), rd16(ins + 12),
+        case OP_SCE_EM_SET: { // pad, slot, type, variant, status, floor, sound, model,
+                              // set flag, x, y, z, dir, motion, ctr flag
+            // The set flag: an enemy killed once stays dead. scd_op_44 skips the
+            // enemy when its bit is set: array 6 in stages 1-3, array 7 later (or
+            // with system flag 1:6). The enemy sets it when it dies (enemy.c).
+            int flags = ru16(ins + 4);
+            if (ins[9] != 0xFF) {
+                int array = (script_stage > 2 || flag_get(1, 6)) ? 7 : 6;
+                if (flag_get(array, ins[9]))
+                    break;
+                flags |= (array << 24) | (ins[9] << 16);
+            }
+            game_spawn_enemy(ins[2], ins[3], flags, ins[7], rd16(ins + 10), rd16(ins + 12),
                              rd16(ins + 14), rd16(ins + 16));
+            game_enemy_motion(ins[2], ru16(ins + 18), ru16(ins + 20));
             break;
+        }
         case OP_SE_ON: // bank, s16 sound (low byte = number), position source, offset
             game_play_sound(ins[1], rd16(ins + 2) & 0xFF);
             break;

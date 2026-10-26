@@ -112,8 +112,9 @@ Magnum, rocket launcher and GL acid stay the same.
 
 ### Shots to kill (standard zombie, derived)
 
-Zombie HP 50–128, mostly about 80 (see [enemy-zombie.md](enemy-zombie.md)); a hit kills as
-soon as the HP drop **below 0**:
+Zombie HP on NORMAL 50–128 (+15 in rooms with fewer than 4 objects), mostly about 80; on
+EASY 28–100, mostly 54 (see [enemy-zombie.md](enemy-zombie.md)): about 6 handgun hits on
+NORMAL, 3-4 on EASY. A hit kills as soon as the HP drop **below 0**:
 
 | Weapon                | 50 HP | 80 HP | 128 HP |
 |-----------------------|------:|------:|-------:|

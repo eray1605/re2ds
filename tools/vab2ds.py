@@ -6,7 +6,8 @@ Every tone becomes 8-bit PCM (header field 2 = 1; half the size of 16-bit,
 which made the banks 59 MB of the ROM) at the rate the PS1 plays it for its
 key range:
 the SPU plays a sample at 44100 Hz when the key-on note equals the tone's
-centre note, so rate = 44100 * 2^((note - centre - fine/128) / 12). The door
+centre note, so rate = 44100 * 2^((note - centre + fine/128) / 12) (the fine
+tune raises the pitch, libsnd FUN_8007e3e4). The door
 program keys on note 60 (door opens) and 61 (door closes); each tone of the
 door banks covers exactly one note (min == max), which gives the note.
 
@@ -130,7 +131,7 @@ def write_bank(tone, ps, vags, picks, dst):
         if sound_id is not None:
             t["lo"] = t["hi"] = sound_id
         note = t.get("note", t["lo"] if t["lo"] == t["hi"] else t["centre"])
-        rate = int(round(44100 * 2 ** ((note - t["centre"] - t["fine"] / 128) / 12)))
+        rate = int(round(44100 * 2 ** ((note - t["centre"] + t["fine"] / 128) / 12)))
         samples = decode_vag(vags.get(t["vag"], b""))
         samples += [0] * (-len(samples) % 4)  # whole words
         entries.append((t["lo"], t["hi"], min(rate, 65535), len(pcm), len(samples)))
