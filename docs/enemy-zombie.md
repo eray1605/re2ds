@@ -75,13 +75,20 @@ Routine 8 (room script modes, observed): mode 0 stand, 1 walk to the destination
 | Table                             | Values                                                          |
 |-----------------------------------|-----------------------------------------------------------------|
 | normal (`0x8010c494`)             | 80, 94, 128, 75, 60, 95, 58, 75, 50, 83, 79, 66, 80, 65, 82, 65 |
-| mode flag `0x20` (`0x8010c4b4`)   | 54, 28, 54, 54, 70, 40, 54, 100, 40, 54, 70, 54, 54, 70, 54, 40 |
+| EASY (`0x800c77b4 & 0x20`, flag 0:`0x1a`, `0x8010c4b4`) | 54, 28, 54, 54, 70, 40, 54, 100, 40, 54, 70, 54, 54, 70, 54, 40 |
 
-- If `0x800c77ef < 4` there are **+15 HP** (assumed: early parts of the game).
+- On NORMAL, if `0x800c77ef < 4` there are **+15 HP**. `0x800c77ef` counts the objects the
+  room has activated (`FUN_8001a8b0` adds 1): a zombie among few gets 15 more. EASY skips it.
 - Zombie type `0x11`: fixed **250 HP**.
 - **Crawler** (`obj+0x10e & 1`): HP halved, smaller collision box (200 instead of 500), and
   status bit `0x2000` (a lower priority target for the auto-aim).
-- A third of the zombies randomly get flag `0x8000` in `obj+0x21a` (assumed: more aggressive).
+- A third of the zombies (`(rand >> (rand & 3)) % 3 == 0`), and type `0x11` always, get
+  flag `0x8000` in `obj+0x21a` and a stagger counter of 32–47 instead of 16–31: **fast
+  zombies** (observed). In chase (`0x801019d0`) and lunge (`0x80102218`) they skip a keyframe
+  whenever the key % 3 == 2 (`FUN_80029e00`, also with status bit `0x80` of `obj+0x10e`);
+  the chase adds a turn of 8 there. Root motion is the difference to the last frame read
+  (`FUN_8001581c`, `obj+0x20c`), so the skipped key's distance is kept: they walk a third
+  faster.
 - Gait (`obj+0x218`): animation **0 or 2** of set 0 (table `0x80100004` =
   `0,2,0,2,0,2,2,0`, index `(rand >> (rand & 3)) & 7`). The faster variants 1/3 and the
   gaits 4–7 are not used here.
@@ -161,6 +168,8 @@ time** can bite.
 - **Moaning:** every 30–45 frames a 1/32 chance of sound 10 or 11, then a 150 frame pause.
 - Every 100–131 frames: 25 % chance of state 2 if `d < 5000`.
 - State 2 at once if `d < 2000`, the player is in the ±45° cone and nobody is grabbing.
+- The grab test (`d < 1200`, two ±22.5° arm cones from `FUN_800150f8`, one grabber at a
+  time) is the same in the lunge (`0x80101f0c`).
 - State 2 at once if the player runs (`0x04`), `d < 2500` and in the ±116° cone.
 - With flag `0x1000` in `obj+0x21a` the zombie loses 1 HP every 8 frames and staggers
   (assumed: burning or acid). It dies below 0 HP.
@@ -244,7 +253,6 @@ Sequence over the sub state `obj+6`:
 
 - States 2, 4, 6, 10–15 and the crawler tables in detail.
 - Hits, weapon damage, death and head shots: see [damage.md](damage.md).
-- Meaning of the mode flag `0x20` in `0x800c77b4` and of `0x800c77ef`.
 
 ---
 

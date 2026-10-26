@@ -2,6 +2,7 @@
 #include <nds.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "assets.h"
 #include "sound.h"
@@ -62,7 +63,8 @@ int sound_frames(const void *bank, int note)
 // ---------------------------------------------------------------- voices
 #define VOICE_MAGIC 0x31435652 // "RVC1": u32 rate, u32 samples, IMA-ADPCM
 static uint32_t *voice_data;
-static int voice_channel = -1, voice_left;
+static int voice_channel = -1, voice_left, voice_frames;
+static char voice_name[12];     // the clip's file name: its subtitle key
 
 void voice_stop(void)
 {
@@ -70,6 +72,7 @@ void voice_stop(void)
         soundKill(voice_channel);
     voice_channel = -1;
     voice_left = 0;
+    voice_name[0] = 0;
     asset_free(voice_data);
     voice_data = NULL;
 }
@@ -94,12 +97,20 @@ void voice_play(int stage, int clip)
     voice_channel = soundPlaySample(voice_data + 3, SoundFormat_ADPCM, (size - 12) & ~3, rate, 127, 64,
                                     false, 0);
     voice_left = (int)((uint64_t)samples * 60 / rate) + 2;
+    voice_frames = 0;
+    strcpy(voice_name, strrchr(path, '/') + 1);
+    *strrchr(voice_name, '.') = 0;
 }
+
+const char *voice_key(void) { return voice_left > 0 ? voice_name : NULL; }
+uint32_t voice_ms(void) { return (uint32_t)voice_frames * 1000 / 60; }
 
 int voice_playing(void) { return voice_left > 0; }
 
 void voice_frame(void)
 {
+    if (voice_left > 0)
+        voice_frames++;
     if (voice_left > 0 && --voice_left == 0)
         voice_stop();
 }

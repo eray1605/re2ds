@@ -9,10 +9,12 @@
 
 #include "assets.h"
 
-// sce_em_set slots 0..7, plus the partner (Ada, Sherry: slot 0xff in the
+// sce_em_set slots 0..31 like the PS1's 33 object slots (0x800c7a14; room
+// 40B sets 24 cockroaches), plus the partner (Ada, Sherry: slot 0xff in the
 // scripts, work_set 2), moved by the room scripts like the people
-#define MAX_ENEMIES 9
-#define PARTNER_SLOT 8
+#define MAX_ENEMIES 33
+#define PARTNER_SLOT 32
+#define RBJ_SLOTS 16    // room animation sets exist for slots 0..15 (tools/rbj2ds.py)
 
 void enemy_room_reset(void);   // frees all enemy models (room change)
 // the room's path zones (tools/blk2ds.py, kept by the caller), NULL if none
@@ -20,7 +22,7 @@ void enemy_set_zones(const void *data);
 // the room's own animations for the enemy in slot (RBJ, tools/rbj2ds.py), NULL if none
 void enemy_set_room_set(int slot, const Model *set);
 // plc_* script commands for the enemy in slot (plc.h)
-void enemy_plc(int slot, const uint8_t *ins);
+int enemy_plc(int slot, const uint8_t *ins); // 0: no enemy in slot
 // sce_em_set: slot, type (0x10.. ), flags (bytes 4..5: variant | status << 8),
 // position, facing (RE2 units)
 // voice: kind of voice (byte 7), see enemy_sound_set
@@ -28,6 +30,9 @@ void enemy_spawn(int slot, int type, int flags, int voice, int32_t x, int32_t y,
 // after the room's spawns: index of its enemy sound set (sound/enemNN.bin)
 // from the voice kind pairs of sound/enem_pairs.bin, -1 if none
 int enemy_sound_set(const uint8_t *pairs);
+// sce_em_set's motion and control word: what the object starts with when the
+// room starts (enemy.c room_start)
+void enemy_set_motion(int slot, int motion, int ctr);
 
 #define NOISE_WALK 0x02
 #define NOISE_RUN 0x04

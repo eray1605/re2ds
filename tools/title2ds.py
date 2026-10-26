@@ -10,7 +10,9 @@ The DS screen (256 x 192): the background scaled down, the logo scaled to the
 screen width at the top, the menu lines 1:1 (white, the selected one red) and
 the copyright at the bottom. Written in the background format (formats.h,
 BgHeader + LZ77, tools/bg2ds.py): title/press.bin, title/new.bin (NEW GAME
-selected), title/load.bin (LOAD GAME selected).
+selected), title/load.bin (LOAD GAME selected), title/normal.bin and
+title/easy.bin (the difficulty after NEW GAME: NORMAL   EASY at y 146 of
+TMOJI, the chosen word red).
 
 Usage: python3 -I title2ds.py TIT_BG.TIM TMOJI.TIM out_dir
 """
@@ -26,11 +28,12 @@ from bg2ds import BG_MAGIC, lz77, quantise  # noqa: E402
 W, H = 256, 192
 # TMOJI: (y0, y1, x0, x1) of each piece
 LINES = {"press": (3, 13, 44, 211), "new": (19, 29, 79, 175), "load": (35, 45, 76, 175),
-         "copyright": (69, 77, 16, 240)}
+         "copyright": (69, 77, 16, 240),
+         "normal": (146, 156, 48, 120), "easy": (146, 156, 144, 190)}  # one line: NORMAL   EASY
 LOGO = [(2, 78), (83, 158), (162, 238)]   # strips at x 256.., placed side by side
 LOGO_W = (128, 128, 31)
 LOGO_TOP = 18
-MENU_Y = {"press": 128, "new": 120, "load": 136}
+MENU_Y = {"press": 128, "new": 120, "load": 136, "normal": 128, "easy": 128}
 COPYRIGHT_Y = 178
 
 
@@ -77,11 +80,14 @@ def compose(bg, tmoji, selected):
                         put(x, LOGO_TOP + y, 256 + lx, y0 + ly, 1)
                     break
                 lx -= LOGO_W[k]
-    lines = ["press"] if selected == "press" else ["new", "load"]
+    lines = {"press": ["press"], "normal": ["normal", "easy"], "easy": ["normal", "easy"]}.get(
+        selected, ["new", "load"])
     for name in lines + ["copyright"]:
         y0, y1, x0, x1 = LINES[name]
         top = COPYRIGHT_Y if name == "copyright" else MENU_Y[name]
         left = (W - (x1 - x0 + 1)) // 2
+        if name in ("normal", "easy"): # both words where they are on the line, centred together
+            left = (W - (LINES["easy"][3] - LINES["normal"][2] + 1)) // 2 + x0 - LINES["normal"][2]
         palette = 1 if name == selected else 0
         for y in range(y0, y1 + 1):
             for x in range(x0, x1 + 1):
@@ -94,14 +100,14 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     bg, tmoji = read_16bpp(bg_path), read_tmoji(tmoji_path)
     with tempfile.TemporaryDirectory() as tmp:
-        for name in ("press", "new", "load"):
+        for name in ("press", "new", "load", "normal", "easy"):
             ppm = os.path.join(tmp, name + ".ppm")
             with open(ppm, "wb") as f:
                 f.write(b"P6\n%d %d\n255\n" % (W, H) + compose(bg, tmoji, name))
             palette, indices = quantise(ppm)
             with open(os.path.join(out_dir, name + ".bin"), "wb") as f:
                 f.write(struct.pack("<I256H", BG_MAGIC, *palette) + lz77(indices))
-    print(f"{out_dir}: press.bin, new.bin, load.bin")
+    print(f"{out_dir}: press.bin, new.bin, load.bin, normal.bin, easy.bin")
 
 
 if __name__ == "__main__":

@@ -40,6 +40,13 @@ void menu_lower_toggle(void);   // map <-> status screen during play
 // ammunition for the weapon in hand in the inventory; load it (the reload)
 int inventory_spare_ammo(void);
 void inventory_reload(void);
+// subtitles (subs.h) in a box at the bottom of the lower screen; call once per
+// DS frame after the screen was drawn, NULL when there is no line
+void menu_subtitle(const char *text);
+// movies: the lower screen black, for the subtitles alone (0: back to normal)
+void menu_subtitle_blank(int on);
+// 1 once after the lower screen was drawn over: the map has to be drawn again
+int menu_lower_dirty(void);
 // debug mode: the lower screen shows the text console instead
 void menu_debug(int on);
 int menu_debug_on(void);

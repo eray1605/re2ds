@@ -100,10 +100,10 @@ void plc_command(Plc *p, PlcBody *b, const uint8_t *ins)
         p->active = 1;
         int t = table(b);
         switch (mode) {
-        case PLC_WALK: case 0x12: p->rot = walk_rot[t]; break;
+        case PLC_WALK: case PLC_WALK_CLIMB: p->rot = walk_rot[t]; break;
         case PLC_RUN: p->rot = run_rot[t]; break;
         case PLC_BACK: p->rot = walk_rot[t]; break;
-        case 8: p->rot = walk_rot[t]; break;
+        case PLC_BACK_STRAIGHT: p->rot = walk_rot[t]; break;
         case PLC_FACE: p->rot = face_rot[t]; break;
         }
         p->flags = 0;
@@ -201,6 +201,12 @@ void plc_tick(Plc *p, PlcBody *b)
     case PLC_ANIM_OWN:
         play(p, b, b->own_set, b->own_first + p->anim);
         break;
+    case PLC_ANIM_SET2:
+        play(p, b, b->own_set, b->own_first2 + p->anim);
+        break;
+    case PLC_ANIM_SET3:
+        play(p, b, b->own_set, b->own_first3 + p->anim);
+        break;
     case PLC_STAND: // FUN_80061938
         if (p->step == 0) {
             p->step = 1;
@@ -209,14 +215,17 @@ void plc_tick(Plc *p, PlcBody *b)
         loop_anim(b);
         break;
     case PLC_WALK:
+    case PLC_WALK_CLIMB:
     case PLC_RUN:
     case PLC_BACK:
-        if (p->step == 0) { // FUN_80061668 / 0x800619c0
-            p->speed = p->mode == PLC_BACK ? -back_speed[t] : walk_speed[t];
+    case PLC_BACK_STRAIGHT:
+        if (p->step == 0) { // FUN_80061668 / 0x800619c0 / 0x80061a9c / 0x80061d08
+            int back = p->mode == PLC_BACK || p->mode == PLC_BACK_STRAIGHT;
+            p->speed = back ? -back_speed[t] : walk_speed[t];
             if (p->mode == PLC_RUN)
                 p->speed = p->speed * 3 / 2;
             start_anim(b, b->own_set, b->walk_anim);
-            p->step = p->mode == PLC_BACK ? 2 : 1;
+            p->step = back ? 2 : 1;
         }
         if (p->step == 1) { // turn on the spot first (FUN_800622fc)
             if (!facing(b, p->dest_x, p->dest_z, FACING_SLACK)) {
