@@ -762,6 +762,7 @@ static void run_thread(Thread *t)
             game_spawn_enemy(ins[2], ins[3], flags, ins[7], rd16(ins + 10), rd16(ins + 12),
                              rd16(ins + 14), rd16(ins + 16));
             game_enemy_motion(ins[2], ru16(ins + 18), ru16(ins + 20));
+            game_enemy_skin(ins[2], ins[8]);
             break;
         }
         case OP_SE_ON: // bank, s16 sound (low byte = number), position source, offset

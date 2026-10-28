@@ -56,7 +56,7 @@ routine:
 | 4–6   | …            | …            | still open                                   |
 | 5     | `0x801030b4` | `0x801030bc` | lying on the ground (set after a fall)       |
 | 7     | `0x801036ac` | `0x801036b4` | spawned lying, gets up                       |
-| 8     | `0x80103aa8` | `0x80103ab0` | eats the dead player (sub state 6)           |
+| 8     | `0x80103aa8` | `0x80103ab0` | eats (observed): sub 1 while hold flag `0x4000`, then sub 3 plays animation `0x15` once and goes to state 1 (chases Leon); sub 6/7 eats the dead player, turning to him |
 | 9     | `0x80103d7c` | `0x80103d84` | knocked over by another zombie               |
 | 10    | `0x801040b0` | `0x801040b8` | staggering / recoil                          |
 | 12    | `0x80104548` | `0x80104680` | turns round to a noise behind it             |
@@ -80,6 +80,13 @@ Routine 8 (room script modes, observed): mode 0 stand, 1 walk to the destination
 - On NORMAL, if `0x800c77ef < 4` there are **+15 HP**. `0x800c77ef` counts the objects the
   room has activated (`FUN_8001a8b0` adds 1): a zombie among few gets 15 more. EASY skips it.
 - Zombie type `0x11`: fixed **250 HP**.
+- **Clothes** (observed): the textures of types `0x12` and `0x1f` hold four 128-pixel pages
+  (0 heads and hands, 1-3 whole bodies). `FUN_800169f4` retargets every face of a mesh to a
+  page and its palette (CLUT row `0x1e0` + page). Type `0x1f`: all bones but 8, 11, 14 take
+  page `obj+0x1cf & 0x3f` (byte 8 of `sce_em_set`), or a random 1-3 when that is 0
+  (`(rand + (rand << (rand & 3))) % 3 + 1`): 1 a light shirt, 2 a jacket, 3 a police
+  uniform. Type `0x12`: half get the second head (bone 8 → page 2), half the third body
+  (page 3, hands 11 / 14 on page 2). DS: `enemy_set_skin`, `Enemy.bone_page`.
 - **Crawler** (`obj+0x10e & 1`): HP halved, smaller collision box (200 instead of 500), and
   status bit `0x2000` (a lower priority target for the auto-aim).
 - A third of the zombies (`(rand >> (rand & 3)) % 3 == 0`), and type `0x11` always, get

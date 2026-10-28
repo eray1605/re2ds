@@ -6,7 +6,7 @@ slot, a sector offset into PL0/PLD/CDEMD0.EMS and a byte size. Slot 0 code is
 linked at 0x80100000, slot 1 at 0x8010D000.
 
 Usage:
-  python3 -I overlay_symbols.py <SLES_xxx.xx> <CDEMD0.EMS> <type_hex> <slot> <prefix>
+  python3 -I overlay_symbols.py <SLES_xxx.xx> <CDEMD0.EMS> <type_hex: 10 for every zombie> <slot> <prefix>
 Prints "--overlay" argument on stderr and symbol lines on stdout.
 """
 import struct

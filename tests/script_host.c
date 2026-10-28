@@ -39,6 +39,7 @@ void game_object_member_set(int n, int m, int v) { (void)n; (void)m; (void)v; }
 int game_plc(int w, int i, const uint8_t *ins) { (void)w; (void)i; (void)ins; return 1; }
 void game_spawn_enemy(int s, int t, int v, int voice, int x, int y, int z, int d) { (void)voice; if (getenv("SHOW_SPAWNS")) printf("  spawn slot %d type %02x variant %d at %d %d %d dir %d\n", s, t, v, x, y, z, d); }
 void game_enemy_motion(int s, int m, int c) { (void)s; (void)m; (void)c; }
+void game_enemy_skin(int s, int m) { (void)s; (void)m; }
 
 const char *room_message(const Room *room, int n)
 {

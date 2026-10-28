@@ -33,6 +33,7 @@ int enemy_sound_set(const uint8_t *pairs);
 // sce_em_set's motion and control word: what the object starts with when the
 // room starts (enemy.c room_start)
 void enemy_set_motion(int slot, int motion, int ctr);
+void enemy_set_skin(int slot, int model); // sce_em_set's model byte: zombie clothes
 
 #define NOISE_WALK 0x02
 #define NOISE_RUN 0x04
