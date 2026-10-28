@@ -76,6 +76,10 @@ for f in "$DISC"/COMMON/SOUND/MAIN*.BGM; do
     n=$(basename "$f" .BGM | tr 'A-Z' 'a-z')
     python3 -I tools/bgm2ds.py "$f" "build/ds/music/$n.bin" > /dev/null
 done
+for f in "$DISC"/COMMON/SOUND/SUB_*.BGM; do
+    n=$(basename "$f" .BGM | tr 'A-Z' 'a-z')
+    python3 -I tools/bgm2ds.py --sub "$f" "build/ds/music/$n.bin" > /dev/null
+done
 python3 -I tools/bgm2ds.py --table "$DISC/SLES_009.72" "$DISC/COMMON/DATA/INIT_TBL.DAT" \
     build/ds/music/bgm_table.bin > /dev/null
 

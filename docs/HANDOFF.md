@@ -187,7 +187,8 @@ The project had many sessions; the earlier ones are only summarised. All of it i
   room music table that scripts change (`sce_bgmtbl_set`, op 0x57), volume/pan semantics from
   `sce_bgm_control`, saved in the save file. Later: start modes of the table (bits 6-7), fade
   out, live cc 7/10, 12 channels, and the fine tune sign (it raises the pitch; it was
-  lowering it, which put the police station music out of tune). SUB_xx is not played yet.
+  lowering it, which put the police station music out of tune). SUB_xx: both sequences,
+  programs a sub lacks from the main bank (the fight at Kendo's: SUB_00 with MAIN01's tones).
   See [engine-notes.md](engine-notes.md) section 11.
 - **Sound effects** (`sound.c`, banks keyed by note), enemy banks per voice kind pair
   (`enemse2ds.py`), voices (`xa2ds.py`, IMA-ADPCM), the movie player (`movie.c`, RMV1/RMV2,

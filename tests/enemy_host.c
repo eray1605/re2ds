@@ -41,7 +41,7 @@ int game_blocked(int32_t fx, int32_t fz, int32_t x, int32_t z, int32_t y)
         const RoomBox *b = &host_room.boxes[i];
         if (!(b->floors & 1) || b->shape == 11 || b->shape == 12 || !(b->flag & 0x0400)) continue;
         int32_t d = pen(b, x, z);
-        if (d > 0 && d >= pen(b, fx, fz)) return 1;
+        if (d > 0 && d > pen(b, fx, fz)) return 1;
     }
     return 0;
 }
@@ -67,6 +67,7 @@ void game_spawn_enemy(int s, int t, int v, int voice, int x, int y, int z, int d
     enemy_spawn(s, t, v, voice, x, y, z, d);
 }
 void game_enemy_motion(int s, int m, int c) { enemy_set_motion(s, m, c); }
+void game_enemy_skin(int s, int m) { enemy_set_skin(s, m); }
 // Leon for the grab test: stands still at PX, 0
 static int host_hp = 200, host_held, host_dead;
 static int32_t host_px, host_pz;

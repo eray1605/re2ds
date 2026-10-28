@@ -70,6 +70,7 @@ void game_spawn_enemy(int s, int t, int v, int voice, int x, int y, int z, int d
     enemy_spawn(s, t, v, voice, x, y, z, d);
 }
 void game_enemy_motion(int s, int m, int c) { enemy_set_motion(s, m, c); }
+void game_enemy_skin(int s, int m) { enemy_set_skin(s, m); }
 void game_enemy_sound(int sound, int32_t x, int32_t z) { (void)sound; (void)x; (void)z; }
 void game_player_voice(int sound) { (void)sound; }
 int game_player_damage(int dmg) { (void)dmg; return 0; }
