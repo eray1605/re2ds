@@ -84,6 +84,7 @@ void game_movie(int n);                     // movie_on: plays movie table entry
 // voice: kind of voice (byte 7), picks the enemy sound set of the room
 void game_spawn_enemy(int slot, int type, int flags, int voice, int x, int y, int z, int dir_re2);
 void game_enemy_motion(int slot, int motion, int ctr); // sce_em_set's motion, control word
+void game_enemy_skin(int slot, int model);            // sce_em_set's model byte (obj+0x1cf)
 // enemy object members for the room scripts (member_set / member_copy /
 // member_cmp after work_set 3): 0 if the member is not modelled
 int game_enemy_member(int slot, int member, int *value);

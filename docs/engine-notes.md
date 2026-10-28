@@ -206,8 +206,13 @@ Per frame the main loop (`0x80025058`) runs the player routine (`0x80039114`), t
   collision header's centre (`FUN_80048940`), the circle overlaps it, `id & 0x8000` (player;
   `0x400` enemies), not `id & 0x100`, and its floor bits contain `1 << obj+0x106`.
 - Each counted box pushes the player out by its shape (`id & 0xF`, table `0x8009f448`):
-  0/9/10/12 as a box (`0x800490a8`), 1–5 triangles, 6 circle, 7/8 ellipses, 11 slope
-  (`0x8004ba54`), 13 `0x8004bea0`.
+  0/9/10/12 as a box (`0x800490a8`); 1–4 (`0x80049378`, `0x800497f0`, `0x80049cb0`,
+  `0x8004a15c`) the right triangle in the box's corner (x1 z1), (x0 z1), (x1 z0), (x0 z0)
+  with the diagonal as hypotenuse; 5 (`0x8004a60c`) the diamond between the edges'
+  midpoints; 6 (`0x8004b3f8`) a circle of diameter w; 7 / 8 (`0x8004b598` / `0x8004b7ec`) a
+  stadium: a box along x / z with round ends of diameter d / w (between them the box push);
+  11 slope (`0x8004ba54`), 13 `0x8004bea0`. Counts over all rooms: 1–5: 142 boxes, 6: 144,
+  7/8: 502.
 - **Slope (11)**: height `FUN_8004c060`, 0..1800 over the box from the bottom edge
   ((type >> 4) & 3: 0 x min, 1 x max, 2 z min, 3 z max), y = that − ((type >> 6) & 31) · 1800:
   the field is the top floor, a slope rises one floor. Floor `obj+0x106` = −y / 1800
@@ -229,6 +234,18 @@ collision there counts only boxes on both floors his height at the next step lie
 wall of one floor reaching over the steps is not (room 103: a floor 2 wall over the top
 steps stopped him going up, not going down).
 
+The DS measures these shapes (`penetration`: triangles and the diamond as polygons, the
+stadiums by the distance to their axis); it used to take 1-5 as whole boxes (invisible walls
+in their empty halves, e.g. room 103's walkway) and 7 / 8 as ellipses (corners cut).
+The DS blocks a step that leads into a box deeper than the circle already was (the PS1
+pushes out): whoever stands in a box may walk out and along it (room 101: the script puts a
+zombie into the shop window, box 11, and makes the window solid again; with "not deeper or
+equal" it was stuck there). Lines of sight (shots, enemies spotting Leon) ignore a box one end
+stands in. Enemies keep off each other (`crowded`) but not off people (Kendo's body wedged
+that zombie in). An enemy is hidden only when a tall solid wall stands both between the
+camera and it and between Leon and it (`camera_occluded`; many cameras look through outer
+walls), and never behind a box the room script switches (`sca_id_set`: windows, gates).
+
 ## 11. Music (BGM)
 
 Three sequence slots: main (`0x800cf110`, 8 bytes: state, start mode, seq id, ..., volume)
@@ -242,8 +259,15 @@ and the two parts of a sub piece (`0x800cf118`, `0x800cf120`).
   start (gun shop 101: `0x41`, room 204: `0x49`). The same piece goes on across rooms; entered
   with a mode other than 0 it fades out (90 frames). Leaving for another piece fades
   everything out over 90 frames (`FUN_800561a8` → `FUN_80056c20`).
-- `SUB_xx.BGM` holds two sequences sharing one VAB; 47 of the 141 table entries name one (ambience and
-  stingers: 104, 106, 108, 204, 206, 213, ...). **Not played by the DS engine yet.**
+- `SUB_xx.BGM` holds two sequences (the first at offset 0) and one VAB; the last 16 bytes give
+  VB, VH, the second sequence, 0 (`FUN_80056828`). 47 of the 141 table entries name one
+  (ambience and stingers: 104, 106, 108, 204, 206, 213, ...). The file index tables are
+  `0x800a01b8` (MAIN) and `0x800a0238` (SUB), piece n = `MAINnn` / `SUB_nn` (checked by the
+  sectors of `0x8009146c`; its size field belongs to the next file).
+- Some sub sequences play programs only the main piece's VAB has: `SUB_00` (gun shop 101,
+  the fight after the zombies break in) plays programs 5-10, which `MAIN01` holds besides
+  its own 0-3; `SUB_00`'s VAB has only a 112-byte program 0. Room 101's script stops the main
+  (`sce_bgm_control 0, 2`) and starts sub sequence 1 (`1, 1`) when the zombies come in.
 - `sce_bgm_control` (`FUN_8005702c`): bits 28-31 slot (0 main, 1/2 sub), operation 1 start,
   2 stop, 3 resume, 4 pause, 5 fade out (`FUN_800755b8(seq, 0x7f, 0x5a)`, 90 frames); type
   0 = VAB header volume / pan (+0x18 / +0x19), n = program n − 1 (program attribute +0x01 /
@@ -256,5 +280,17 @@ and the two parts of a sub piece (`0x800cf118`, `0x800cf120`).
 - libsnd applies controller 7 / 10 changes to the notes already sounding; piece 07 swells its
   chords with 246 of them. The police station pieces hold up to 14 notes at once.
 
-**DS port** (`source/music.c`): one main sequence, start modes, fade, live volume and pan,
-12 channels for the music, the oldest held note gives way.
+**DS port** (`source/music.c`): three sequences (main, sub 1, sub 2) on two banks (MAIN,
+SUB), start modes, fade, live volume and pan, 12 shared channels, the oldest held note gives
+way. A stop keeps the bank (a start replays from the beginning). A sub sequence takes a
+program its own bank lacks from the main bank. `tools/bgm2ds.py --sub` writes `RMU2` files.
+The sequencer steps at 60 Hz by a tick task (`music_frame` catches up on up to 6 missed
+frames): driven by the main loop it slowed down whenever a pass took two frames and stalled
+with held notes during loads. `tests/music_host.c` plays a room's music on the host and
+counts voices, steals and sound messages.
+Voices follow the SPU envelope of their VAB tone (ADSR1/2, written by `bgm2ds.py`): attack,
+exponential decay to the sustain level, sustain rising or falling while held (607 tones of the
+music fade out on their own: bells, plucks - without it SUB_01's bell in the city rang on like
+a siren), release after the note off (up to ~6 s). Step every 2^max(0, shift − 11) samples of
+step << max(0, 11 − shift) (psx-spx), summed over 735 samples a frame; below 1/128 a fading
+voice ends.

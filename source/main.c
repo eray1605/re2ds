@@ -218,7 +218,6 @@ static int floor_sound(void);
 static void check_camera_switch(void);
 static void move_forward(int32_t dist);
 static void update_height(void);
-static void update_occlusion(void);
 
 // ---------------------------------------------------------------- loading
 // Writes into texture VRAM (banks A-D), which the CPU can only reach while
@@ -535,6 +534,8 @@ static void draw_objects(void)
 
 // Replaces the current room; returns 0 (and keeps the old one) if the file is
 // missing. The caller places the player and calls set_camera().
+static uint64_t scripted_boxes;      // boxes the room script switched (camera_occluded)
+
 static int load_room(int stage, int id)
 {
     char path[48];
@@ -549,6 +550,7 @@ static int load_room(int stage, int id)
     cur_room = id;
     snprintf(bg_prefix, sizeof(bg_prefix), "room%d%02x", stage, id);
     cur_cam = -1;
+    scripted_boxes = 0;
     enemy_room_reset(); // the new room's scripts spawn its enemies
     effect_clear();
     // room sound bank (the previous one may still play a short step: free it
@@ -1044,7 +1046,6 @@ static void render_frame(void)
     glPolyFmt(POLY_ALPHA(31) | cull_models | POLY_ID(1));
     draw_player();
     draw_objects();
-    update_occlusion();
     int fx = effect_count() + roomfx_count();
     enemy_draw((have_masks ? 4 * masks.header->num_quads : 0) + 4 * fx,
                (have_masks ? masks.header->num_quads : 0) + fx);
@@ -1107,18 +1108,94 @@ static int is_slope(const RoomBox *b)
 // circle of diameter w, 7 / 8 = ellipses filling the box (long axis x / z;
 // e.g. the low wall in front of the stairs of room 103, which as a rectangle
 // covered the top step). Triangles are still tested as their box.
+// The PS1's box shapes (handlers 0x8009f448): 0/9/10/12 a box, 1-4 the
+// triangle of the box's corner (x1 z1), (x0 z1), (x1 z0), (x0 z0) with the
+// diagonal as hypotenuse, 5 the diamond between the edges' midpoints, 6 a
+// circle of diameter w, 7 / 8 a stadium (a box with round ends) along x / z
+// (0x8004b598 / 0x8004b7ec). Treating 1-5 as whole boxes made invisible walls
+// in their empty halves (room 103's walkway), 7 / 8 as ellipses cut the corners.
+// Depth of a circle of PLAYER_RADIUS: radius - signed distance (< 0 inside).
+static int32_t depth_of(float signed_distance)
+{
+    float d = PLAYER_RADIUS - signed_distance;
+    return d <= 0.0f ? 0 : d < 1.0f ? 1 : (int32_t)d;
+}
+
+static float segment_distance(float x, float z, float ax, float az, float bx, float bz)
+{
+    float dx = bx - ax, dz = bz - az, len2 = dx * dx + dz * dz;
+    float t = len2 > 0.0f ? ((x - ax) * dx + (z - az) * dz) / len2 : 0.0f;
+    t = t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t;
+    float ex = x - (ax + t * dx), ez = z - (az + t * dz);
+    return sqrtf(ex * ex + ez * ez);
+}
+
+// signed distance to a convex polygon
+static float polygon_distance(const float (*v)[2], int n, float x, float z)
+{
+    float cx = 0, cz = 0;
+    for (int i = 0; i < n; i++) {
+        cx += v[i][0] / n;
+        cz += v[i][1] / n;
+    }
+    float inside = -1e9f, outside = 1e9f;
+    int out = 0;
+    for (int i = 0; i < n; i++) {
+        const float *a = v[i], *b = v[(i + 1) % n];
+        float nx = b[1] - a[1], nz = a[0] - b[0], len = sqrtf(nx * nx + nz * nz);
+        if (len <= 0.0f)
+            continue;
+        nx /= len;
+        nz /= len;
+        if ((cx - a[0]) * nx + (cz - a[1]) * nz > 0.0f) { // outward
+            nx = -nx;
+            nz = -nz;
+        }
+        float d = (x - a[0]) * nx + (z - a[1]) * nz;
+        out |= d > 0.0f;
+        if (d > inside)
+            inside = d;
+        float e = segment_distance(x, z, a[0], a[1], b[0], b[1]);
+        if (e < outside)
+            outside = e;
+    }
+    return out ? outside : inside;
+}
+
 static int32_t penetration(const RoomBox *b, int32_t x, int32_t z)
 {
-    if (b->shape == 6 || b->shape == 7 || b->shape == 8) {
-        float ra = (b->shape == 6 ? b->w : b->w) * 0.5f, rb = (b->shape == 6 ? b->w : b->d) * 0.5f;
-        float dx = x - (b->x + ra), dz = z - (b->z + rb);
-        ra += PLAYER_RADIUS;
-        rb += PLAYER_RADIUS;
-        float q = dx * dx / (ra * ra) + dz * dz / (rb * rb);
-        if (q >= 1.0f)
-            return 0;
-        int32_t depth = (int32_t)((1.0f - sqrtf(q)) * (ra < rb ? ra : rb));
-        return depth > 0 ? depth : 1;
+    if (x <= b->x - PLAYER_RADIUS || x >= b->x + b->w + PLAYER_RADIUS || z <= b->z - PLAYER_RADIUS ||
+        z >= b->z + b->d + PLAYER_RADIUS)
+        return 0; // (soft float below: most boxes are far)
+    float x0 = b->x, z0 = b->z, x1 = b->x + b->w, z1 = b->z + b->d;
+    switch (b->shape) {
+    case 1: case 2: case 3: case 4: {
+        static const uint8_t corner[5][2] = { { 0, 0 }, { 1, 1 }, { 0, 1 }, { 1, 0 }, { 0, 0 } };
+        float cx = corner[b->shape][0] ? x1 : x0, cz = corner[b->shape][1] ? z1 : z0;
+        const float v[3][2] = { { cx, cz }, { cx == x0 ? x1 : x0, cz }, { cx, cz == z0 ? z1 : z0 } };
+        return depth_of(polygon_distance(v, 3, x, z));
+    }
+    case 5: {
+        float mx = (x0 + x1) * 0.5f, mz = (z0 + z1) * 0.5f;
+        const float v[4][2] = { { mx, z0 }, { x1, mz }, { mx, z1 }, { x0, mz } };
+        return depth_of(polygon_distance(v, 4, x, z));
+    }
+    case 6: {
+        float r = b->w * 0.5f;
+        return depth_of(segment_distance(x, z, x0 + r, z0 + r, x0 + r, z0 + r) - r);
+    }
+    case 7: { // round ends of diameter d at both x ends
+        float r = b->d * 0.5f, a = x0 + r, e = x1 - r;
+        if (e < a)
+            a = e = (x0 + x1) * 0.5f;
+        return depth_of(segment_distance(x, z, a, z0 + r, e, z0 + r) - r);
+    }
+    case 8: {
+        float r = b->w * 0.5f, a = z0 + r, e = z1 - r;
+        if (e < a)
+            a = e = (z0 + z1) * 0.5f;
+        return depth_of(segment_distance(x, z, x0 + r, a, x0 + r, e) - r);
+    }
     }
     int32_t in_x = x - (b->x - PLAYER_RADIUS), out_x = b->x + b->w + PLAYER_RADIUS - x;
     int32_t in_z = z - (b->z - PLAYER_RADIUS), out_z = b->z + b->d + PLAYER_RADIUS - z;
@@ -1142,8 +1219,10 @@ static int blocked_for(uint16_t mask, uint32_t floors, int32_t from_x, int32_t f
         const RoomBox *b = &room.boxes[i];
         if ((b->floors & floors) != floors || is_slope(b) || !(b->flag & mask))
             continue;
+        // only deeper in: whoever stands in a box (a zombie the script left in
+        // room 101's window when it closed it again) may walk out and along it
         int32_t depth = penetration(b, x, z);
-        if (depth > 0 && depth >= penetration(b, from_x, from_z))
+        if (depth > 0 && depth > penetration(b, from_x, from_z))
             return 1;
     }
     return 0;
@@ -1483,6 +1562,7 @@ void game_spawn_enemy(int slot, int type, int flags, int voice, int x, int y, in
 }
 
 void game_enemy_motion(int slot, int motion, int ctr) { enemy_set_motion(slot, motion, ctr); }
+void game_enemy_skin(int slot, int model) { enemy_set_skin(slot, model); }
 
 // Enemy sounds get quieter with the distance to Leon (the PS1 places them in
 // 3D; this is the simple version).
@@ -1756,11 +1836,18 @@ static int sight_box_hit(int i, const float p0[3], const float p1[3])
     return sight_box_hit_flags(i, p0, p1, 0);
 }
 
+// A box one end stands in does not block (a zombie in room 101's window could
+// not be shot).
+static int box_holds(const RoomBox *b, int32_t x, int32_t z)
+{
+    return x >= b->x && x <= b->x + b->w && z >= b->z && z <= b->z + b->d;
+}
+
 int game_sight_blocked(int32_t x0, int32_t y0, int32_t z0, int32_t x1, int32_t y1, int32_t z1)
 {
     const float p0[3] = { (float)x0, (float)y0, (float)z0 }, p1[3] = { (float)x1, (float)y1, (float)z1 };
     for (int i = 0; i < room.header->num_boxes; i++)
-        if (sight_box_hit(i, p0, p1))
+        if (!box_holds(&room.boxes[i], x0, z0) && !box_holds(&room.boxes[i], x1, z1) && sight_box_hit(i, p0, p1))
             return 1;
     return 0;
 }
@@ -1770,8 +1857,8 @@ int game_sight_blocked(int32_t x0, int32_t y0, int32_t z0, int32_t x1, int32_t y
 // other side can stand nearer than a wall's mask (room 102, camera 1: the
 // courtyard zombies at the gate, masks at depth 9920, zombies at ~9000).
 // Hidden: an enemy the camera would see only through a tall sight-blocking wall
-// that does not also stand between the camera and Leon (many cameras look
-// through the room's outer walls; those walls then count for nobody). Only
+// that also stands between Leon and the enemy (the enemy is on the other side
+// of a wall from Leon; many cameras look through the room's outer walls). Only
 // solid walls count, that collide with everything (flag 0xFC00): a gate
 // that only some objects collide with (room 102 box 0: 0xF400, a chain-link
 // fence) is see-through.
@@ -1779,8 +1866,11 @@ int game_sight_blocked(int32_t x0, int32_t y0, int32_t z0, int32_t x1, int32_t y
 #define SOLID_WALL 0xFC00
 #define TALL_WALL 3600      // counters and shelves (1800) never hide a whole person
 
-// an enemy inside a wall box (room 101: zombies left in the shop window when
-// the script closes it again) is not behind it
+// A box the room script switches with sca_id_set is a window or a gate, not a
+// wall: room 101's shop window (box 11, off while the zombies break in, solid
+// again after) left Kendo and the zombies at the glass hidden from Leon's
+// side.
+// An enemy inside a wall box is not behind it either.
 static int stands_in(int i, int32_t x, int32_t z)
 {
     const RoomBox *b = &room.boxes[i];
@@ -1792,33 +1882,24 @@ static int tall_wall(int i)
     const RoomBox *b = &room.boxes[i];
     return (b->type >> 11) * 100 + ((b->type >> 6) & 31) * 1800 >= TALL_WALL;
 }
-static uint64_t walls_before_leon;  // set per frame by update_occlusion()
-
-static void update_occlusion(void)
-{
-    const RoomCamera *c = &room.cameras[cur_cam];
-    const float eye[3] = { (float)c->from[0], (float)c->from[1], (float)c->from[2] };
-    walls_before_leon = 0;
-    for (int h = 0; h < 2; h++) {
-        const float leon[3] = { (float)player.x, (float)(player.y - (h ? 1700 : 300)), (float)player.z };
-        for (int i = 0; i < room.header->num_boxes && i < MAX_SIGHT_BOXES; i++)
-            if (tall_wall(i) && sight_box_hit_flags(i, eye, leon, SOLID_WALL))
-                walls_before_leon |= 1ull << i;
-    }
-}
-
 int camera_occluded(int32_t x, int32_t y, int32_t z)
 {
     if (die.step >= DIE_ORBIT)
         return 0; // the free camera is not where the room's walls were sorted for
     const RoomCamera *c = &room.cameras[cur_cam];
     const float eye[3] = { (float)c->from[0], (float)c->from[1], (float)c->from[2] };
+    // the wall must also stand between Leon and the enemy (chest high): many
+    // cameras look through the room's outer walls, so the camera's line alone
+    // hid Kendo's body in 101 whenever Leon walked away from it
+    const float leon[3] = { (float)player.x, (float)(player.y - 1000), (float)player.z };
+    const float mid[3] = { (float)x, (float)(y - 1000), (float)z };
     for (int h = 0; h < 2; h++) { // hidden only if feet and head (2000 up: above 1800-high boxes) are
         const float p[3] = { (float)x, (float)(y - (h ? 2000 : 100)), (float)z };
         int hit = 0;
         for (int i = 0; i < room.header->num_boxes && i < MAX_SIGHT_BOXES && !hit; i++)
-            hit = !(walls_before_leon >> i & 1) && tall_wall(i) && !stands_in(i, x, z) &&
-                  sight_box_hit_flags(i, eye, p, SOLID_WALL);
+            hit = !(scripted_boxes >> i & 1) && tall_wall(i) && !stands_in(i, x, z) &&
+                  !stands_in(i, player.x, player.z) && sight_box_hit_flags(i, eye, p, SOLID_WALL) &&
+                  sight_box_hit_flags(i, leon, mid, SOLID_WALL);
         if (!hit)
             return 0;
     }
@@ -1843,8 +1924,11 @@ void game_play_sound(int bank, int sound)
 
 void game_set_box_flag(int box, int flag)
 {
-    if (box >= 0 && box < room.header->num_boxes)
+    if (box >= 0 && box < room.header->num_boxes) {
         ((RoomBox *)room.boxes)[box].flag = flag; // room data lives in RAM
+        if (box < 64)
+            scripted_boxes |= 1ull << box;
+    }
 }
 
 // NitroFS (the game data inside the ROM). calico's nitroFSInit reads the file

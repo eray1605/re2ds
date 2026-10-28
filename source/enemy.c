@@ -43,6 +43,10 @@
 #define A_STAND 0x00
 #define A_GET_UP 0x08           // 0x09 from the other lying pose
 #define A_EAT 0x12
+#define A_SCRIPT_EAT 0x15       // eats (routine 8 mode 3), gets up from the body (state 8 sub 3)
+#define EAT_HOLD 1              // state 8 sub states (0x80103ab0, see eat())
+#define EAT_RISE 3
+#define EAT_LEON 6
 #define A_LIE 0x17              // 0x16 = the other lying pose
 #define A_GRAB 0x0B             // grab; + 1 bite (loops), + 2 pushed away
 #define SET_PLAYER 2            // set 2 is for Leon's skeleton (the PS1 plays it on him)
@@ -148,6 +152,7 @@ typedef struct {
     uint8_t state, sub;         // ST_*, step within the state
     uint8_t gait;               // set 0 animation it walks with
     uint8_t fast;               // skips every third keyframe (obj+0x21a 0x8000, see fast_step)
+    uint8_t bone_page[16];      // texture page + 1 a bone is drawn with, 0 = its own (enemy_set_skin)
     uint8_t lie_alt;            // lies in the other pose (obj+0x21a bit 2)
     uint8_t sees;               // line of sight to Leon (obj+0x154 bit 0x800)
     uint8_t sight_timer;        // the PS1 checks it every 8 frames
@@ -680,6 +685,12 @@ void enemy_member_set(int slot, int member, int value)
             enter_state(e, value);
         }
         break;
+    case 4: // the sub state (obj+6): only state 8's is taken over (Kendo's room)
+        if (e->routine == 1 && e->state == ST_EAT && value == EAT_RISE) {
+            e->sub = EAT_RISE;
+            set_anim(e, SET_MAIN, A_SCRIPT_EAT, 0);
+        }
+        break;
     case 7: e->flags = value; break;
     case 0x0B: e->x = (int16_t)value; break;
     case 0x0C: e->y = (int16_t)value; break;
@@ -709,8 +720,8 @@ static int crowded(int i, int32_t x, int32_t z)
     const Enemy *e = &enemies[i];
     for (int j = 0; j < MAX_ENEMIES; j++) {
         const Enemy *o = &enemies[j];
-        if (j == i || !present(o) || o->state >= ST_DYING)
-            continue;
+        if (j == i || !present(o) || o->state >= ST_DYING || is_person(o))
+            continue; // people are the scripts' (Kendo's body in 101 wedged a zombie into the window)
         int64_t ox = o->x - x, oz = o->z - z, cx = o->x - e->x, cz = o->z - e->z;
         int64_t now = ox * ox + oz * oz, before = cx * cx + cz * cz;
         if (now < (int64_t)(4 * ENEMY_RADIUS * ENEMY_RADIUS) && now < before)
@@ -1092,6 +1103,7 @@ static void chase(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
     }
     if (p->dead && d < 1000 && in_cone(e, px, pz, 0x200)) {
         enter_state(e, ST_EAT);
+        e->sub = EAT_LEON; // 0x60801: state 8, sub 6
         return;
     }
     // movement (0x801019d0)
@@ -1177,6 +1189,32 @@ static void lunge(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
         enter_state(e, ST_CHASE);
 }
 
+// State 8 (0x80103ab0): sub 1 eats (animation 0x12) as long as the hold
+// flag 0x4000 is set; sub 3 plays 0x15 once to its end and then goes after
+// Leon (state 1). The room script sets sub 3 for the zombies over Kendo's
+// body in room 101 (event 0x11: routine 1, state 8, sub 3, hold cleared).
+// Sub 6 / 7 eat the dead Leon and keep turning to him.
+static void eat(Enemy *e, const EnemyTarget *p)
+{
+    switch (e->sub) {
+    case EAT_HOLD:
+        anim_step(e, NULL);
+        if (!(e->flags & EF_HOLD)) {
+            e->sub = EAT_RISE;
+            set_anim(e, SET_MAIN, A_SCRIPT_EAT, 0);
+        }
+        break;
+    case EAT_RISE:
+        if (anim_step(e, NULL))
+            enter_state(e, ST_CHASE);
+        break;
+    default:
+        turn_toward(e, p->x, p->z, 0x10);
+        anim_step(e, NULL);
+        break;
+    }
+}
+
 static void lying(Enemy *e)
 {
     switch (e->sub) {
@@ -1203,7 +1241,6 @@ static void push_tick(Enemy *e, int i);
 // 3 eats the target.
 #define A_SCRIPT_LUNGE 0x0A
 #define A_SCRIPT_HOLD 0x18
-#define A_SCRIPT_EAT 0x15
 #define LUNGE_HOLD_KEY 0x11
 static void start_script_mode(Enemy *e)
 {
@@ -4947,6 +4984,44 @@ static void room_start(void)
     }
 }
 
+// Clothes (zombie init 0x80100674, FUN_800169f4 retargets every face of a
+// mesh to another texture page and its palette). The textures of types 0x12
+// and 0x1f hold four 128-pixel pages: 0 heads and hands, 1-3 whole bodies.
+// Type 0x1f: the body (all bones but 8, 11, 14) takes page model & 0x3f (the
+// sce_em_set byte, obj+0x1cf), or, when that is 0, a random one of 1-3 -
+// e.g. 1 a light shirt, 2 a jacket, 3 a police uniform. Type 0x12: half of
+// them get the second head (8 -> page 2), half the third body (page 3, with
+// the hands 11 / 14 on page 2).
+#define BODY_BONES 0x36FF       // 0-7, 9, 10, 12, 13
+void enemy_set_skin(int slot, int model)
+{
+    if (slot == 0xFF)
+        slot = PARTNER_SLOT;
+    if (slot < 0 || slot >= MAX_ENEMIES || !enemies[slot].active)
+        return;
+    Enemy *e = &enemies[slot];
+    memset(e->bone_page, 0, sizeof(e->bone_page));
+    int type = types[e->type].type, page = 0;
+    if (type == 0x1F) {
+        if (!(model & 0xC0))
+            page = (rnd() + (rnd() << (rnd() & 3))) % 3 + 1;
+        if (model & 0x3F)
+            page = model & 0x3F;
+        for (int b = 0; b < 16 && page; b++)
+            if (BODY_BONES >> b & 1)
+                e->bone_page[b] = page + 1;
+    } else if (type == 0x12) {
+        if (rnd() & 1)
+            e->bone_page[8] = 2 + 1;
+        if (!(rnd() & 1)) {
+            for (int b = 0; b < 16; b++)
+                if (BODY_BONES >> b & 1)
+                    e->bone_page[b] = 3 + 1;
+            e->bone_page[11] = e->bone_page[14] = 2 + 1;
+        }
+    }
+}
+
 void enemy_set_motion(int slot, int motion, int ctr)
 {
     if (slot == 0xFF)
@@ -5092,6 +5167,7 @@ void enemy_tick(const EnemyTarget *p)
         case ST_LUNGE: lunge(e, i, p, d); break;
         case ST_GRAB: grab_zombie(e, i, p->pressed); break;
         case ST_LYING: lying(e); break;
+        case ST_EAT: eat(e, p); break;
         default: anim_step(e, NULL); break;
         }
     }
@@ -5426,7 +5502,8 @@ static void draw_bone(const EnemyType *t, const Enemy *e, int bone)
     for (int p = 0; p < t->pages && !(bone < 16 && (e->hide_bones >> bone & 1)); p++) {
         uint32_t off = m->lists[bone * t->pages + p];
         if (off) {
-            glBindTexture(0, t->tex[p]);
+            int page = bone < 16 && e->bone_page[bone] && e->bone_page[bone] <= t->pages ? e->bone_page[bone] - 1 : p;
+            glBindTexture(0, t->tex[page]);
             glCallList((const u32 *)((const uint8_t *)m->data + off));
         }
     }
