@@ -21,9 +21,20 @@
 
 #define MUSIC_MAGIC 0x31554D52  // "RMU1": MAINxx, one sequence
 #define MUSIC_MAGIC2 0x32554D52 // "RMU2": SUB_xx, two sequences
-#define MAX_VOICES 12           // DS channels for music (the police station pieces hold up to
-                                // 14 notes); the rest stay free for effects and voices
-#define MASTER_VOLUME 64        // below the effects, like the PS1 mix
+#ifndef MAX_VOICES
+#define MAX_VOICES 14           // DS channels for music: rooms 103, 109 and the police station
+                                // would hold 14-16 notes (with their tails); 12 cut notes off.
+                                // An effect or a voice clip that finds no free channel takes
+                                // the quietest note (music_yield).
+#endif
+#define MASTER_VOLUME 48        // below the effects, like the PS1 mix
+// The DS mixer adds up the channels and clips once a side gets more than
+// about one channel at full volume: the police station's and the city's
+// pieces summed 160-390 (peaks 730) and crackled. The music keeps the sum of
+// its channel volumes under MIX_LIMIT, coming down in the frame the notes
+// start and back up by 2/256 a frame.
+#define MIX_LIMIT (160 * 16)    // in the 11-bit volumes below (160 of 127 a channel)
+static int mix_gain = 256;      // 256 = 1
 #define DUCKED 40               // while a voice clip plays
 static int duck = 127;
 #define FADE_FRAMES 90          // fade out (FUN_800755b8(seq, 0x7f, 0x5a))
@@ -32,7 +43,8 @@ static int duck = 127;
 typedef struct {
     uint8_t program, lo, hi, centre;
     int8_t fine;
-    uint8_t volume, pan, release;
+    uint8_t volume, pan;
+    uint8_t bend_range;         // pitch bend reach in semitones: down << 4 | up (VAB pbmin, pbmax)
     uint32_t offset, size, loop;
     uint16_t adsr1, adsr2;      // the VAB tone's SPU envelope (0, 0: none, held at full)
 } MusicTone;
@@ -74,15 +86,28 @@ typedef struct {
     uint8_t midi, note, velocity;
     uint8_t phase;              // ENV_*: where in its envelope
     int32_t level;              // SPU envelope level, 0..0x7FFF
-    uint8_t volume;             // before the envelope (voice_mix)
-    uint8_t sent;               // the DS volume last set
-    uint16_t frames;            // frames left for samples that play once (0 = loops)
+    uint16_t volume;            // before the envelope (voice_mix), DS volume 0..2047
+    uint16_t sent;              // the DS volume last set
+    uint16_t frames;            // frames left for samples that play once (0 = loops); never
+                                // more than the sample lasts, or the channel may be another's
+    uint32_t rate;              // its sample rate now (pitch bends change it)
     uint32_t start;             // when it started (the oldest held note gives way)
 } Voice;
 
 static Bank main_bank, sub_bank;
 static Player players[PLAYERS];
 static Voice voices[MAX_VOICES];
+
+static void voices_init(void)
+{
+    static int ready;
+    if (!ready) {
+        for (int i = 0; i < MAX_VOICES; i++)
+            voices[i].ch = -1;
+        ready = 1;
+    }
+}
+static int music_steals_held, music_steals_fading; // notes that took a sounding voice (the host test counts them)
 static uint32_t note_count;
 static int current_main = -1, current_sub = -1;
 
@@ -173,20 +198,30 @@ static int envelope_step(Voice *v)
         l += env_delta(a2 & 0x1F, -8, (a2 >> 5) & 1, 0, l);
         break;
     }
-    // an exponential fade only nears 0: below what the DS volume can still
-    // play, the voice is done and frees its channel
+    // an exponential fade only nears 0: once this voice's DS volume (0..127)
+    // is down to 0 it is done and frees its channel for the next note
     int fading = v->phase == ENV_RELEASE || (v->phase == ENV_SUSTAIN && ((a2 >> 14) & 1) && ((a2 >> 6) & 0x7F) != 0x7F);
-    if (fading && l < ENV_SILENT)
+    if (fading && (l < ENV_SILENT || v->volume * l / ENV_MAX == 0))
         l = 0;
     v->level = l < 0 ? 0 : l > ENV_MAX ? ENV_MAX : l;
     return v->level > 0 || v->phase == ENV_ATTACK;
 }
 
+// What the DS channel gets: the voice's volume, its envelope, the limiter.
+// 11 bits (soundChSetVolume: 0..127 times 1, 1/2, 1/4 or 1/16): with
+// soundSetVolume's 0..127 a quiet voice (20-40 at the music's level) had few
+// steps, and a fading note reached 0 and ended at -25 dB - in the main hall's
+// sparse piano piece the notes broke off.
+static int voice_volume(const Voice *v)
+{
+    return v->volume * v->level / ENV_MAX * mix_gain / 256;
+}
+
 static void voice_send(Voice *v)
 {
-    int volume = v->volume * v->level / ENV_MAX;
+    int volume = voice_volume(v);
     if (volume != v->sent) {
-        soundSetVolume(v->ch, volume);
+        soundChSetVolume(v->ch, volume);
         v->sent = volume;
     }
 }
@@ -202,7 +237,7 @@ static void voice_mix(const Voice *v, int *volume, int *pan)
         vol = vol * b->prog_vol[t->program] / 127;
         bgm_pan += b->prog_pan[t->program] - 64;
     }
-    int x = t->volume * v->pl->ch_volume[v->midi] / 127 * v->velocity / 127 * MASTER_VOLUME / 127 * duck / 127;
+    int x = t->volume * v->pl->ch_volume[v->midi] / 127 * v->velocity / 127 * MASTER_VOLUME * 16 / 127 * duck / 127;
     x = x * vol / 127;
     if (v->pl->fade)
         x = x * v->pl->fade / FADE_FRAMES;
@@ -297,12 +332,7 @@ static void bank_free(Bank *b)
 // music/<name>.bin (tools/bgm2ds.py): RMU1 / RMU2 header, then the tones
 static int bank_load(Bank *b, const char *path, uint32_t magic, uint32_t head)
 {
-    static int voices_ready;
-    if (!voices_ready) {
-        for (int i = 0; i < MAX_VOICES; i++)
-            voices[i].ch = -1;
-        voices_ready = 1;
-    }
+    voices_init();
     bank_free(b);
     b->vol = 127;
     b->pan = 64;
@@ -343,11 +373,14 @@ void music_stop(void)
 
 int music_playing(void) { return players[P_MAIN].state == S_PLAY; }
 
-// Hz for note on tone t, bend in 1/8192 of 2 semitones. The fine tune
-// (VAB "shift", 1/128 semitone) raises the pitch (libsnd FUN_8007e3e4).
+// Hz for note on tone t, bend in 1/8192 of the tone's reach: VAB bytes 12 / 13
+// (pbmin down, pbmax up) give it in semitones, from 0 (no bend) to 12. It was
+// taken as 2 for all: piece 07 bends its tones by 1, MAIN00 by 6 / 12. The
+// fine tune (VAB "shift", 1/128 semitone) raises the pitch (libsnd FUN_8007e3e4).
 static uint32_t note_rate(const MusicTone *t, int note, int bend)
 {
-    float semis = (float)(note - t->centre) + t->fine / 128.0f + bend * 2.0f / 8192.0f;
+    int reach = bend < 0 ? t->bend_range >> 4 : t->bend_range & 15;
+    float semis = (float)(note - t->centre) + t->fine / 128.0f + bend * (float)reach / 8192.0f;
     float hz = 44100.0f * powf(2.0f, semis / 12.0f);
     return hz > 65535.0f ? 65535 : (uint32_t)hz;
 }
@@ -361,19 +394,42 @@ static void note_off(const Player *p, int midi, int note)
     }
 }
 
+// The note that gives way (but not except): the quietest one fading out (its
+// end is least heard), else the oldest held one; NULL if none sounds.
+static Voice *voice_to_give(const Voice *except)
+{
+    Voice *v = NULL;
+    for (int i = 0; i < MAX_VOICES; i++) {
+        Voice *o = &voices[i];
+        if (o != except && o->ch >= 0 && o->phase == ENV_RELEASE &&
+            (!v || o->sent < v->sent || (o->sent == v->sent && o->start < v->start)))
+            v = o;
+    }
+    if (!v)
+        for (int i = 0; i < MAX_VOICES; i++) {
+            Voice *o = &voices[i];
+            if (o != except && o->ch >= 0 && (!v || o->start < v->start))
+                v = o;
+        }
+    return v;
+}
+
 static void play_tone(const Player *p, const Bank *b, const MusicTone *t, int midi, int note, int velocity)
 {
     if (!t->size)
         return;
-    // a free voice, else the oldest one fading out, else the oldest held one
     Voice *v = NULL;
     for (int i = 0; i < MAX_VOICES && !v; i++)
         if (voices[i].ch < 0)
             v = &voices[i];
-    for (int pass = 0; pass < 2 && !v; pass++)
-        for (int i = 0; i < MAX_VOICES; i++)
-            if ((pass || voices[i].phase == ENV_RELEASE) && (!v || voices[i].start < v->start))
-                v = &voices[i];
+    if (!v)
+        v = voice_to_give(NULL);
+    if (v->ch >= 0) {
+        if (v->phase == ENV_RELEASE)
+            music_steals_fading++;
+        else
+            music_steals_held++;
+    }
     voice_stop(v);
     v->pl = p;
     v->bank = b;
@@ -388,12 +444,25 @@ static void play_tone(const Player *p, const Bank *b, const MusicTone *t, int mi
     v->phase = ENV_ATTACK;
     v->level = 0;
     envelope_step(v); // its first frame: most attacks are there at once
-    v->sent = volume * v->level / ENV_MAX;
+    v->sent = voice_volume(v);
     uint32_t rate = note_rate(t, note, p->ch_bend[midi]);
     int looped = t->loop != 0xFFFFFFFF;
-    v->ch = soundPlaySample(b->data + t->offset, b->format, t->size & ~3, rate, v->sent, pan,
+    v->ch = soundPlaySample(b->data + t->offset, b->format, t->size & ~3, rate, v->sent >> 4, pan,
                             looped, looped ? t->loop / 4 : 0);
-    v->frames = looped ? 0 : (uint16_t)(t->size / b->bytes * 60 / (rate ? rate : 1) + 1);
+    if (v->ch < 0) { // the effects hold the other channels: the quietest note gives way
+        Voice *o = voice_to_give(v);
+        if (o) {
+            voice_stop(o);
+            v->ch = soundPlaySample(b->data + t->offset, b->format, t->size & ~3, rate, v->sent >> 4, pan,
+                                    looped, looped ? t->loop / 4 : 0);
+        }
+    }
+    if (v->ch >= 0)
+        soundChSetVolume(v->ch, v->sent); // the start takes 0..127 only
+    v->rate = rate ? rate : 1;
+    v->frames = looped ? 0 : (uint16_t)(t->size / b->bytes * 60 / v->rate);
+    if (!looped && !v->frames)
+        v->frames = 1;
 }
 
 static int has_program(const Bank *b, int program)
@@ -421,8 +490,17 @@ static void bend(const Player *p, int midi)
 {
     for (int i = 0; i < MAX_VOICES; i++) {
         Voice *v = &voices[i];
-        if (v->ch >= 0 && v->pl == p && v->midi == midi)
-            soundSetFreq(v->ch, note_rate(v->tone, v->note, p->ch_bend[midi]));
+        if (v->ch < 0 || v->pl != p || v->midi != midi)
+            continue;
+        uint32_t rate = note_rate(v->tone, v->note, p->ch_bend[midi]);
+        if (!rate)
+            rate = 1;
+        soundSetFreq(v->ch, rate);
+        if (v->frames) { // played once, faster: it ends sooner (0 stays a loop)
+            uint32_t left = v->frames * v->rate / rate;
+            v->frames = (uint16_t)(left ? left : 1);
+        }
+        v->rate = rate;
     }
 }
 
@@ -529,14 +607,21 @@ static void music_step(void)
             v->ch = -1; // played out
             continue;
         }
-        if (!envelope_step(v)) {
+        if (!envelope_step(v))
             voice_stop(v); // died away
-            continue;
-        }
-        voice_send(v);
     }
     for (int i = 0; i < PLAYERS; i++)
         player_frame(&players[i]);
+    // the limiter, with this frame's new notes in
+    int total = 0;
+    for (int i = 0; i < MAX_VOICES; i++)
+        if (voices[i].ch >= 0)
+            total += voices[i].volume * voices[i].level / ENV_MAX;
+    int want = total > MIX_LIMIT ? MIX_LIMIT * 256 / total : 256;
+    mix_gain = want < mix_gain + 2 ? want : mix_gain + 2;
+    for (int i = 0; i < MAX_VOICES; i++)
+        if (voices[i].ch >= 0)
+            voice_send(&voices[i]);
 }
 
 // The sequencer steps 60 times a second. main.c calls music_frame once per
@@ -555,9 +640,22 @@ static void clock_tick(TickTask *t)
     clock_frames++;
 }
 
+// An effect or a voice clip found no free DS channel: the music's quietest
+// note gives way. 1 if one did.
+int music_yield(void)
+{
+    voices_init();
+    Voice *v = voice_to_give(NULL);
+    if (!v || v->ch < 0)
+        return 0;
+    voice_stop(v);
+    return 1;
+}
+
 void music_frame(void)
 {
     static int started;
+    voices_init();
     if (!started) {
         started = 1;
         tickTaskStart(&clock_task, clock_tick, ticksFromHz(60), ticksFromHz(60));

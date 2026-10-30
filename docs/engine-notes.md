@@ -43,6 +43,13 @@ addresses (`SLES_009.72`, disc 1, Europe). **observed** = in the code as written
   first aid spray (20D) and five more boxes of handgun bullets. `main.c` (`system_flags`) sets
   it for a new game and when loading. NORMAL / EASY (flag 0:`0x1a`) only changes enemy HP, see
   [enemy-others.md](enemy-others.md) section 10.
+- Item AOTs (handler `0x8004e02c`, type 2): data byte 7 bit 0 lets Leon crouch for it first
+  (player routine 6); then the status screen opens as "item found" (`0x800cd750` = 2) with
+  the item's picture and the system message "Will you take the\n`0xF9 1` name `0xF9 0`?"
+  (`0xF8` the name, colour 1; at `0x80098bf0`) with YES / NO; YES takes it, or "You can't
+  carry any\nmore items." (`0x80098c14`). **DS port:** the question in the message box with
+  the picture (`pickup_step` in `main.c` reads the answer, flag 11:`0x1F`); the name in green
+  (menu.c control code `\x01`); no crouching yet.
 - `sce_item_get` (`0x76`, 3 bytes: item, count; `0x80054498`): someone hands Leon an item –
   Marvin's Blue Card Key in room 202. Into the inventory, else (DS) the item box.
   `sce_item_lost` (`0x62`, 2 bytes: item; `0x800542c4`): clears the slot holding the item
@@ -75,7 +82,7 @@ a mode from table `0x800a0de0`:
 |------|-------------|---------------------------------------------|
 | 0x3F | plc_motion  | mode, animation, flags                      |
 | 0x40 | plc_dest    | pad, mode, done bit, s16 x, s16 z           |
-| 0x41 | plc_neck    | (head turning, ignored here)                |
+| 0x41 | plc_neck    | head turning (`docs/player-control.md`; ignored here) |
 | 0x42 | plc_ret     | back to the object's own control            |
 | 0x58 | plc_rot     | 0 = turn per tick / 1 = once at the end, s16 |
 | 0x5B | plc_cnt     | jump to keyframe                            |
@@ -115,9 +122,25 @@ the same bit the typewriter's question uses (`FUN_8004e2ac`).
 
 **aot_on** (`scd_op_47`) calls the AOT's type handler (`0x8009f490`) as if the player had used
 it: rooms hand out puzzle rewards (item AOTs) and change rooms (door AOTs) this way. Type 14
-(`0x8004edb0`) starts a computer program (`0x80036a90`, `data[0] | data[2] << 4`, & 3): 0 the
-hall's door lock service (`0x80037c6c`: "Hall side doors LOCKED", the Blue Card Key, item
-`0x35`, sets flag 4:`0x46`), 1 the fingerprint check (`0x800384dc`).
+(`0x8004edb0`) starts a computer program (`0x80036a90`, `0x800c77b8` = `data[2] << 4 | data[0]`):
+`& 3` picks it – 0 the hall's door lock service (`0x80037c6c`: "Hall side doors LOCKED", the
+Blue Card Key, item `0x35`, sets flag 4:`0x46`), 1 the fingerprint check (`0x800384dc`) – and
+`>> 4` is the camera that shows the computer (`FUN_80038a60` cuts to it and keeps the old one in
+`+0x2dd`; the hall's camera 15 is the desktop). Observed, October 2026:
+- A window opens over 12 frames (`FUN_800373c0(12, 10, 252, 139)`, room sound 6; closing:
+  `0x80038b90`, sound 7, back to the old camera).
+- `FUN_80037510(per_frame, text, &done)` types into a 30 × 12 character screen (`+4` chars,
+  `+0x16c` colours), drawn by `FUN_80037924` as 8 × 10 sprites from (16, 21), CLUT `0x7b40` +
+  colour: `|n` colour n, `]` new line, `[nnn` waits nnn frames, `^nn` nn back, room sound
+  `0x10` per character, a blinking cursor; past line 12 it scrolls (`FUN_8003781c`). The texts
+  (`0x800108c0`..): "DOOR LOCK SERVICE]------------------------------", "Hall side doors:
+  |2RELEASED|0]" / "|2LOCKED|0]", "]The doors can be unlocked]by a |2CARD KEY|0.]",
+  "]Checking up ID CARD[025.[025.[025.[025.", "]OK!]Hall side doors lock released.".
+- After a text it waits for the action button (`0x800c5f4c & 0x1000`). The card: the status
+  screen's question (`FUN_8002f2bc(0, 0x100, 7, …)`); yes: flag 4:`0x46`, the card's slot cleared.
+- Released (state 7): camera 9, 60 frames, the lock (`FUN_80057364(0x2120000)`, room sound
+  `0x12`), 60 frames; camera 2 the same (and camera 12 when `0x800c77d4 & 0x40000000`), then
+  back to the screen camera.
 
 ## 3. Voices (xa_on)
 
@@ -129,6 +152,20 @@ hall's door lock service (`0x80037c6c`: "Hall side doors LOCKED", the Blue Card 
 - Audio: `PL0/VOICE/VOICE0<s>.XAS` (stage s; `VOICE00` = common), 16 channels interleaved
   (file sector = block * 16 + channel), XA ADPCM 37.8 kHz mono. `tools/xa2ds.py`.
 - When Leon dies (HP < 0 sets `0x800c77b4` bit 4), the death sequence plays common clip 0.
+- DS: `voice_stop` kills the clip's channel only while the clip still plays (`tickGetCount`
+  against its end, a frame early). It used to kill it two frames after the end, when the DS
+  had often given the channel to a new music note.
+
+**Sound effects** (`FUN_80057364`): the u32 of a bank's sound table gives the program
+(byte 1 & 0x7F), the tone (byte 2 >> 4), the first SPU voice (byte 3 & 0x1F) and how many of
+the next tones sound with it on the next voices (byte 3 >> 5). Every gun's shot (sound 0 of
+`ARMSnn`) is two tones: the same sample dry and with the room's reverb (tone mode 4; the
+reverb is on when the room header's byte 6 is not 0, `0x800bc060`); the custom shotgun's
+second one is six semitones lower. 34 sounds in 25 room banks and one enemy bank are layered
+too. `vab2ds.py` mixes the layers into one sample, each at its tone volume (vol / 127) and
+saturated as the SPU's 16-bit mix (the VP70's shot: 2 × 90 / 127, about 3 dB louder than one
+tone at full); the reverb is not made. The weapon banks are kept at 16 bits (`--16bit`),
+which keeps the shots' fading boom that 8 bits turned to noise after 0.2 s.
 
 ## 4. Room objects (items lying around, gates)
 
@@ -232,7 +269,12 @@ floors from where Leon steps on. Leon's
 collision there counts only boxes on both floors his height at the next step lies between
 (`player_floors`, `source/main.c`): the walls beside the stairs are on all their floors, a
 wall of one floor reaching over the steps is not (room 103: a floor 2 wall over the top
-steps stopped him going up, not going down).
+steps stopped him going up, not going down). The step onto the stairs already counts as on
+them, with their bottom as seen from where Leon stands: room 200's floor 0 box under the
+entrance landing reaches over the top steps and stopped him at the bottom step whenever a
+step went from before the stairs past their edge. (A walk over every stairs box of disc 1,
+5 lines x 8 step offsets each way: 99 of 1280 walks stuck before, 64 after; the 64 are on
+the stairs of 111 and 118 and stop the same way before and after, not looked into yet.)
 
 The DS measures these shapes (`penetration`: triangles and the diamond as polygons, the
 stadiums by the distance to their axis); it used to take 1-5 as whole boxes (invisible walls
@@ -242,9 +284,13 @@ pushes out): whoever stands in a box may walk out and along it (room 101: the sc
 zombie into the shop window, box 11, and makes the window solid again; with "not deeper or
 equal" it was stuck there). Lines of sight (shots, enemies spotting Leon) ignore a box one end
 stands in. Enemies keep off each other (`crowded`) but not off people (Kendo's body wedged
-that zombie in). An enemy is hidden only when a tall solid wall stands both between the
-camera and it and between Leon and it (`camera_occluded`; many cameras look through outer
-walls), and never behind a box the room script switches (`sca_id_set`: windows, gates).
+that zombie in). An enemy is drawn only while it stands in the view area of the shown camera
+(PS1 `FUN_80026598` draws Leon and the enemies with the room objects' test `FUN_8002bc00`;
+`camera_view_area`): room 101 parks the zombies that break through the shop window at
+-32000, where camera 2 looks. Besides, an enemy is hidden when a tall solid wall stands both
+between the camera and it and between Leon and it (`camera_occluded`; many cameras look
+through outer walls), never behind a box the room script switches (`sca_id_set`: windows,
+gates).
 
 ## 11. Music (BGM)
 
@@ -281,16 +327,41 @@ and the two parts of a sub piece (`0x800cf118`, `0x800cf120`).
   chords with 246 of them. The police station pieces hold up to 14 notes at once.
 
 **DS port** (`source/music.c`): three sequences (main, sub 1, sub 2) on two banks (MAIN,
-SUB), start modes, fade, live volume and pan, 12 shared channels, the oldest held note gives
-way. A stop keeps the bank (a start replays from the beginning). A sub sequence takes a
+SUB), start modes, fade, live volume and pan, 14 shared channels. Rooms 100, 103, 109 and
+the police station's piece 07 would hold 14-16 notes with their tails; with 12 channels a note
+took a sounding one every few seconds (103: 54 held notes and 431 tails cut in 2 minutes), with
+14 and the rules below 18 / 251 (109: 2 / 99, piece 07: 0 / 56). A new note takes a free
+channel, else the quietest one fading out (its end is least heard), else the oldest held
+one. When no DS channel is left, the effects and voice clips take the music's quietest note
+(`music_yield`, `sound_play` / `voice_play` retry) and the music its own. `soundPlaySample`
+picks the channel on the ARM9 from `soundGetActiveChannels`, which synchronises with the ARM7
+(calico, auto-update off), so notes started together do not share one. A sample played once
+counts as over a frame early (and sooner when bent up), never late: a channel the DS freed may
+already play another sound. A stop keeps the bank (a start replays from the beginning). A sub sequence takes a
 program its own bank lacks from the main bank. `tools/bgm2ds.py --sub` writes `RMU2` files.
 The sequencer steps at 60 Hz by a tick task (`music_frame` catches up on up to 6 missed
 frames): driven by the main loop it slowed down whenever a pass took two frames and stalled
 with held notes during loads. `tests/music_host.c` plays a room's music on the host and
-counts voices, steals and sound messages.
+counts voices, steals, sound messages and the summed channel volume.
+Loudness: the DS mixer adds up all channels and clips once a side gets more than about one
+channel at full volume. At a master volume of 64 the police station's and the city's pieces
+summed 160-390 (room 100 peaked at 730) and crackled; the PS1 SPU (24 voices, 16-bit sum) has
+far more room. The music now plays at 48 and keeps the summed volume of its channels under 160
+(`MIX_LIMIT`): after the frame's new notes start, every voice is scaled down at once if the sum
+is over, and the gain comes back by 2/256 a frame. Room 100 averages 144 instead of 394.
+The voices' volumes go out with 11 bits (`soundChSetVolume`, 0..2047: 0..127 times 1, 1/2,
+1/4 or 1/16; a note starts with `soundPlaySample`'s 0..127 and is set at once): at the
+music's level a voice had only 20-40 of the 0..127 steps, and a fading note came to 0 and
+ended at about −25 dB - in the main hall's sparse piece (MAIN05) the notes broke off.
+Pitch bends reach as far as the tone says (VAB tone bytes 12 / 13, `pbmin` down and `pbmax`
+up, 0 to 12 semitones; `bgm2ds.py` stores them as `pbmin << 4 | pbmax` in the tone's 8th
+byte); all were taken as ±2 semitones, so 16 pieces bent wrong (piece 07 by 1, MAIN00 6 / 12,
+MAIN08 1-3). A camera cut stops the main loop for a few frames (reading and unpacking the
+picture and the masks); `show_camera_view` calls `music_frame` between the steps so the notes
+do not bunch up after it.
 Voices follow the SPU envelope of their VAB tone (ADSR1/2, written by `bgm2ds.py`): attack,
 exponential decay to the sustain level, sustain rising or falling while held (607 tones of the
 music fade out on their own: bells, plucks - without it SUB_01's bell in the city rang on like
 a siren), release after the note off (up to ~6 s). Step every 2^max(0, shift − 11) samples of
-step << max(0, 11 − shift) (psx-spx), summed over 735 samples a frame; below 1/128 a fading
-voice ends.
+step << max(0, 11 − shift) (psx-spx), summed over 735 samples a frame; a fading voice ends
+when its DS volume (0..2047) comes to 0, or below 1/128.

@@ -23,6 +23,8 @@ void roomfx_throw(int id, int first, int row, int32_t x, int32_t y, int32_t z, i
                   int32_t floor_y, int scale, int sound);
 // main.c: a thrown sprite (casing) hits the floor: weapon bank sound
 void game_casing_sound(int sound);
+// room collision (main.c): a casing turns round at a wall
+int game_blocked(int32_t from_x, int32_t from_z, int32_t x, int32_t z, int32_t y);
 void roomfx_kill(int id, int type);      // sce_espr_kill
 void roomfx_tick(void);                  // once per game tick
 int roomfx_count(void);                  // sprites alive (one quad each)

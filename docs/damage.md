@@ -18,7 +18,15 @@ Sources as in [player-control.md](player-control.md) and [enemy-zombie.md](enemy
    3 shot shapes per weapon (table `0x8009ea60 + weapon*0x18 + shape*8`).
 3. **Use up a round** – the handler from `0x8009f070[weapon]`, mostly just `FUN_80065594`.
 4. **Hit check** – `FUN_8003dd8c`, in the frames the shot shape gives (a list of pairs
-   `(shape, frames)`, `0xFF` = end, `0xFE` = loop for continuous fire).
+   `(box set, frames)` at the entry's second word; box set `0xFF` = a pause of that many
+   frames, frames `0xFF` = the end, box set `0xFE` = loop for continuous fire). Walked from
+   the shot's first frame (observed, `FUN_8003dd58` sets it up, the fire routine
+   `0x800403ec` calls the check every frame): the handguns and the magnum check once, the
+   custom magnum on frames 1, 2, 3, the shotgun on 1, 3, 5
+   (`00 01 ff 01 00 01 ff 01 00 01 ff 01 00 ff`), the custom shotgun on 1, 3, 5, 7. Each check
+   damages the nearest enemy not locked, and the hit locks it for 15 frames: so the shotguns hit
+   up to three / four enemies in a row, the custom magnum three. **DS:** `Weapon.hit_keys`
+   (main.c), `Enemy.hit_lock` (enemy.c).
 
 ### Hit check (`0x8003dd8c`, observed)
 
@@ -188,14 +196,38 @@ for the final ranking) and releases a grabbed player.
 
 | Address      | Effect (observed)                                                                       |
 |--------------|------------------------------------------------------------------------------------------|
-| `0x80105378` | normal flinch                                                                            |
+| `0x80105378` | normal flinch (see below)                                                                |
 | `0x80107e30` | flinch under continuous fire (SMG, gatling)                                              |
 | `0x80108470` | **normal death**: falls forward / backward, blood. **25 %**: does not get up again but becomes a **crawler with 1 HP** (only if the legs are intact, on the ground, not headless) |
 | `0x80107378` | **legs off**: 50 % leg part 3 flies off (then another 50 % 5 and 6), a blood fountain. Then a **crawler** (with 10 HP after a deadly hit, except 25 % if the legs were off already → dead) |
 | `0x80109204` | **head bursts**: part 8 flies away from the player, blood, splatter sound. **50 %**: the zombie walks on headless for 30–93 frames (1–3 s), then dies |
 | `0x80108b2c` | **upper body torn**: head, left arm and with 50 % the right arm fly off; then perhaps briefly on headless (15–46 frames) |
-| `0x8010663c` | **shotgun point blank into the upper body**: the zombie is thrown over and crawls on (crawler, 10 HP after a deadly hit) |
+| `0x8010663c` | **shotgun point blank into the upper body**: aimed up → `0xafc` (head and arms off); a hit that leaves it alive always, a deadly one 1 in 4 (else thrown backward `0x80109550`): it reels back (set 1 animation 4, from behind 3; blood, groan, sound 9) and at key 20 comes apart - parts 1-7 (hips and legs) keep their world matrix and stay standing, the upper body falls (10 a frame, +5, +55 after key 34; bounces twice at 200 above the floor, sound 4) and at the end crawls on (`0x10e` = `0x2001`, collision 200, HP 10 after a deadly hit). **DS:** `zombie_split` / `split_tick`, `Legs` |
 | `0x80109550` | **thrown backward** (impulse 400, −50 per frame); with the bowgun the bolt stays in the part hit |
+
+### The normal flinch and the recoil (observed, October 2026)
+
+`0x80105378` (handguns everywhere, the shotgun from far): the zombie keeps its gait (it
+switches to `obj+0x218`, blend 15) and goes on at half its root motion (`+0x144/+0x148 >> 1`),
+turning `0x10` a frame to its goal. Its upper body bends: part 0 (the chest, the root) is
+turned by `-a` about z after its own rotation (`FUN_80088e00`), part 1 (the hips, parent of
+the legs) by `+a` before (`FUN_80088f10`), so only the chest, head and arms lean. `a` =
+frame × bend × 8 for frames 0..3 (sub 1), then 16..0 × bend (sub 2); bend `+0x16b` = `0x18`
+(weapon `0x10`: 2), its sign `+0x15a` −1 when hit from behind (`+0x1d0 & 0x20`): from the
+front it leans back, from behind forward. In sub 2 it may grab Leon (within `0x514`, the arm
+cones). Sub 3 decides: 1/16 state 11 (facing him, nearer than 4000), not facing → 50 %
+turn round (12), else lunge (2) or chase (1). A groan (sound `0xb`/`0xc`) when its voice
+pause `+0x239` is over (150 frames). Each hit costs stagger `+0x223` (`0x8010ca57[weapon]`:
+knife 9, handguns 15, ..., 20 for weapon 12); while the zombie has more than 80 HP it comes
+back (16–31). A hit while the stagger is spent (the dispatcher `0x80104e80`, sub 0): the first
+time `+0x222` = 1 and the recoil `0x80105b00` (set 1 animation 4 and a shove of 450 back in
+one frame; from behind animation 3, no shove; bleeding 10 frames), the next time (or a stab,
+weapon 1) knocked down (state 5).
+
+**DS port:** `zombie_flinch_start` / `zombie_flinch` / `flinch_bend` (the bend is drawn on
+bones 0 and 1) and `zombie_recoil` (`ST_RECOIL`; the shove spread over four ticks:
+200 + 150 + 100 + 50). Not ported: state 11, the turn round, the SMG's own flinch
+`0x80107e30`, losing an arm after 8 hits of weapon `0x10` (`FUN_80106068`).
 
 ### When does the head burst? (observed)
 

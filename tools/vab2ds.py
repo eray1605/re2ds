@@ -13,8 +13,17 @@ door banks covers exactly one note (min == max), which gives the note.
 
 Core and weapon banks come as COMMON/SOUND/xxx.EDH (a 64-byte sound table,
 then the VAB header) plus xxx.VB (the samples). The sound table holds one u32
-per sound number; bits 20..23 are the tone. For these banks the output has one
-entry per sound number with note_lo = note_hi = that number.
+per sound number (FUN_80057364): byte 1 & 0x7F the program, byte 2 >> 4 the
+tone, byte 3 & 0x1F the first SPU voice and byte 3 >> 5 how many of the next
+tones play with it on the next voices. Every gun's shot (sound 0) is two:
+the same sample dry and with the room's reverb (tone mode 4), the custom
+shotgun's second one six semitones lower. For these banks the output has one
+entry per sound number with note_lo = note_hi = that number. A sound of
+several tones (in every bank kind) is mixed into one sample at the first
+tone's rate, each at its tone volume (vol / 127, as the SPU sets the voices)
+and saturated as the SPU's mix; the reverb is left out.
+--16bit keeps 16-bit PCM (the weapon banks: 8 bits lose the shots' fading
+boom).
 
 Room banks: the RDT holds a 48-entry sound table (u32: byte 1 & 0x7F =
 program, byte 2 >> 4 = tone), the VAB header and the samples; footsteps use
@@ -87,9 +96,33 @@ def parse_vab(d, base, vb_data=None):
 
 
 def sound_table(words):
-    """Sound number -> (program, tone) from a table of u32 entries
-    (byte 1 & 0x7F = program, byte 2 >> 4 = tone; 0xFFFFFFFF = unused)."""
-    return [(i, (w >> 8) & 0x7F, (w >> 20) & 0xF) for i, w in enumerate(words) if w != 0xFFFFFFFF]
+    """Sound number -> (program, tone, extra tones) from a table of u32
+    entries (byte 1 & 0x7F = program, byte 2 >> 4 = tone, byte 3 >> 5 = tones
+    played with it; 0xFFFFFFFF = unused). FUN_80057364 reads the core, weapon,
+    room and enemy tables alike (34 layered sounds in 25 rooms)."""
+    return [(i, (w >> 8) & 0x7F, (w >> 20) & 0xF, w >> 29) for i, w in enumerate(words) if w != 0xFFFFFFFF]
+
+
+def tone_rate(t, note):
+    return 44100 * 2 ** ((note - t["centre"] + t["fine"] / 128) / 12)
+
+
+def mix_layers(layers, rate):
+    """Tones played together (FUN_80057364's extra voices): each resampled to
+    rate, at vol / 127, summed and saturated to 16 bits."""
+    out = []
+    for samples, r, vol in layers:
+        step = r / rate
+        n = int(len(samples) / step)
+        if len(out) < n:
+            out += [0.0] * (n - len(out))
+        for i in range(n):
+            x = i * step
+            k = int(x)
+            a = samples[k]
+            b = samples[k + 1] if k + 1 < len(samples) else 0
+            out[i] += (a + (b - a) * (x - k)) * vol / 127
+    return [max(-32768, min(32767, int(round(v)))) for v in out]
 
 
 def main():
@@ -114,29 +147,35 @@ def main():
     else:                           # door bank: sound table in the first 16 bytes
         tone, ps, vags = parse_vab(d, base)
         picks = sound_table(struct.unpack_from("<4I", d, 0))
-    write_bank(tone, ps, vags, picks, dst)
+    write_bank(tone, ps, vags, picks, dst, sixteen="--16bit" in sys.argv)
 
 
-def write_bank(tone, ps, vags, picks, dst):
+def write_bank(tone, ps, vags, picks, dst, sixteen=False):
     """Writes the DS bank: one entry per sound number of picks (or per tone of
     program 0 when picks is None)."""
     entries, pcm = [], bytearray()
     if picks is None:
-        items = [(None, tone(0, i)) for i in range(16) if tone(0, i)["vag"] > 0]
+        items = [(None, tone(0, i), []) for i in range(16) if tone(0, i)["vag"] > 0]
     else:
-        items = [(sid, tone(prog, ti)) for sid, prog, ti in picks if prog < ps]
-    for sound_id, t in items:
+        items = [(sid, tone(prog, ti), [tone(prog, ti + k) for k in range(1, extra + 1) if ti + k < 16])
+                 for sid, prog, ti, extra in picks if prog < ps]
+    for sound_id, t, more in items:
         # the PS1 keys on the tone's lowest note (+ a random 0/1, ignored)
         t = dict(t, note=t["lo"])
         if sound_id is not None:
             t["lo"] = t["hi"] = sound_id
         note = t.get("note", t["lo"] if t["lo"] == t["hi"] else t["centre"])
-        rate = int(round(44100 * 2 ** ((note - t["centre"] + t["fine"] / 128) / 12)))
+        rate = int(round(tone_rate(t, note)))
         samples = decode_vag(vags.get(t["vag"], b""))
+        more = [m for m in more if m["vol"] and m["vag"] > 0]
+        if more:
+            layers = [(samples, rate, t["vol"])]
+            layers += [(decode_vag(vags.get(m["vag"], b"")), tone_rate(m, m["lo"]), m["vol"]) for m in more]
+            samples = mix_layers(layers, rate)
         samples += [0] * (-len(samples) % 4)  # whole words
-        entries.append((t["lo"], t["hi"], min(rate, 65535), len(pcm), len(samples)))
-        pcm += to_8bit(samples)
-    head = struct.pack("<IHH", SOUND_MAGIC, len(entries), FORMAT_8BIT)
+        entries.append((t["lo"], t["hi"], min(rate, 65535), len(pcm), len(samples) * (2 if sixteen else 1)))
+        pcm += struct.pack(f"<{len(samples)}h", *samples) if sixteen else to_8bit(samples)
+    head = struct.pack("<IHH", SOUND_MAGIC, len(entries), 0 if sixteen else FORMAT_8BIT)
     table = b"".join(struct.pack("<BBHII", lo, hi, rate, 0, size) for lo, hi, rate, _, size in entries)
     data_start = len(head) + len(table)
     table = b"".join(struct.pack("<BBHII", lo, hi, rate, data_start + off, size)

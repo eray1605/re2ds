@@ -160,6 +160,34 @@ the shown pose into the new one (`FUN_80028a4c`): per game tick
 `shown = new + (shown - new) * counter / 8`, angles the short way round, root offset too,
 then counter − 1. The DS engine does this for Leon and for all enemies / people.
 
+### Looking at enemies (observed, October 2026)
+
+Leon turns his head to enemies near him. The player routine (`0x80039114`) calls each frame,
+after the state routine:
+
+- `FUN_8003a9e8(obj, 7000, 0x5dc)` picks what he looks at (`obj+0x1b8`), every 46 frames
+  (counter `0x8009c370` = 45): of the objects (from `0x800c7a14`) that are on (flag 1) and
+  not held by a script (status `0xc000`), the nearest standing one within 7000 (`+0x1f0`)
+  whose position lies within ±`0x5dc` of his facing (`FUN_80014fb4`) and that he sees from his
+  head to its head (`FUN_8004d000`, box flags `0x2080`); else the nearest lying one (status
+  `0x2000`, any distance); else himself (straight ahead).
+- `FUN_80017160(obj, facing)` turns the neck part (`obj+0x1c1` = 8, set by the init
+  `0x80039378`) toward the head part of the target (`FUN_80017bac`: the angle about y and up /
+  down). Part 8's `+0x98/+0x9a` (work `+0x5f8/+0x5fa`) is the turn added to its y / z
+  rotation; it moves `0x60` a frame (`+0x9c/+0x9e`) so that the head ends at the wanted angle
+  instead of the animation's, clamped to ±`0x200` from the body's facing (`+0xa0`) and
+  ±`0x138` up or down (`+0xa2`). Looking at himself the turn goes back to 0. The matrix is
+  built with the turn and the part's rotation set back afterwards.
+- `obj+0x1c0` holds it otherwise: bit 1 no looking at all; bits 2 / `0x10` keep the
+  animation's y / z (the hit reactions `0x8003c408` etc. set `0x12` and clear it at their
+  end); `plc_neck` (`scd_op_41`) sets the other modes for scenes (bit 4: a point or an
+  object of the script, `0x40` / `0x20` nodding and shaking).
+
+**DS port:** `update_neck` in `main.c` (after the pose each tick) and `enemy_look_target` /
+`enemy_look_point` in `enemy.c`; the head is turned while drawing part 8. Not while hurt,
+held, dead or under a script (the turn then eases back); `plc_neck` stays ignored. The
+target's head is part 8 of people, zombies and lickers, the root of other kinds.
+
 ---
 
 ## 5. Aiming and firing
@@ -260,6 +288,20 @@ Per frame:
     entry's sound: CORE00.ESP effect 2 sub 0 (handgun casing) `0x0102`, sub 2 (shotgun shell)
     `0x0109` – bank 1 (the weapon's ARMSnn) sound 2 / 9. ARMS02 sound 2 is a 0.29 s clink. The DS plays it
     once per casing, on its first floor contact.
+    The movement (observed, October 2026): the record (24 bytes, the object's copy starts 4 in)
+    holds the handlers (`+4` start `0x0a`, `0x10`; `+6` floor `0x2c`, wall `0x2d`, table
+    `0x80095d00`), the speed growth per frame (bytes `+12..14`: 0, +10, 0 – the gravity) and
+    the start speed (`+16..20`, along the throw / up / sideways): casing 140, −50, 0; shell 80,
+    −20, 0. The start handler `0x8001dda8` adds −0/−10/−20 up and 0..15 sideways; the frame
+    update `FUN_8001d070` adds the speed to the position (turned by the throw direction) and
+    the growth to the speed. On a wall (`0x8002047c`) its way along turns round.
+    The floor test (frame handler `0x10` → `5`, `0x8001d974`) takes the floor from
+    `FUN_8004c348`: 0, the top of a room object (array `0x800c7f20`, not the characters) or of
+    a collision box below; a point inside one counts as on it. The spawn is the hand's world
+    matrix (part 11, `obj+0x198 + 0x48 + 11 * 0xac`). The fire pose (PLW move 10, key 3) puts
+    it about 2770 above the floor, so by this code the casing lands after some 29 frames
+    (1.2 s) - yet in the original the clink comes right after the shot. Unresolved; the DS
+    moves casings two steps a tick (`THROWN_STEPS`, by ear).
 
 ### Phase 4 – reloading (`0x8004237c`)
 

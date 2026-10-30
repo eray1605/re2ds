@@ -87,8 +87,11 @@ static void text(int x, int y, const char *s, int c)
 
 // Message control codes kept by tools/rdt2json.py: '\f' a new page (the
 // PS1 waits for a button, code 0xFD), '\v' a yes / no question (0xFB).
+// '\x01' switches to and back from the colour of names (the PS1's 0xF9 1 /
+// 0xF9 0 around an item's name, 0xF8).
 #define MSG_PAGE '\f'
 #define MSG_CHOICE '\v'
+#define MSG_NAME '\x01'
 static int text_end(char c) { return !c || c == MSG_PAGE || c == MSG_CHOICE; }
 
 // word-wrapped text from (x, y), lines of up to 30 characters, until y_end
@@ -96,18 +99,30 @@ static int text_end(char c) { return !c || c == MSG_PAGE || c == MSG_CHOICE; }
 static const char *text_wrapped(int x, int y, int y_end, const char *s, int c)
 {
     char line[31];
+    int now = c;
     while (!text_end(*s) && y + 8 <= y_end) {
-        int len = 0, last_space = -1;
-        while (!text_end(s[len]) && s[len] != '\n' && len < 30) {
+        int len = 0, shown = 0, last_space = -1;
+        while (!text_end(s[len]) && s[len] != '\n' && shown < 30) {
             if (s[len] == ' ')
                 last_space = len;
+            shown += s[len] != MSG_NAME;
             len++;
         }
         if (!text_end(s[len]) && s[len] != '\n' && last_space > 0)
             len = last_space;
-        memcpy(line, s, len);
-        line[len] = 0;
-        text(x, y, line, c);
+        for (int i = 0, cx = x; i < len;) {
+            if (s[i] == MSG_NAME) {
+                now = now == c ? C_GREEN : c;
+                i++;
+                continue;
+            }
+            int n = 0;
+            while (i < len && s[i] != MSG_NAME)
+                line[n++] = s[i++];
+            line[n] = 0;
+            text(cx, y, line, now);
+            cx += 8 * n;
+        }
         s += len;
         while (*s == ' ' || *s == '\n')
             s++;

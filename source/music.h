@@ -16,3 +16,4 @@ int music_table_get(uint8_t *out, int max);      // the room pairs for a save; b
 void music_table_put(const uint8_t *in, int max);   // from a save
 void music_control(int id, int op, int type, int volume, int pan); // sce_bgm_control
 void music_duck(int on);      // quieter while a voice clip plays
+int music_yield(void);        // no DS channel left for an effect: the quietest note stops (1 if one did)

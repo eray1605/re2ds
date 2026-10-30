@@ -59,10 +59,10 @@ python3 -I tools/enemse2ds.py "$DISC/SLES_009.72" "$DISC/COMMON/SOUND/ENEMSE.VBS
 python3 -I tools/vab2ds.py "$DISC/COMMON/SOUND/CORE00.EDH" build/ds/sound/core00.bin \
     --vb "$DISC/COMMON/SOUND/CORE00.VB" > /dev/null
 
-# weapon sounds (PS1 bank 1): sound/armsNN.bin per weapon id
+# weapon sounds (PS1 bank 1): sound/armsNN.bin per weapon id, 16-bit
 for f in "$DISC"/COMMON/SOUND/ARMS*.EDH; do
     n=$(basename "$f" .EDH | tr 'A-Z' 'a-z')
-    python3 -I tools/vab2ds.py "$f" "build/ds/sound/$n.bin" --vb "${f%.EDH}.VB" > /dev/null
+    python3 -I tools/vab2ds.py "$f" "build/ds/sound/$n.bin" --vb "${f%.EDH}.VB" --16bit > /dev/null
 done
 # Leon with each weapon: model/leon_wNN.bin
 for f in "$DISC"/PL0/PLD/PL00W*.PLW; do

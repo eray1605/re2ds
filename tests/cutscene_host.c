@@ -48,8 +48,10 @@ static void back(const PlcBody *b)
 }
 
 int game_blocked(int32_t a, int32_t b, int32_t c, int32_t d, int32_t y) { (void)a; (void)b; (void)c; (void)d; (void)y; return 0; }
+const RoomBox *game_room_boxes(int *n) { *n = 0; return NULL; }
 int camera_sees(int32_t x, int32_t y, int32_t z, int32_t m) { (void)x; (void)y; (void)z; (void)m; return 1; }
 int camera_occluded(int32_t x, int32_t y, int32_t z) { (void)x; (void)y; (void)z; return 0; }
+int camera_view_area(int32_t x, int32_t z) { (void)x; (void)z; return 1; }
 int cull_models = 0;
 void game_aot_on(int n) { (void)n; }
 int game_busy(void) { return 0; }
@@ -82,7 +84,7 @@ void game_player_killed(void) {}
 void game_blood(int k, int32_t x, int32_t y, int32_t z, int16_t d, int sp, int32_t f) { (void)k; (void)x; (void)y; (void)z; (void)d; (void)sp; (void)f; }
 int game_sight_blocked(int32_t a, int32_t b, int32_t c, int32_t d, int32_t e, int32_t f) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; return 0; }
 int game_enemy_member(int s, int m, int *v) { return enemy_member_get(s, m, v); }
-void game_enemy_member_set(int s, int m, int v) { enemy_member_set(s, m, v); }
+void game_enemy_member_set(int s, int m, int v) { if (getenv("TRACE_MEMBERS")) printf("  member_set enemy %d member %#x = %d\n", s, m, v); enemy_member_set(s, m, v); }
 int game_player_member(int m, int *v)
 {
     switch (m) { case 0x0B: *v = pl.x; return 1; case 0x0D: *v = pl.z; return 1; case 0x0F: *v = pl.dir / 8; return 1; }
@@ -173,7 +175,7 @@ int main(int argc, char **argv)
             if (target >= 0) {
                 int16_t dir = (int16_t)((int)(atan2f((float)-(tz - pl.z), (float)(tx - pl.x)) * 32768.0f / 6.2831853f) & 32767);
                 static const uint16_t dmg[3] = { 16, 15, 14 };
-                printf("t%d  shot -> %d\n", tick, enemy_hit(pl.x, 0, pl.z, dir, 0, 2, dmg, 1));
+                printf("t%d  shot -> %d\n", tick, enemy_hit(pl.x, 0, pl.z, dir, 0, 2, dmg, AIM_DOWN));
             }
         }
         if (tick % 50 == 0) {

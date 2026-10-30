@@ -308,6 +308,10 @@ static void show_camera_view(int cam)
     if (!bg || bg->magic != BG_MAGIC)
         fatal(path);
     decompress(bg + 1, bg_ram, LZ77);
+    // a camera cut stops the main loop for a few frames (reading and
+    // unpacking); the music then caught up with the frames at once and its
+    // notes stumbled (the main hall cuts often): it keeps up between the steps
+    music_frame();
 
     // masks for this camera (optional), into the texture reserved at start
     if (have_masks)
@@ -324,6 +328,7 @@ static void show_camera_view(int cam)
         glColorSubTableEXT(0, 0, 256, 0, 0, masks.palette);
         texture_write(glGetTexturePointer(mask_tex), masks.pixels, 256 * masks.header->tex_height);
     }
+    music_frame();
 
     // The 3D layer shows what was flushed before the last vblank. Render the
     // new view now and flip the background in the same vblank, otherwise
@@ -704,6 +709,16 @@ int camera_sees(int32_t x, int32_t y, int32_t z, int32_t margin)
     return (int32_t)depth;
 }
 
+// The PS1 draws a character (FUN_80026598, Leon and the enemies) only while
+// it stands in the view area of the shown camera, as the room objects. Room
+// scripts park enemies far outside the room until they come in, and some
+// cameras look out there: room 101's camera 2 showed the four zombies that
+// later break through the shop window (at -32000) on top of the shelf.
+int camera_view_area(int32_t x, int32_t z)
+{
+    return in_view_area(cur_cam, x, z);
+}
+
 static void setup_projection(const RoomCamera *c)
 {
     setup_camera(c->from, c->to, c->screen);
@@ -748,10 +763,64 @@ static void update_pose(void)
         pose_blend--;
 }
 
+// Leon looks at enemies near him (the PS1's neck, obj+0x1c0 / 0x1c1 / 0x1b8):
+// every 46 ticks FUN_8003a9e8 picks the nearest he could see (enemy_look_target:
+// within 7000, +-0x5dc of his facing), and FUN_80017160 turns his head (part 8)
+// toward its head each tick, 0x60 at most about y and about z, to at most
+// +-0x200 from his body's facing and +-0x138 up or down (part 8 +0x98..0xa2,
+// set by the init 0x80039378), in place of what the animation does with it.
+// Not while hurt, held, dead or moved by a script.
+#define NECK_BONE 8
+#define NECK_SCAN 45
+#define NECK_RANGE 7000
+#define NECK_CONE 0x5DC
+#define NECK_YAW 0x200
+#define NECK_PITCH 0x138
+#define NECK_SPEED 0x60
+static int neck_target = -1;        // the enemy slot he looks at (obj+0x1b8), -1 = none
+static int neck_scan;               // ticks to the next look round (0x8009c370)
+static int16_t neck_turn[2];        // added to the head's y / z turn, RE2 units (part 8 +0x98 / +0x9a)
+
+static int angle12(int a) { return ((a + 2048) & 4095) - 2048; } // RE2 angle as -2048..2047
+static int clamp_abs(int v, int m) { return v > m ? m : v < -m ? -m : v; }
+
+static void leon_point(int bone, const int32_t local[3], int32_t out[3]);
+
+static void update_neck(void)
+{
+    static const int32_t at[3];
+    int32_t head[3], t[3];
+    int want[2] = { 0, 0 };
+    leon_point(NECK_BONE, at, head);
+    if (player.state >= ST_HURT) {
+        neck_target = -1;
+        neck_scan = 0;
+    } else if (--neck_scan < 0) {
+        neck_scan = NECK_SCAN;
+        neck_target = enemy_look_target(head[0], head[1], head[2], player.dir, NECK_RANGE, NECK_CONE);
+    }
+    if (neck_target >= 0 && enemy_look_point(neck_target, &t[0], &t[1], &t[2])) {
+        // the head's turn wanted (FUN_80017bac), from the body's facing and up / down
+        float dx = (float)(t[0] - head[0]), dz = (float)(t[2] - head[2]);
+        int yaw = (int)(atan2f(-dz, dx) * 4096.0f / 6.2831853f);
+        int up = (int)(atan2f((float)(head[1] - t[1]), sqrtf(dx * dx + dz * dz)) * 4096.0f / 6.2831853f);
+        int body = player.dir / 8 + pose_rot[0][1] / 8;
+        want[0] = angle12(clamp_abs(angle12(yaw - body), NECK_YAW) - pose_rot[NECK_BONE][1] / 8);
+        want[1] = angle12(clamp_abs(-up, NECK_PITCH) - pose_rot[NECK_BONE][2] / 8);
+    }
+    for (int k = 0; k < 2; k++)
+        neck_turn[k] += clamp_abs(angle12(want[k] - neck_turn[k]), NECK_SPEED);
+}
+
 static void draw_bone(int bone)
 {
     const ModelBone *b = &leon.bones[bone];
     const int32_t *rot = pose_rot[bone < POSE_MAX_BONES ? bone : 0];
+    int32_t turn_y = rot[1], turn_z = rot[2];
+    if (bone == NECK_BONE) {
+        turn_y = (turn_y + neck_turn[0] * 8) & 32767;
+        turn_z = (turn_z + neck_turn[1] * 8) & 32767;
+    }
 
     glPushMatrix();
     if (b->parent < 0)
@@ -759,8 +828,8 @@ static void draw_bone(int bone)
     else
         glTranslatef32(b->pos[0], b->pos[1], b->pos[2]);
     glRotateXi(rot[0]);
-    glRotateYi(rot[1]);
-    glRotateZi(rot[2]);
+    glRotateYi(turn_y);
+    glRotateZi(turn_z);
 
     for (int p = 0; p < leon.header->num_pages; p++) {
         uint32_t off = leon.lists[bone * leon.header->num_pages + p];
@@ -1240,12 +1309,12 @@ static int slope_inside(const RoomBox *b, int32_t x, int32_t z)
 // height above the bottom edge at (x, z)
 static int32_t slope_rise(const RoomBox *b, int32_t x, int32_t z)
 {
-    int32_t frac; // 0..4096 from the bottom edge
+    int32_t frac; // 0..4096 from the bottom edge (beyond it outside the box)
     switch ((b->type >> 4) & 3) {
-    case 0: frac = ((x - b->x) << 12) / b->w; break;
-    case 1: frac = ((b->x + b->w - x) << 12) / b->w; break;
-    case 2: frac = ((z - b->z) << 12) / b->d; break;
-    default: frac = ((b->z + b->d - z) << 12) / b->d; break;
+    case 0: frac = (x - b->x) * 4096 / b->w; break;
+    case 1: frac = (b->x + b->w - x) * 4096 / b->w; break;
+    case 2: frac = (z - b->z) * 4096 / b->d; break;
+    default: frac = (b->z + b->d - z) * 4096 / b->d; break;
     }
     int floors = b->shape == SHAPE_SLOPE ? 1 : (b->type >> 6) & 31;
     return (floors * FLOOR_HEIGHT * frac) >> 12;
@@ -1257,15 +1326,28 @@ static int32_t slope_rise(const RoomBox *b, int32_t x, int32_t z)
 // reaches over the steps would stop him (room 103: a floor 2 wall over the
 // top steps, going up only - going down he started inside it and walked out).
 // The walls beside the stairs are on all their floors and still count.
+// The step onto stairs counts as on them, their bottom as seen from where
+// Leon stands: taken as his own floor, the floor 0 box under room 200's
+// entrance landing, which reaches over the top steps, stopped him at the
+// bottom step whenever a step went from before the stairs to past its edge.
 static uint32_t player_floors(int32_t x, int32_t z)
 {
-    if (player.slope >= 0) {
-        const RoomBox *b = &room.boxes[player.slope];
-        if (b->shape == SHAPE_STAIRS && slope_inside(b, x, z)) {
-            int32_t h = -(player.slope_base + slope_rise(b, x, z)); // above floor 0
-            int lo = h > 0 ? h / -FLOOR_HEIGHT : 0, hi = h > 0 ? (h - FLOOR_HEIGHT - 1) / -FLOOR_HEIGHT : 0;
-            return (1u << (lo > 31 ? 31 : lo)) | (1u << (hi > 31 ? 31 : hi));
+    int s = player.slope;
+    int32_t base = player.slope_base;
+    if (s < 0 || !slope_inside(&room.boxes[s], x, z)) {
+        s = -1;
+        for (int i = 0; i < room.header->num_boxes && s < 0; i++) {
+            const RoomBox *b = &room.boxes[i];
+            if (b->shape == SHAPE_STAIRS && slope_inside(b, x, z)) {
+                s = i;
+                base = player.y - slope_rise(b, player.x, player.z);
+            }
         }
+    }
+    if (s >= 0 && room.boxes[s].shape == SHAPE_STAIRS) {
+        int32_t h = -(base + slope_rise(&room.boxes[s], x, z)); // above floor 0
+        int lo = h > 0 ? h / -FLOOR_HEIGHT : 0, hi = h > 0 ? (h - FLOOR_HEIGHT - 1) / -FLOOR_HEIGHT : 0;
+        return (1u << (lo > 31 ? 31 : lo)) | (1u << (hi > 31 ? 31 : hi));
     }
     return 1u << player_floor();
 }
@@ -1378,56 +1460,305 @@ static void place_player(int32_t x, int32_t y, int32_t z, int16_t dir, int cam)
     player.anim = -1;
     set_anim(ANIM_IDLE);
     pose_anim = -1;
+    neck_target = -1;
+    neck_scan = 0;
+    neck_turn[0] = neck_turn[1] = 0;
     cam = cut_replace(cam);
     set_camera(cam < room.header->num_cameras ? cam : 0);
 }
 
 // ---------------------------------------------------------------- terminals
-// AOT type 14 (0x8004edb0) starts a computer program (0x80036a90): the door
-// lock service of the main hall (terminal_door_lock_service 0x80037c6c) for
-// data & 3 == 0. Its screens here are messages: the hall's side doors are
-// released (flag 4:0x46) with the Blue Card Key, which is used up.
+// AOT type 14 (FUN_8004edb0) starts a computer program (0x80036a90): data[0]
+// & 3 picks it (0 the main hall's door lock service 0x80037c6c, 1 the
+// fingerprint check 0x800384dc), data[2] is the room's camera that shows the
+// computer (FUN_80038a60 cuts to it, 0x80038b90 back at the end). A window
+// opens on it over 12 frames (FUN_800373c0: (12, 10) + 252 x 139 of the PS1's
+// 320 x 240, room sound 6; closing sound 7) and the program types into it a
+// character a frame with room sound 0x10 (FUN_80037510): 30 x 12 characters
+// of 8 x 10 from (16, 21), "|n" colour n, "]" a new line, "[nnn" waits nnn
+// frames, "^nn" goes nn back, below the 12th line it scrolls (FUN_8003781c).
+// After a text it waits for a button. The door lock service: the doors'
+// state, the Blue Card Key (item 0x35, used up; flag 4:0x46), then it shows
+// the doors: camera 9, 60 frames, the lock (room sound 0x12), 60 frames,
+// camera 2 the same, back to the screen.
+// On the DS the text goes into the background picture (the PS1 draws it as
+// sprites): the 8 x 8 font squeezed to 6 columns (x 0.8), on five of the
+// picture's least used palette entries. The PS1's colours (CLUT 0x7b40 + n)
+// are not looked up: white, green and red.
 #define ITEM_BLUE_CARD_KEY 0x35
+#define TERM_COLS 30
+#define TERM_ROWS 12
+#define TERM_OPEN 12                    // frames the window takes to open / close
+#define TERM_X(c) (13 + (c) * 32 / 5)   // (16 + 8 c) * 0.8
+#define TERM_Y(r) (17 + (r) * 8)        // (21 + 10 r) * 0.8
+#define TERM_WIN_X 10                   // (12, 10) + 252 x 139, * 0.8
+#define TERM_WIN_Y 8
+#define TERM_WIN_W 201
+#define TERM_WIN_H 111
+#define SND_TERM_OPEN 6
+#define SND_TERM_CLOSE 7
+#define SND_TERM_KEY 0x10
+#define SND_TERM_LOCK 0x12
+enum { TS_OPEN, TS_TITLE, TS_STATE, TS_HINT, TS_CARD, TS_ANSWER, TS_CHECK, TS_DOORS, TS_DONE, TS_CLOSE };
+enum { TC_FILL, TC_FRAME, TC_TEXT };    // palette slots; TC_TEXT + colour 0..2
+static const uint16_t term_rgb[5] = { RGB15(0, 0, 13), RGB15(20, 22, 26), RGB15(28, 28, 28), RGB15(8, 30, 8),
+                                      RGB15(31, 8, 6) };
+static const int term_door_cams[2] = { 9, 2 };
 static struct {
-    int active, step;
+    uint8_t active, step, open, done, key, dirty;
+    int prev_cam, screen_cam;
+    char ch[TERM_ROWS][TERM_COLS];
+    uint8_t colour[TERM_ROWS][TERM_COLS];
+    int col, row, colour_now, delay, blink, wait;
+    const char *text, *at;
+    uint8_t pal[5];                     // palette entries of term_rgb
 } term;
+static uint8_t term_fb[BG_BYTES] __attribute__((aligned(32)));
+extern const u8 default_font_bin[]; // libnds' 8 x 8 console font (menu.c too)
+static int8_t term_drop[128];           // the font column a glyph does without (0 = not worked out)
+
+static void terminal_clear(void)
+{
+    memset(term.ch, ' ', sizeof(term.ch));
+    memset(term.colour, 0, sizeof(term.colour));
+    term.col = term.row = term.colour_now = 0;
+    term.dirty = 1;
+}
+
+// five of the picture's least used palette entries for the window, the
+// colours they had go to their nearest other entry
+static void terminal_palette(void)
+{
+    static uint32_t used[256];
+    memset(used, 0, sizeof(used));
+    for (int i = 0; i < 256 * 192; i++)
+        used[bg_ram[i]]++;
+    uint8_t pick[256] = { 0 };
+    for (int k = 0; k < 5; k++) {
+        int best = 1;
+        for (int c = 2; c < 256; c++)
+            if (!pick[c] && (pick[best] || used[c] < used[best]))
+                best = c;
+        pick[best] = 1;
+        term.pal[k] = (uint8_t)best;
+    }
+    uint8_t map[256];
+    for (int c = 0; c < 256; c++) {
+        map[c] = (uint8_t)c;
+        if (!pick[c])
+            continue;
+        int r = BG_PALETTE[c] & 31, g = BG_PALETTE[c] >> 5 & 31, b = BG_PALETTE[c] >> 10 & 31, best = -1, best_d = 0;
+        for (int o = 1; o < 256; o++) {
+            if (pick[o])
+                continue;
+            int dr = r - (BG_PALETTE[o] & 31), dg = g - (BG_PALETTE[o] >> 5 & 31), db = b - (BG_PALETTE[o] >> 10 & 31);
+            int dist = dr * dr + dg * dg + db * db;
+            if (best < 0 || dist < best_d) {
+                best = o;
+                best_d = dist;
+            }
+        }
+        map[c] = (uint8_t)(best < 0 ? 0 : best);
+    }
+    for (int i = 0; i < 256 * 192; i++)
+        bg_ram[i] = map[bg_ram[i]];
+    for (int k = 0; k < 5; k++)
+        BG_PALETTE[term.pal[k]] = term_rgb[k];
+}
+
+// a glyph of the 8 x 8 font (bit i = column i, column 0 blank) in 6
+// columns: without the one whose pixels its neighbours mostly have
+static void terminal_glyph(int x, int y, int c, uint8_t colour)
+{
+    if (c < 33 || c > 126)
+        return;
+    const uint8_t *g = default_font_bin + c * 8;
+    if (!term_drop[c]) {
+        int best = 1, best_lost = 99;
+        for (int k = 1; k < 8; k++) {
+            int lost = 0;
+            for (int j = 0; j < 8; j++)
+                if ((g[j] >> k & 1) && !(k > 1 && (g[j] >> (k - 1) & 1)) && !(k < 7 && (g[j] >> (k + 1) & 1)))
+                    lost++;
+            if (lost < best_lost) {
+                best = k;
+                best_lost = lost;
+            }
+        }
+        term_drop[c] = (int8_t)best;
+    }
+    for (int j = 0; j < 8; j++)
+        for (int i = 1, tx = 0; i < 8; i++) {
+            if (i == term_drop[c])
+                continue;
+            if (g[j] >> i & 1)
+                term_fb[(y + j) * 256 + x + tx] = colour;
+            tx++;
+        }
+}
+
+// the screen camera's picture with the window and the text, to the BG
+static void terminal_draw(void)
+{
+    memcpy(term_fb, bg_ram, 256 * 192);
+    // opens from the top left, shrinks toward the bottom right (FUN_800373c0)
+    int w = TERM_WIN_W * term.open / TERM_OPEN, h = TERM_WIN_H * term.open / TERM_OPEN;
+    int x0 = term.step == TS_CLOSE ? TERM_WIN_X + TERM_WIN_W - w : TERM_WIN_X;
+    int y0 = term.step == TS_CLOSE ? TERM_WIN_Y + TERM_WIN_H - h : TERM_WIN_Y;
+    for (int y = y0; y < y0 + h; y++)
+        for (int x = x0; x < x0 + w; x++)
+            term_fb[y * 256 + x] =
+                term.pal[(y == y0 || y == y0 + h - 1 || x == x0 || x == x0 + w - 1) ? TC_FRAME : TC_FILL];
+    if (term.open == TERM_OPEN && term.step != TS_CLOSE) {
+        for (int r = 0; r < TERM_ROWS; r++)
+            for (int c = 0; c < TERM_COLS; c++)
+                terminal_glyph(TERM_X(c), TERM_Y(r), term.ch[r][c], term.pal[TC_TEXT + term.colour[r][c]]);
+        if (term.text && !term.done && (term.blink & 0x10) && term.row < TERM_ROWS && term.col < TERM_COLS)
+            for (int j = 6; j < 8; j++) // the cursor
+                memset(term_fb + (TERM_Y(term.row) + j) * 256 + TERM_X(term.col), term.pal[TC_TEXT + term.colour_now], 6);
+    }
+    DC_FlushRange(term_fb, 256 * 192);
+    dmaCopy(term_fb, BG_GFX, 256 * 192);
+}
+
+// types s, a character a frame (FUN_80037510); 1 when all of it is there
+static int terminal_type(const char *s)
+{
+    if (term.text != s) {
+        term.text = term.at = s;
+        term.done = term.key = 0;
+        term.delay = 1;
+    }
+    if (term.done)
+        return 1;
+    if (--term.delay > 0)
+        return 0;
+    term.delay = 1;
+    for (;;) {
+        char c = *term.at++;
+        int shown = 0;
+        if (!c) {
+            term.at--;
+            term.done = 1;
+            return 1;
+        }
+        if (c == '[') { // waits nnn frames
+            term.delay = (term.at[0] - '0') * 100 + (term.at[1] - '0') * 10 + (term.at[2] - '0');
+            term.at += 3;
+            return 0;
+        }
+        if (c == ']') {
+            term.col = 0;
+            term.row++;
+        } else if (c == '|') {
+            term.colour_now = (*term.at++ - '0') % 3;
+        } else if (c == '^') {
+            term.col -= (term.at[0] - '0') * 10 + (term.at[1] - '0');
+            term.at += 2;
+            if (term.col < 0)
+                term.col = 0;
+        } else {
+            term.ch[term.row][term.col] = c;
+            term.colour[term.row][term.col] = (uint8_t)term.colour_now;
+            term.col++;
+            shown = 1;
+        }
+        if (term.col >= TERM_COLS) {
+            term.col = 0;
+            term.row++;
+        }
+        if (term.row >= TERM_ROWS) { // scrolls a line up
+            memmove(term.ch[0], term.ch[1], sizeof(term.ch[0]) * (TERM_ROWS - 1));
+            memmove(term.colour[0], term.colour[1], sizeof(term.colour[0]) * (TERM_ROWS - 1));
+            memset(term.ch[TERM_ROWS - 1], ' ', TERM_COLS);
+            memset(term.colour[TERM_ROWS - 1], 0, TERM_COLS);
+            term.row = TERM_ROWS - 1;
+        }
+        term.dirty = 1;
+        if (shown) {
+            game_play_sound(2, SND_TERM_KEY);
+            return 0;
+        }
+    }
+}
+
+// a text, then a button
+static int terminal_text(const char *s)
+{
+    return terminal_type(s) && term.key;
+}
+
+static void terminal_go(int step)
+{
+    term.step = (uint8_t)step;
+    term.text = NULL;
+    term.done = term.key = 0;
+    term.wait = 0;
+}
+
+static void terminal_screen(void)
+{
+    set_camera(term.screen_cam);
+    terminal_palette();
+    term.dirty = 1;
+}
 
 static void terminal_start(const Aot *a)
 {
-    int program = (a->data[0] | a->data[2] << 4) & 3;
-    if (program != 0) {
+    int program = a->data[0] & 3;
+    if (program != 0 || a->data[2] >= room.header->num_cameras) {
         game_show_message("The computer does not respond.");
         return; // 1: the fingerprint check (terminal_rodem_fingerprint), not ported yet
     }
+    memset(&term, 0, sizeof(term));
     term.active = 1;
-    term.step = 0;
+    term.prev_cam = cur_cam;
+    term.screen_cam = a->data[2];
+    terminal_clear();
+    terminal_screen();
+    game_play_sound(2, SND_TERM_OPEN);
+    terminal_go(TS_OPEN);
 }
 
 int game_busy(void) { return term.active; }
 
-// one step whenever no message is open
-static void terminal_step(void)
+// one PS1 frame of the door lock service (terminal_door_lock_service)
+static void terminal_tick(void)
 {
-    switch (term.step++) {
-    case 0:
+    term.blink++;
+    switch (term.step) {
+    case TS_OPEN:
+        term.dirty = 1;
+        if (++term.open >= TERM_OPEN)
+            terminal_go(TS_TITLE);
+        break;
+    case TS_TITLE:
+        if (terminal_text("DOOR LOCK SERVICE]------------------------------"))
+            terminal_go(TS_STATE);
+        break;
+    case TS_STATE:
         if (flag_get(4, 0x46)) {
-            game_show_message("DOOR LOCK SERVICE\n------------------------------\fHall side doors: RELEASED");
-            term.step = 9;
-        } else {
-            game_show_message("DOOR LOCK SERVICE\n------------------------------\fHall side doors: LOCKED\f"
-                              "The doors can be unlocked\nby a CARD KEY.");
+            if (terminal_text("Hall side doors:      |2RELEASED|0]"))
+                terminal_go(TS_CLOSE);
+        } else if (terminal_text("Hall side doors:      |2LOCKED|0]")) {
+            terminal_go(TS_HINT);
         }
         break;
-    case 1:
-        if (!inventory_has(ITEM_BLUE_CARD_KEY)) {
-            term.active = 0;
-            break;
-        }
-        game_show_message("Will you use the Blue Card Key?\v");
+    case TS_HINT:
+        if (terminal_text("]The doors can be unlocked]by a |2CARD KEY|0.]"))
+            terminal_go(flag_get(4, 0x46) ? TS_CLOSE : TS_CARD);
         break;
-    case 2:
-        if (flag_get(11, 0x1F)) { // no
-            term.active = 0;
+    case TS_CARD: // the PS1 asks on the status screen (FUN_8002f2bc)
+        if (inventory_has(ITEM_BLUE_CARD_KEY))
+            game_show_message("Will you use the Blue Card Key?\v");
+        else
+            flag_set(11, 0x1F, 1);
+        terminal_go(TS_ANSWER);
+        break;
+    case TS_ANSWER:
+        if (!inventory_has(ITEM_BLUE_CARD_KEY) || flag_get(11, 0x1F)) { // none, or no
+            terminal_type("]");
+            terminal_go(TS_CLOSE);
             break;
         }
         flag_set(4, 0x46, 1);
@@ -1439,13 +1770,44 @@ static void terminal_step(void)
                     inventory_equipped = -1;
                 break;
             }
-        game_play_sound(2, 0x12); // the locks (FUN_80057364(0x2120000))
-        game_show_message("Checking up ID CARD.....\fOK!\nHall side doors lock released.");
-        term.step = 9;
+        terminal_go(TS_CHECK);
         break;
-    default:
-        term.active = 0;
+    case TS_CHECK:
+        if (terminal_type("]Checking up ID CARD[025.[025.[025.[025."))
+            terminal_go(TS_DOORS);
         break;
+    case TS_DOORS: { // 60 frames each: a door, its lock, again
+        int shot = term.wait / 120, t = term.wait % 120;
+        if (shot < 2 && t == 0)
+            set_camera(term_door_cams[shot]);
+        if (shot < 2 && t == 60)
+            game_play_sound(2, SND_TERM_LOCK);
+        if (++term.wait >= 240) {
+            terminal_screen();
+            terminal_go(TS_DONE);
+        }
+        break;
+    }
+    case TS_DONE:
+        if (terminal_text("]OK!]Hall side doors lock released."))
+            terminal_go(TS_CLOSE);
+        break;
+    case TS_CLOSE:
+        if (term.open == TERM_OPEN && !term.wait)
+            game_play_sound(2, SND_TERM_CLOSE);
+        term.wait = 1;
+        term.dirty = 1;
+        if (term.open-- <= 1) { // closed: back to where Leon is
+            term.open = 0;
+            term.active = 0;
+            set_camera(term.prev_cam);
+            return;
+        }
+        break;
+    }
+    if ((term.dirty || term.text) && term.step != TS_DOORS && cur_cam == term.screen_cam) {
+        terminal_draw();
+        term.dirty = 0;
     }
 }
 
@@ -1914,6 +2276,13 @@ int game_blocked(int32_t from_x, int32_t from_z, int32_t x, int32_t z, int32_t y
     int b = blocked_for(BOX_ENEMY, 1u << player_floor(), from_x, from_z, x, z);
     player.y = saved;
     return b;
+}
+
+// the room's collision boxes (enemy.c: the lickers crawl along their sides)
+const RoomBox *game_room_boxes(int *count)
+{
+    *count = room.data ? room.header->num_boxes : 0;
+    return room.boxes;
 }
 
 void game_play_sound(int bank, int sound)
@@ -2729,13 +3098,63 @@ static void start_game(void)
     new_game();
 }
 
+// The room file's spawn point (tools/room2ds.py) is the middle of a camera's
+// view area at height 0: in the 27 rooms on another floor (103 at -5400, the
+// sewers) Leon stood in the ground or out of sight. A warp arrives as through
+// a door instead: where a neighbouring room's door into this room puts Leon,
+// with its facing and camera. Doors that leave the height to the room's
+// script (-32000, the lifts) are passed over; the rooms no door leads into
+// (11C, 11D, 40C, 509, 600) keep the spawn point.
+#define WARP_SCRIPTED_Y -32000
+
+static int warp_entry(int stage, int id, int32_t pos[3], int16_t *dir, int *cam)
+{
+    char path[48];
+    Room here, next;
+    snprintf(path, sizeof(path), "nitro:/room/room%d%02x0.bin", stage, id);
+    if (!room_load(&here, path))
+        return 0;
+    int found = 0;
+    for (int i = 0; i < here.header->num_doors && !found; i++) {
+        const RoomDoor *d = &here.doors[i];
+        snprintf(path, sizeof(path), "nitro:/room/room%d%02x0.bin", d->next_stage, d->next_room);
+        if (!room_load(&next, path))
+            continue;
+        for (int k = 0; k < next.header->num_doors && !found; k++) {
+            const RoomDoor *b = &next.doors[k];
+            if (b->next_stage != stage || b->next_room != id || b->next[1] <= WARP_SCRIPTED_Y)
+                continue;
+            pos[0] = b->next[0];
+            pos[1] = b->next[1];
+            pos[2] = b->next[2];
+            *dir = (int16_t)b->next_dir;
+            *cam = b->next_camera;
+            found = 1;
+        }
+        asset_free(next.data);
+    }
+    asset_free(here.data);
+    return found;
+}
+
 static void warp_to(int index)
 {
     const RoomRef *r = &room_index[index];
+    int32_t pos[3];
+    int16_t dir;
+    int cam;
+    int door = warp_entry(r->stage, r->room, pos, &dir, &cam);
     fade(1);
-    enter_room(r->stage, r->room, -1);
-    const RoomHeader *h = room.header;
-    place_player(h->spawn[0], h->spawn[1], h->spawn[2], h->spawn_dir, h->start_camera);
+    enter_room(r->stage, r->room, door ? cam : -1);
+    if (!door) {
+        const RoomHeader *h = room.header;
+        pos[0] = h->spawn[0];
+        pos[1] = h->spawn[1];
+        pos[2] = h->spawn[2];
+        dir = h->spawn_dir;
+        cam = h->start_camera;
+    }
+    place_player(pos[0], pos[1], pos[2], dir, cam);
     objects_ready = 1;
     upload_objects();
     fade(-1);
@@ -2803,9 +3222,33 @@ static void use_door(const Aot *a)
     fade(-1);
 }
 
+// An item (AOT handler 0x8004e02c): the PS1 opens the status screen as
+// "item found" (0x800cd750 = 2) with the item's picture and asks "Will you
+// take the <item>?" (the system message at 0x80098bf0, the name in the names'
+// colour); taken only on YES, "You can't carry any more items." when the
+// slots are full. (Data byte 7 bit 0 makes Leon crouch for it first, player
+// routine 6; not here.) The answer comes in flag 11:0x1F when the box closes.
+static Aot *pickup;
+
+static void pickup_step(void)
+{
+    Aot *a = pickup;
+    pickup = NULL;
+    if (!a->active || flag_get(11, 0x1F))
+        return; // no
+    int item = a->data[0] | a->data[1] << 8, amount = a->data[2] | a->data[3] << 8;
+    if (!inventory_add(item, amount)) {
+        game_show_message("You can't carry any\nmore items.");
+        return;
+    }
+    flag_set(FLAGS_ITEM_PICKED, a->data[4] | a->data[5] << 8, 1);
+    a->active = 0;
+    game_object_hide(a->data[6]);
+}
+
 static void trigger(Aot *a)
 {
-    static char text[64];
+    static char text[96];
     switch (a->type) {
     case SCE_TERMINAL:
         terminal_start(a);
@@ -2827,14 +3270,9 @@ static void trigger(Aot *a)
             game_show_message(text);
             break;
         }
-        if (!inventory_add(item, amount)) {
-            game_show_message("You cannot carry any more.");
-            break;
-        }
-        flag_set(FLAGS_ITEM_PICKED, picked, 1);
-        a->active = 0;
-        game_object_hide(a->data[6]);
-        snprintf(text, sizeof(text), "You picked up the %s.", item_name(item));
+        (void)amount;
+        pickup = a;
+        snprintf(text, sizeof(text), "Will you take the\n\x01%s\x01?\v", item_name(item));
         game_show_message(text);
         menu_picture(item);
         break;
@@ -2945,19 +3383,25 @@ typedef struct {
     uint8_t load_event;       // which reload event loads
     uint8_t pump_key[3];      // fire move keyframe (straight / up / down) with a sound; 0 = none
     uint8_t pump_sound;
+    uint8_t hit_keys;         // fire move keys with a hit check (bit n: key n; 0 = the shot)
 } Weapon;
 static const Weapon weapons[] = {
-    { 0x01, 1500, { 3, 0, 0 }, 50, { 0 }, { 0 }, 1, { 0 }, 0 },                       // knife
-    { 0x02, 0, { 16, 15, 14 }, 8, { 7, 22 }, { 4, 3 }, 1, { 0 }, 0 },                  // H&K VP70
-    { 0x03, 0, { 16, 15, 14 }, 8, { 7, 22 }, { 4, 3 }, 1, { 0 }, 0 },                  // Browning (no move 16 in its PLW)
-    { 0x04, 0, { 16, 15, 14 }, 15, { 7, 23 }, { 3, 3 }, 1, { 0 }, 0 },                 // custom handgun
-    { 0x05, 0, { 900, 900, 900 }, 30, { 7, 22 }, { 4, 3 }, 1, { 0 }, 0 },              // magnum
-    { 0x06, 0, { 900, 900, 900 }, 50, { 7, 22 }, { 4, 3 }, 1, { 0 }, 0 },              // custom magnum
-    { 0x07, 0, { 200, 60, 40 }, 30, { 28, 42 }, { 3, 3 }, 0, { 23, 26, 26 }, 4 },      // shotgun
-    { 0x08, 0, { 300, 80, 60 }, 40, { 27, 42, 56 }, { 3, 3, 3 }, 0, { 0 }, 0 },        // custom shotgun
-    { 0x0F, 0, { 4, 4, 4 }, 0, { 8, 30 }, { 4, 3 }, 1, { 0 }, 0 },                      // sub machine gun
-    { 0x10, 4000, { 15, 15, 15 }, 0, { 11, 25 }, { 3, 3 }, 1, { 0 }, 0 },               // flamethrower
+    { 0x01, 1500, { 3, 0, 0 }, 50, { 0 }, { 0 }, 1, { 0 }, 0, 0x01 },                       // knife
+    { 0x02, 0, { 16, 15, 14 }, 8, { 7, 22 }, { 4, 3 }, 1, { 0 }, 0, 0x01 },                  // H&K VP70
+    { 0x03, 0, { 16, 15, 14 }, 8, { 7, 22 }, { 4, 3 }, 1, { 0 }, 0, 0x01 },                  // Browning (no move 16 in its PLW)
+    { 0x04, 0, { 16, 15, 14 }, 15, { 7, 23 }, { 3, 3 }, 1, { 0 }, 0, 0x01 },                 // custom handgun
+    { 0x05, 0, { 900, 900, 900 }, 30, { 7, 22 }, { 4, 3 }, 1, { 0 }, 0, 0x01 },              // magnum
+    { 0x06, 0, { 900, 900, 900 }, 50, { 7, 22 }, { 4, 3 }, 1, { 0 }, 0, 0x07 },              // custom magnum
+    { 0x07, 0, { 200, 60, 40 }, 30, { 28, 42 }, { 3, 3 }, 0, { 23, 26, 26 }, 4, 0x15 },      // shotgun
+    { 0x08, 0, { 300, 80, 60 }, 40, { 27, 42, 56 }, { 3, 3, 3 }, 0, { 0 }, 0, 0x55 },        // custom shotgun
+    { 0x0F, 0, { 4, 4, 4 }, 0, { 8, 30 }, { 4, 3 }, 1, { 0 }, 0, 0x01 },                      // sub machine gun
+    { 0x10, 4000, { 15, 15, 15 }, 0, { 11, 25 }, { 3, 3 }, 1, { 0 }, 0, 0x01 },               // flamethrower
 };
+// hit_keys: the frame list of the shot shape (table 0x8009ea60 + weapon * 0x18,
+// second word; pairs of box set and frames, 0xFF a pause or with 0xFF frames
+// the end) as FUN_8003dd8c walks it from the shot's first frame: the shotgun
+// checks on frames 1, 3, 5 (00 01 ff 01 00 01 ff 01 00 01 ff 01 00 ff), the
+// custom shotgun 1, 3, 5, 7, the custom magnum 1, 2, 3, the others once.
 enum { PLW_RELOAD = 16 };
 // The sub machine gun and the flamethrower fire as long as A is held (handler
 // 0x800442cc, phases 0x8009f148): their PLW has aim 12 / 15 / 18, fire 10 /
@@ -3081,14 +3525,20 @@ static void leon_point(int bone, const int32_t local[3], int32_t out[3])
 // loops to 9). Its sub effect table converts badly (all point at frame 22),
 // so the frames are named here.
 // The bounce sound is in the effect's movement entry: weapon sound 2 for the
-// casing (sub 0, 0x0102), 9 for the shell (sub 2, 0x0109).
+// casing (sub 0, 0x0102), 9 for the shell (sub 2, 0x0109). So are the start
+// speeds (+0x0c along the throw, +0x0e up): the casing 140 and -50, the shell
+// 80 and -20; the entry's start handler (FUN_8001dda8) adds -0 / -10 / -20 up
+// and 0..15 sideways at random.
 enum { CASING_HANDGUN = 0, CASING_SHELL = 9 };
 enum { SND_CASING = 2, SND_SHELL = 9 };
 static void throw_casing(int first, int dir_re2, const int32_t p[3])
 {
     int16_t dir = player.dir + dir_re2 * 8;
-    roomfx_throw(2, first, 0, p[0], p[1], p[2], (30 * cosLerp(dir)) >> 12, -45, -((30 * sinLerp(dir)) >> 12),
-                 player.y, 4096 * 3 / 10, first == CASING_SHELL ? SND_SHELL : SND_CASING);
+    int shell = first == CASING_SHELL;
+    int32_t on = shell ? 80 : 140, up = (shell ? -20 : -50) - (rand() % 3) * 10, side = (rand() & 3) * 5;
+    int32_t c = cosLerp(dir), s = sinLerp(dir);
+    roomfx_throw(2, first, 0, p[0], p[1], p[2], (c * on + s * side) >> 12, up, (c * side - s * on) >> 12, player.y,
+                 4096 * 3 / 10, shell ? SND_SHELL : SND_CASING);
 }
 
 // The frame handlers 0x8009f0bc[weapon] as data: on a fire move keyframe,
@@ -3233,7 +3683,7 @@ static void fire(void)
         slot->count--;
     player.anim = PLW_FIRST + plw_fire[player.aim_posture];
     sound_play(weapon_bank, 0, 127, 64);
-    enemy_hit(player.x, player.y, player.z, player.dir, w->range, w->item, w->damage, player.aim_posture == 2);
+    enemy_hit(player.x, player.y, player.z, player.dir, w->range, w->item, w->damage, player.aim_posture);
 }
 
 // One tick of continuous fire (phase 2, 0x80044584, frame handlers SMG
@@ -3278,7 +3728,7 @@ static void auto_fire_tick(const Weapon *w)
     player.shot = 1;
     // the hit check, once per lock time
     if (w->item == 0x0F || k % 5 == 0)
-        enemy_hit(player.x, player.y, player.z, player.dir, w->range, w->item, w->damage, player.aim_posture == 2);
+        enemy_hit(player.x, player.y, player.z, player.dir, w->range, w->item, w->damage, player.aim_posture);
     int32_t p[3];
     if (w->item == 0x0F) {
         if (k % 3 == 1) { // a shot: flash and fire at the muzzle
@@ -3560,6 +4010,9 @@ static void update_player_tick(void)
             player.key++;
             const Weapon *w = st == ST_FIRE ? weapon_in_hand() : NULL;
             if (w && w->item != 0x01) {
+                if (player.key < 8 && (w->hit_keys >> player.key & 1)) // the shot shape's later checks
+                    enemy_hit(player.x, player.y, player.z, player.dir, w->range, w->item, w->damage,
+                              player.aim_posture);
                 shot_effects(w);
                 // EDD flag 0x100000 on the fire move: the pump
                 if (w->pump_key[player.aim_posture] && player.key == w->pump_key[player.aim_posture])
@@ -3789,11 +4242,18 @@ int main(void)
             update_menu(down);
         if (!menu_open && !paused) {
             pending_keys |= down;
-            update_player_frame(keysHeld(), down);
-            if (term.active && !menu_message_open())
-                terminal_step();
-            for (game_tick_acc += GAME_HZ; game_tick_acc >= DS_HZ && !message_text && !term.active;
-                 game_tick_acc -= DS_HZ) {
+            if (!term.active)
+                update_player_frame(keysHeld(), down);
+            if (pickup && !menu_message_open())
+                pickup_step();
+            game_tick_acc += GAME_HZ;
+            if (term.active && term.done && (down & (KEY_A | KEY_B | KEY_TOUCH)))
+                term.key = 1;
+            while (term.active && !menu_message_open() && game_tick_acc >= DS_HZ) {
+                game_tick_acc -= DS_HZ;
+                terminal_tick();
+            }
+            for (; game_tick_acc >= DS_HZ && !message_text && !term.active; game_tick_acc -= DS_HZ) {
                 update_player_tick();
                 EnemyTarget target = {
                     .x = player.x, .y = player.y, .z = player.z, .dir = player.dir,
@@ -3808,6 +4268,7 @@ int main(void)
                 };
                 enemy_tick(&target);
                 update_pose();
+                update_neck();
                 die_tick();
                 effect_tick();
                 roomfx_tick();
