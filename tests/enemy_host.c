@@ -45,8 +45,10 @@ int game_blocked(int32_t fx, int32_t fz, int32_t x, int32_t z, int32_t y)
     }
     return 0;
 }
+const RoomBox *game_room_boxes(int *n) { *n = host_room.data ? host_room.header->num_boxes : 0; return host_room.boxes; }
 int camera_sees(int32_t x, int32_t y, int32_t z, int32_t m) { (void)x; (void)y; (void)z; (void)m; return 1; }
 int camera_occluded(int32_t x, int32_t y, int32_t z) { (void)x; (void)y; (void)z; return 0; }
+int camera_view_area(int32_t x, int32_t z) { (void)x; (void)z; return 1; }
 int cull_models = 0; // POLY_CULL_NONE in the stubs
 void game_aot_on(int n) { (void)n; }
 int game_busy(void) { return 0; }
@@ -104,7 +106,17 @@ int main(int argc, char **argv)
     if (getenv("ZONES")) // e.g. nitrofiles/room/room1020_blk.bin
         enemy_set_zones(asset_load(getenv("ZONES"), NULL));
     script_room_enter(&room);
+    if (getenv("SPAWN")) { // slot:type:flags:x:y:z:dir,... (dir in RE2 units), e.g. 0:0x22:0x0101:-27000:-3000:-12400:1024
+        char buf[256], *save = NULL;
+        snprintf(buf, sizeof(buf), "%s", getenv("SPAWN"));
+        for (char *it = strtok_r(buf, ",", &save); it; it = strtok_r(NULL, ",", &save)) {
+            int slot, type, flags, x, y, z, dir;
+            if (sscanf(it, "%i:%i:%i:%i:%i:%i:%i", &slot, &type, &flags, &x, &y, &z, &dir) == 7)
+                enemy_spawn(slot, type, flags, 0, x, y, z, (int16_t)dir);
+        }
+    }
     int ticks = getenv("TICKS") ? atoi(getenv("TICKS")) : 100;
+    int noise_at = getenv("NOISE_AT") ? atoi(getenv("NOISE_AT")) : 0; // NOISE only from this tick on
     for (int t = 0; t < ticks; t++) {
         int before = enemy_spawn_calls;
         if (getenv("MEMBERS")) { // tick:slot:member:value,... e.g. 5:0:0x17:1
@@ -120,18 +132,30 @@ int main(int argc, char **argv)
             script_start_event((int)strtol(getenv("EVENT"), NULL, 0));
         script_tick();
         EnemyTarget p = { .x = host_held ? host_px : (getenv("PX") ? atoi(getenv("PX")) : 5899),
-                          .z = host_held ? host_pz : (getenv("PZ") ? atoi(getenv("PZ")) : 0), .y = getenv("PY") ? atoi(getenv("PY")) : 0, .hp = 200, .noise = getenv("NOISE") ? atoi(getenv("NOISE")) : 0, .can_grab = !host_held && !host_dead,
+                          .z = host_held ? host_pz : (getenv("PZ") ? atoi(getenv("PZ")) : 0), .y = getenv("PY") ? atoi(getenv("PY")) : 0, .hp = 200, .noise = getenv("NOISE") && t >= noise_at ? atoi(getenv("NOISE")) : 0, .can_grab = !host_held && !host_dead,
                           .pressed = getenv("MASH") && (t & 1), .dead = host_dead };
         enemy_tick(&p);
-        if (getenv("SHOOT") && t % 15 == 0 && !host_held) { // Leon shoots the nearest zombie
+        // Leon shoots the nearest zombie; MULTI: the shotgun's later checks 2 and 4 ticks on
+        if (getenv("SHOOT") && (t % 15 == 0 || (getenv("MULTI") && (t % 15 == 2 || t % 15 == 4))) && !host_held) {
             int32_t tx, tz;
             int target = enemy_aim_target(p.x, 0, p.z, 0, &tx, &tz);
             if (target >= 0) {
                 int16_t dir = (int16_t)((int)(atan2f((float)-(tz - p.z), (float)(tx - p.x)) * 32768.0f / 6.2831853f) & 32767);
-                static const uint16_t dmg[3] = { 16, 15, 14 };
-                int hit = enemy_hit(p.x, 0, p.z, dir, 0, 2, dmg, 1);
+                // WEAPON: 2 the VP70, 7 / 8 the shotguns; AIM: 0 straight, 1 up, 2 down (default)
+                int weapon = getenv("WEAPON") ? atoi(getenv("WEAPON")) : 2;
+                static const uint16_t vp70[3] = { 16, 15, 14 }, shotgun[3] = { 200, 60, 40 }, custom[3] = { 300, 80, 60 };
+                const uint16_t *dmg = weapon == 7 ? shotgun : weapon == 8 ? custom : vp70;
+                int hit = enemy_hit(p.x, 0, p.z, dir, 0, weapon, dmg, getenv("AIM") ? atoi(getenv("AIM")) : AIM_DOWN);
                 printf("t%d shot -> %d\n", t, hit);
             }
+        }
+        if (getenv("LOOK") && t % 45 == 0) { // what Leon's head turns to (facing LOOK, DS units)
+            int32_t hx, hy, hz;
+            int look = enemy_look_target(p.x, p.y - 2507, p.z, (int16_t)atoi(getenv("LOOK")), 7000, 0x5DC);
+            if (look >= 0 && enemy_look_point(look, &hx, &hy, &hz))
+                printf("t%d look -> %d at %d %d %d\n", t, look, (int)hx, (int)hy, (int)hz);
+            else
+                printf("t%d look -> none\n", t);
         }
         if (enemy_spawn_calls != before) printf("tick %d: %d spawn calls total, %d active\n", t, enemy_spawn_calls, enemy_count());
         if (getenv("TRACE")) enemy_debug_print(t);

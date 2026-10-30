@@ -170,7 +170,9 @@ The project had many sessions; the earlier ones are only summarised. All of it i
 - Extractor for the PS1 ISO (`extract_psx_iso.py`), 125 rooms converted (`rdt2json.py` ->
   `room2ds.py`), backgrounds (`bss2ppm`, `bg2ds.py`: 256x192, 255 colours, LZ77), masks
   (`bssmask.py`, `mask2ds.py`), doors with their animations (`do2ds.py`, `door.c`), floors,
-  stairs, slopes, collision, debug warp menu (SELECT).
+  stairs, slopes, collision, debug warp menu (SELECT; Leon arrives where a neighbouring room's
+  door into the room puts him, the converter's spawn point only in 11C, 11D, 40C, 40F, 500, 509
+  and 600).
 
 ### 3.2 Phase 2: script system
 - `script.c` interprets the SCD opcodes with the sizes taken from the PS1 handlers. Threads,
@@ -421,11 +423,17 @@ This is why a missing character (e.g. the partner before this session) freezes s
 
 ### 4.11 The hall terminal (`main.c`, "terminals")
 
-`SCE_TERMINAL = 14`. `terminal_start(a)`: program `(data[0] | data[2] << 4) & 3`; 0 = door lock
-service (implemented), 1 = fingerprint check (`terminal_rodem_fingerprint 0x800384dc`,
-"The computer does not respond." for now). `terminal_step` is a small state machine of
-messages: RELEASED / LOCKED -> needs CARD KEY -> question -> uses item 0x35, sets flag 4:0x46,
-plays room sound 0x12.
+`SCE_TERMINAL = 14`. `terminal_start(a)`: program `data[0] & 3`, screen camera `data[2]` (the
+hall: camera 15, the computer's desktop); 0 = door lock service (implemented), 1 = fingerprint
+check (`terminal_rodem_fingerprint 0x800384dc`, "The computer does not respond." for now).
+`terminal_tick` runs at the game's rate while `term.active` (the game ticks stop): it cuts to
+the screen camera, opens a window over 12 ticks, types the PS1's texts into it a character a
+tick (sound 0x10; `|n` colour, `]` line, `[nnn` pause), waits for A/B after each, asks for the
+Blue Card Key in the message box, then shows the doors (camera 9 and 2, 60 + 60 ticks with the
+lock sound 0x12 between) and closes the window. The text is drawn into the background bitmap
+on five palette entries taken from the picture's least used ones (`terminal_palette`, the
+picture reloads afterwards); the font is libnds' 8 x 8 squeezed to 6 columns. Details:
+`docs/engine-notes.md` (computer programs).
 
 ---
 
@@ -547,10 +555,11 @@ DS screen; only host tests. **Host tests run the real engine C files with stubbe
 
 | Test | Build | Run / purpose |
 |---|---|---|
-| `script_host.c` | `cc -O1 -g -fsanitize=undefined -Isource tests/script_host.c -o build/script_host` | `build/script_host $(ls nitrofiles/room/room????.bin)` (not `room*0.bin`: that also matches the `_rbj_e0.bin` files, counted as "bad header") — runs every room's scripts, reports unknown opcodes, hangs, out-of-range access. `SHOW_SPAWNS=1` prints sce_em_set. |
-| `enemy_host.c` | `cc -Itests/stubs -Isource tests/enemy_host.c source/script.c source/enemy.c -o build/enemy_host` | one room's enemies vs a fake Leon. Env: `TICKS` (default 100), `PX`/`PZ`/`PY` (Leon position), `NOISE`, `SHOOT` (Leon shoots every 15 ticks), `MASH` (button mashing when grabbed), `TRACE` (per-tick enemy dump, sounds, blood), `ZONES=nitrofiles/room/room1020_blk.bin`, `WALLS` (use room collision), `EVENT=n` (start event function n at tick 5, e.g. `EVENT=3` lets the arms of room 205 out). |
-| `cutscene_host.c` | `cc -Itests/stubs -Isource tests/cutscene_host.c source/script.c source/enemy.c source/plc.c -o build/cutscene_host` | `./build/cutscene_host nitro:/room/room3010.bin <event> [ticks]` — runs a scene (plc, messages, cuts, voices, spawns); ends when no thread runs. Loads `_rbj_eN.bin` and `_rbj_p.bin`. |
+| `script_host.c` | `cc -O1 -g -fsanitize=undefined -Isource tests/script_host.c -o build/script_host` | `build/script_host $(ls nitrofiles/room/room????.bin)` (not `room*0.bin`: that also matches the `_rbj_e0.bin` files, counted as "bad header") — runs every room's scripts, reports unknown opcodes, hangs, out-of-range access. `SHOW_SPAWNS=1` prints sce_em_set, `AOTS=1` every AOT (type, data bytes), `ITEMS=1` the item AOTs. |
+| `enemy_host.c` | `cc -O1 -g -fsanitize=undefined -Itests/stubs -Isource tests/enemy_host.c source/script.c source/enemy.c source/plc.c -o build/enemy_host -lm` | one room's enemies vs a fake Leon. Env: `TICKS` (default 100), `PX`/`PZ`/`PY` (Leon position), `NOISE` (from tick `NOISE_AT` on), `SHOOT` (Leon shoots every 15 ticks), `MASH` (button mashing when grabbed), `TRACE` (per-tick enemy dump with y and surface, sounds, blood), `ZONES=nitrofiles/room/room1020_blk.bin`, `WALLS` (use room collision; the lickers' wall crawl reads the boxes always), `EVENT=n` (start event function n at tick 5, e.g. `EVENT=3` lets the arms of room 205 out), `MEMBERS=tick:slot:member:value,...`, `LOOK=<Leon's facing>` (what his head turns to, every 45 ticks), `SPAWN=slot:type:flags:x:y:z:dir,...` (an enemy the script only sets behind flags, e.g. room 10A's wall licker `0:0x22:0x0101:-27000:-3000:-12400:1024`). |
+| `cutscene_host.c` | `cc -Itests/stubs -Isource tests/cutscene_host.c source/script.c source/enemy.c source/plc.c -o build/cutscene_host` | `./build/cutscene_host nitro:/room/room3010.bin <event> [ticks]` — runs a scene (plc, messages, cuts, voices, spawns); ends when no thread runs. Loads `_rbj_eN.bin` and `_rbj_p.bin`. `TRACE_MEMBERS=1` prints the script's enemy member sets (e.g. when room 201's event 4 signals its licker). |
 | `door_host.c` | `cc -Itests/stubs -Isource tests/door_host.c source/script.c -o build/door_host` | `build/door_host 0` — door program positions; `DOOR_DUMP=30,120` dumps frames. **Stale:** misses many `game_*` stubs and does not link. |
+| `music_host.c` | `cc -O1 -g -fsanitize=undefined -Itests/stubs -Isource tests/music_host.c -o build/music_host -lm` (`-DMAX_VOICES=n` to try other limits) | `./build/music_host <stage> <room hex> [seconds] [frame:id:op,...] [slow]` — plays a room's music: voices busy, notes that took a sounding voice (held / fading), DS channels missing (one-shots free theirs at their end), sound messages per frame, summed channel volume (peak/average; the DS clips past about 127, the music's limit is 160). |
 
 `tests/stubs/` holds a fake `nds.h` etc. **When adding a new `game_*` hook called from
 script.c/enemy.c, add a stub to all four host tests** (this session added
@@ -604,6 +613,14 @@ python3 -I psxexe_to_elf.py $DISC/SLES_009.72 /tmp/re2_dog.elf /tmp/sym.txt $(ca
 ```
 Then open in REA (`mcp__rea__open_binary`), `mcp__rea__batch_decompile` the table entries,
 `procedure_pseudo_code` for single functions.
+
+When REA times out, Ghidra headless does the same (`support/analyzeHeadless <proj dir> <proj>
+-import x.elf -processor MIPS:LE:32:default -preScript NoRet.java`, then `-process x.elf
+-noanalysis -readOnly -postScript <a script that decompiles given addresses>`). Two traps:
+without `-processor` Ghidra picks MIPS 64 R6 for these ELFs and every function decompiles to
+`halt_baddata`; and its non-returning-function discovery marks `rand` (0x80015988) and
+others as not returning, which cuts functions short ("Subroutine does not return"), so the
+pre-script turns the option "Non-Returning Functions - Discovered" off.
 
 ### 8.2 Important PS1 addresses (main EXE)
 
@@ -671,7 +688,8 @@ Specific risks:
    cuts and the exact bite are not.
 8. G (Birkin 0x30-0x36), cockroaches (0x29): placeholder AI; Ivy's vines and damage values are approximations.
    Moth spores, moth modes 2/6/7/9/12 and the larva spawners (room 614) are not ported.
-9. Lickers/spiders on walls/ceilings drop immediately instead of crawling.
+9. Lickers and spiders on walls and ceilings are ported (`docs/enemy-others.md` sections 4
+   and 5) but not tested on the DS yet; the spiders' poison hits at once instead of flying.
 10. Grenade launcher, bowgun, rocket launcher not in `weapons[]`.
 11. Options menu, ending, ranking/results screen, Claire/B scenario: none.
 12. Ada model looks odd — confirmed identical to disc data; no change needed.

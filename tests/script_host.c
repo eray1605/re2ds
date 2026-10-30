@@ -99,6 +99,12 @@ int main(int argc, char **argv)
                 if (aots[k].active && aots[k].type == SCE_ITEM)
                     printf("    item %02x x%d picked %02x model %d\n", aots[k].data[0], aots[k].data[2],
                            aots[k].data[4], aots[k].data[6]);
+        if (getenv("AOTS")) // every AOT after the scripts ran: type, data bytes
+            for (int k = 0; k < NUM_AOTS; k++)
+                if (aots[k].active)
+                    printf("    aot %d type %d data %02x %02x %02x %02x %02x %02x %02x %02x\n", k, aots[k].type,
+                           aots[k].data[0], aots[k].data[1], aots[k].data[2], aots[k].data[3], aots[k].data[4],
+                           aots[k].data[5], aots[k].data[6], aots[k].data[7]);
         extern int script_unknown_at;
         if (script_unknown_ops)
             printf("    unknown op %d at %d\n", script_unknown_at >> 16, script_unknown_at & 0xFFFF);

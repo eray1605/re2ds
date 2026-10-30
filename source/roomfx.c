@@ -32,12 +32,22 @@ typedef struct { uint8_t first, flags; uint16_t scale, speed, pad; } Sub; // see
 #define THROWN 8                   // instance flag: roomfx_throw (casings), lies a while after landing
 #define LIE_TICKS 60
 #define GRAVITY 6                  // as effect.c
-// A thrown casing bounces (FUN_8002038c): back up at 40 % of its speed, on at
-// 60 %, and each time it plays FUN_80057364(u16 +0x12 << 16 | 1). +0x12 is in
+// A thrown casing moves by its movement entry (FUN_8001d070: the speed
+// +0x0c..0x10 grows by the bytes +8..10 each frame; CORE00.ESP effect 2:
+// 0, +10, 0) and bounces on the floor (FUN_8002038c, the entry's floor
+// handler 0x2c): back up at 40 % of its speed, on at 60 %; on a wall
+// (FUN_8002047c, handler 0x2d) its way along turns round. Each contact plays
+// FUN_80057364(u16 +0x12 << 16 | 1). +0x12 is in
 // the effect's movement entry (CORE00.ESP effect 2, copied by FUN_8001b8fc):
 // 0x0102 for the handgun casing (sub 0), 0x0109 for the shotgun shell (sub 2),
 // i.e. bank 1 (the weapon's ARMSnn) sound 2 / 9. Here only the first contact
 // plays it, once a shot: the later bounces stay quiet.
+#define THROWN_GRAVITY 10
+// Movement steps per game tick. By the code above a casing thrown from the
+// hand (about 2770 up) lands after some 29 ticks (1.2 s), but in the original
+// its clink is heard right after the shot: two steps a tick (as at 50 Hz),
+// set by ear against the PS1 game until the cause is found.
+#define THROWN_STEPS 2
 #define BOUNCE_UP 40
 #define BOUNCE_ON 60
 #define BOUNCE_MIN 40              // slower than this it stays down (about 3 clicks)
@@ -287,6 +297,34 @@ void roomfx_kill(int id, int type)
             inst[i].active = 0;
 }
 
+// One movement step of a thrown casing; 1 on a floor contact.
+static int thrown_step(Instance *n)
+{
+    if (game_blocked(n->x, n->z, n->x + n->vx, n->z + n->vz, n->floor)) {
+        n->vx = -n->vx;
+        n->vz = -n->vz;
+    }
+    n->x += n->vx;
+    n->y += n->vy;
+    n->z += n->vz;
+    n->vy += THROWN_GRAVITY;
+    if (n->y < n->floor)
+        return 0;
+    n->y = n->floor;
+    if (n->sound) {
+        game_casing_sound(n->sound);
+        n->sound = 0;
+    }
+    if (n->vy > BOUNCE_MIN) {
+        n->vy = -n->vy * BOUNCE_UP / 100;
+        n->vx = n->vx * BOUNCE_ON / 100;
+        n->vz = n->vz * BOUNCE_ON / 100;
+    } else {
+        n->lying = LIE_TICKS;
+    }
+    return 1;
+}
+
 void roomfx_tick(void)
 {
     for (int i = 0; i < MAX_INSTANCES; i++) {
@@ -300,25 +338,11 @@ void roomfx_tick(void)
                     n->active = 0;
                 continue;
             }
-            n->x += n->vx;
-            n->y += n->vy;
-            n->z += n->vz;
-            n->vy += GRAVITY;
-            if (n->y >= n->floor) {
-                n->y = n->floor;
-                if (n->sound) {
-                    game_casing_sound(n->sound);
-                    n->sound = 0;
-                }
-                if (n->vy > BOUNCE_MIN) {
-                    n->vy = -n->vy * BOUNCE_UP / 100;
-                    n->vx = n->vx * BOUNCE_ON / 100;
-                    n->vz = n->vz * BOUNCE_ON / 100;
-                } else {
-                    n->lying = LIE_TICKS;
-                }
+            int landed = 0;
+            for (int k = 0; k < THROWN_STEPS && !n->lying; k++)
+                landed |= thrown_step(n);
+            if (landed)
                 continue;
-            }
         }
         if (n->flags & SUB_FALLS) {
             n->x += n->vx;

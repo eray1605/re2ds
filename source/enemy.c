@@ -23,6 +23,7 @@
 #define ST_LUNGE 2              // arms up, faster at Leon (0x80101f0c / 0x80102218)
 #define ST_GRAB 3               // grabs and bites (0x8010259c / 0x801025a4)
 #define ST_LYING 7              // lies until EF_HOLD goes, then gets up (0x801036b4)
+#define ST_RECOIL 10            // reels back from a hit (0x80105b00)
 #define ST_EAT 8                // eats (variant 8, or Leon's body)
 #define ST_DOWN 5               // knocked down by shots, gets up again
 #define ST_DYING 20             // falls dead (death routine 0x80108470), then lies
@@ -56,6 +57,29 @@
 #define P_DIE_BACK 0x0F
 
 #define A_FALL 0x01             // + 0 / 1: falls forward / backward (death, knockdown)
+#define A_RECOIL 0x04           // reels back (hit from the front); 0x03 forward (from behind)
+
+// Crawlers: zombies on their arms (obj+0x10e & 1). The kind table 0x8010c678
+// sends every odd spawn variant to the crawler routine 0x80101178 (rooms 11A,
+// 204, 20B, 603), and the shotgun tears zombies into one (0x8010663c).
+#define A_CRAWL 0x05            // crawls (0x80102f58)
+#define A_CR_HIT 0x06           // hit (0x801077c8), from a random key 0-7
+#define A_CR_DIE 0x07           // dies (0x80108954)
+#define A_CR_GRAB 0x0E          // grabs Leon's leg; + 1 bites (loops), + 2 lets go
+#define CR_GRAB_DISTANCE 1300   // 0x514
+#define CR_BITE_KEY 1           // table 0x80100014: key 1, 5 (x1.5: 7 HP)
+#define CR_BITE_DAMAGE 5
+#define CR_STOMP_KEY 22         // of A_CR_GRAB + 2: Leon's foot on its head (part 8 off)
+#define CR_TURN 0x18            // a frame, RE2 units, while it moves on
+#define BONE_HEAD 8
+#define LEG_BONES 0x00FE        // parts 1-7: the hips and both legs
+#define ST_CRAWL 11             // obj+5 0 of the crawler routine
+#define ST_CR_HIT 12
+#define ST_SPLIT 13             // torn apart by the shotgun, then a crawler
+#define ST_CR_LIE 14            // obj+5 2: lies still until Leon comes near
+#define SND_STOMP 2             // its head under Leon's foot
+#define SND_THUD 4              // the upper body hits the floor
+#define SND_TEAR 9
 
 // health (zombie init 0x80100674): (rand >> (rand & 3)) & 15 picks one from
 // 0x8010c494, or on EASY from 0x8010c4b4; on NORMAL +15 while fewer than 4
@@ -92,6 +116,8 @@ static const uint8_t stagger_hit[20] = { 0, 9, 15, 15, 35, 0, 0, 0, 0, 0, 0, 0, 
 
 // collision with the room, shared with the player (main.c)
 int game_blocked(int32_t from_x, int32_t from_z, int32_t x, int32_t z, int32_t y);
+// the room's collision boxes (main.c): the lickers crawl along their sides
+const RoomBox *game_room_boxes(int *count);
 // does a room box that blocks sight lie between the two points? (main.c)
 int game_sight_blocked(int32_t x0, int32_t y0, int32_t z0, int32_t x1, int32_t y1, int32_t z1);
 // sounds and Leon while he is held (main.c)
@@ -163,7 +189,9 @@ typedef struct {
     int16_t hp;                 // obj+0x156
     int8_t stagger;             // obj+0x223
     uint8_t stagger_out;        // reached 0 once (obj+0x222)
-    uint8_t flinch;             // frames of the hit recoil left
+    uint8_t flinch;             // the hit's bend: frame + 1 (0x80105378 obj+0x158), 0 = none
+    int8_t flinch_dir;          // 1: hit from the front (bends back), -1: from behind (obj+0x15a)
+    uint8_t flinch_bend;        // the bend per frame (obj+0x16b)
     int16_t push;               // shotgun impulse along push_dir, -50 per tick (obj+0x144)
     int16_t push_dir;           // DS units
     uint8_t bleed;              // ticks of blood after a heavy hit (obj+0x15a)
@@ -199,11 +227,25 @@ typedef struct {
     uint8_t airborne;           // in a jump (obj+0x219)
     uint8_t hidden;             // not drawn nor hit (obj flag 2: the arms inside the wall)
     uint16_t hide_bones;        // parts not drawn (the arms: the other arm of the model)
+    uint8_t hit_lock;           // ticks the shots pass it by after a hit (obj+0x1d3)
+    int16_t fall_v;             // torn apart: the upper body's fall (obj+0x15a)
+    uint8_t bounces;            // ... and its bounces left (obj+0x16a)
+    uint8_t split_dead;         // the hit that tore it was deadly: a crawler with 10 HP
     int16_t home_x, home_z, home_dir; // where it was set (the arms: obj+0x21c / 0x220 / 0x218)
     uint16_t kill_flag;         // array << 8 | bit set when it dies (sce_em_set's set flag, obj+0x1ce)
     uint16_t trigger;           // member 0x17 (obj+0x1d4): the room script's signal (the alligator)
     uint8_t leg;                // the alligator: which stretch of the channel (obj+0x21a)
     int16_t roll;               // turned about the x axis (the cockroaches on the pipe)
+    // on a wall or the ceiling (lickers): SURF_*
+    uint8_t surface;
+    uint8_t heading;            // quadrant it crawls toward on a wall (obj+0x16a)
+    uint8_t down_turned;        // climbing down: the motion goes the other way (obj+0x15a)
+    int16_t wall_box;           // the room box it crawls on + 1, 0 = none (obj+0x220; spiders 0x228)
+    // spiders: their own turn of the model (roll is obj+0x74)
+    int16_t tilt;               // about z (obj+0x78), DS units
+    int16_t wall_head;          // on a wall: the head's turn from down, RE2 units (obj+0x226)
+    int32_t top_y;              // on a wall: as high as it climbs (obj+0x22c)
+    uint8_t climb_wait;         // ticks before it goes onto a wall again (obj+0x232)
 } Enemy;
 
 // The grab: one zombie at a time (PS1 flag 0x80 in 0x800c79c7). Zombie and
@@ -218,6 +260,7 @@ static struct {
     int16_t dir;                // the zombie's facing when it grabbed
     int anim, key;              // Leon's animation (zombie model, set 2)
     int16_t struggle;
+    uint8_t crawler;            // a crawler holds his leg
 } grab = { .enemy = -1 };
 static uint8_t voice_first, voice_second; // PS1 0x800d0818 / 0x800d0819
 
@@ -232,8 +275,21 @@ static uint8_t larva_lock = 0xFF; // one spits at a time (0x800c77f0 & 0x10)
 static uint8_t roach_on;        // how many cling to Leon (0x80101d18)
 static uint16_t roach_swarm;    // ticks with more than two on him (0x80101d20)
 static int8_t claw_lock = -1;   // the licker clawing now (0x8010752c)
+static int8_t spider_lock = -1; // the spider going between a wall and the ceiling (0x800c77f0 & 0x20)
 static EnemyType types[MAX_TYPES];
 static Enemy enemies[MAX_ENEMIES];
+
+// The legs the shotgun leaves standing (0x8010663c): from key 20 parts 1-7
+// keep the world matrix they had (obj+0x120 of part 1 points at a copy) while
+// the upper body falls and crawls off.
+typedef struct {
+    uint8_t on;
+    int32_t x, y, z;
+    int16_t dir;
+    int16_t rot[POSE_BONES][3];
+    int16_t ofs[3];
+} Legs;
+static Legs legs[MAX_ENEMIES];
 static const Model *room_sets[MAX_ENEMIES]; // the room's animations per slot (RBJ masks)
 
 // People (types 0x40 and up: Kendo 0x48, ...) do not fight; the room scripts
@@ -246,6 +302,15 @@ static int is_crow(const Enemy *e);
 static void crow_spawn(Enemy *e);
 static int is_licker(const Enemy *e);
 static void licker_spawn(Enemy *e);
+static int off_floor(const Enemy *e);
+static int is_zombie(const Enemy *e);
+static void update_pose(Enemy *e);
+static int is_crawler(const Enemy *e);
+static void blood_burst(const Enemy *e, int16_t dir, int32_t up);
+static void crawler_tick(Enemy *e, int i, const EnemyTarget *p, uint32_t d);
+static void split_tick(Enemy *e, int i);
+static void zombie_flinch(Enemy *e, int i, const EnemyTarget *p, uint32_t d);
+static void recoil(Enemy *e, int i);
 static int is_spider(const Enemy *e);
 static void spider_spawn(Enemy *e);
 static int is_tyrant(const Enemy *e);
@@ -306,12 +371,14 @@ void enemy_room_reset(void)
         if (types[i].type)
             free_type(&types[i]);
     memset(enemies, 0, sizeof(enemies));
+    memset(legs, 0, sizeof(legs));
     enemy_last_error = 0; // the debug screen shows this room's
     grab.enemy = -1;
     voice_first = voice_second = 0;
     dog_alert = 0;
     crow_lock = -1;
     claw_lock = -1;
+    spider_lock = -1;
     arm_cooldown = arm_sound_pause = moth_cooldown = 0;
     larva_lock = 0xFF;
     roach_on = 0;
@@ -485,6 +552,7 @@ void enemy_spawn(int slot, int type, int flags, int voice, int32_t x, int32_t y,
         return;
     Enemy *e = &enemies[slot];
     memset(e, 0, sizeof(*e));
+    legs[slot].on = 0;
     e->active = 1;
     e->type = t;
     e->x = x;
@@ -584,6 +652,22 @@ void enemy_spawn(int slot, int type, int flags, int voice, int32_t x, int32_t y,
     if (is_prop(e)) {
         set_anim(e, SET_GAIT, 0, 0);
         e->state = ST_PROP;      // >= ST_DYING: never aimed at or hit
+        return;
+    }
+    if (is_crawler(e)) { // half the HP; 3 crawls, 1 lies in wait, 5 / 7 lie as dead (HP -1)
+        int v = flags & EF_VARIANT;
+        e->hp /= 2;
+        if (v == 5 || v == 7) {
+            e->hp = -1;
+            e->hp_bonus = 0;
+        }
+        if (v == 3) {
+            e->state = ST_CRAWL;
+            set_anim(e, SET_MAIN, A_CRAWL, rnd() & 0xF);
+        } else {
+            e->state = ST_CR_LIE;
+            set_anim(e, SET_MAIN, A_LIE, 0);
+        }
         return;
     }
     // start state by spawn variant (zombie init 0x80100674)
@@ -718,9 +802,11 @@ static int present(const Enemy *e) { return e->active && !(e->flags & EF_OFF); }
 static int crowded(int i, int32_t x, int32_t z)
 {
     const Enemy *e = &enemies[i];
+    if (off_floor(e))
+        return 0;
     for (int j = 0; j < MAX_ENEMIES; j++) {
         const Enemy *o = &enemies[j];
-        if (j == i || !present(o) || o->state >= ST_DYING || is_person(o))
+        if (j == i || !present(o) || o->state >= ST_DYING || is_person(o) || off_floor(o))
             continue; // people are the scripts' (Kendo's body in 101 wedged a zombie into the window)
         int64_t ox = o->x - x, oz = o->z - z, cx = o->x - e->x, cz = o->z - e->z;
         int64_t now = ox * ox + oz * oz, before = cx * cx + cz * cz;
@@ -736,8 +822,8 @@ int enemy_blocks_player(int32_t from_x, int32_t from_z, int32_t x, int32_t z)
 {
     for (int i = 0; i < MAX_ENEMIES; i++) {
         const Enemy *e = &enemies[i];
-        if (!present(e) || e->state >= ST_DYING || e->state == ST_DOWN || is_arm(e) || is_moth(e) || is_larva(e) || is_vine(e) || is_prop(e) || is_roach(e) ||
-            (is_licker(e) && e->state == LICK_SCRIPT))
+        if (!present(e) || e->state >= ST_DYING || (is_zombie(e) && e->state == ST_DOWN) || is_arm(e) || is_moth(e) || is_larva(e) || is_vine(e) || is_prop(e) || is_roach(e) ||
+            (is_licker(e) && e->state == LICK_SCRIPT) || off_floor(e))
             continue;
         int64_t nx = e->x - x, nz = e->z - z, ox = e->x - from_x, oz = e->z - from_z;
         int64_t now = nx * nx + nz * nz, before = ox * ox + oz * oz;
@@ -831,6 +917,213 @@ static void walk(Enemy *e, int i, int32_t step_len)
         enemy_jumps++;
     if (moved > enemy_jump_max)
         enemy_jump_max = moved;
+}
+
+// ---------------------------------------------------------------- surfaces
+// Lickers cling to walls and ceilings. The PS1 turns the model by a rotation
+// on top of its facing, in world space (FUN_80072938 multiplies the delta in
+// before the object's matrix): M = T(pos) * R(surface) * Ry(dir). A wall is a
+// side of a room box (obj+0x16b): side s faces out along
+// (cos s*90, 0, -sin s*90), i.e. +x, -z, -x, +z (FUN_8004cd24 / FUN_8004c8b8),
+// and R turns the model's up (-y) that way. Spawn status bits 8..11 (licker
+// init 0x80103158): 1 Rz +90 (side 0), 2 Rz -90 (side 2), 3 Rx -90 (side 3),
+// 4 Rx +90 (side 1), 5 Rx 180 + Ry 180 (the ceiling: Rz 180).
+#define SURF_FLOOR 0
+#define SURF_WALL 1             // + the side 0..3
+#define SURF_CEILING 5
+#define BOX_CLIMB 0x0200        // RoomBox.flag: lickers crawl on its sides (FUN_801007ac)
+
+static int on_wall(const Enemy *e) { return e->surface >= SURF_WALL && e->surface < SURF_CEILING; }
+static int wall_side(const Enemy *e) { return e->surface - SURF_WALL; }
+
+// a model-space vector in the world: R(surface) * Ry(dir) * (x, y, z)
+static void surface_vec(const Enemy *e, int32_t x, int32_t y, int32_t z, int32_t out[3])
+{
+    int32_t c = cosLerp(e->dir), s = sinLerp(e->dir);
+    int32_t rx = (c * x + s * z) >> 12, rz = (c * z - s * x) >> 12;
+    switch (e->surface) {
+    case SURF_WALL + 0: out[0] = -y; out[1] = rx; out[2] = rz; break;
+    case SURF_WALL + 1: out[0] = rx; out[1] = -rz; out[2] = y; break;
+    case SURF_WALL + 2: out[0] = y; out[1] = -rx; out[2] = rz; break;
+    case SURF_WALL + 3: out[0] = rx; out[1] = rz; out[2] = -y; break;
+    case SURF_CEILING: out[0] = -rx; out[1] = -y; out[2] = rz; break;
+    default: out[0] = rx; out[1] = y; out[2] = rz; break;
+    }
+}
+
+// R(surface) on the matrix stack, before the turn about y (the spiders
+// turn their model themselves: roll and tilt)
+static void surface_turn(const Enemy *e)
+{
+    if (is_spider(e))
+        return;
+    switch (e->surface) {
+    case SURF_WALL + 0: glRotateZi(8192); break;
+    case SURF_WALL + 1: glRotateXi(8192); break;
+    case SURF_WALL + 2: glRotateZi(-8192); break;
+    case SURF_WALL + 3: glRotateXi(-8192); break;
+    case SURF_CEILING: glRotateZi(16384); break;
+    }
+}
+
+// the middle of the body: above the feet, below a ceiling, beside a wall
+static int32_t body_y(const Enemy *e, int32_t up)
+{
+    return e->surface == SURF_CEILING ? e->y + up : on_wall(e) ? e->y : e->y - up;
+}
+
+// up on a wall or the ceiling: not in anybody's way on the floor
+static int off_floor(const Enemy *e) { return e->surface != SURF_FLOOR; }
+
+// RE2 angle (4096 = 360 degrees) of a world direction (FUN_80014e4c)
+static int angle_re2(int32_t x, int32_t z)
+{
+    return (int)(atan2f((float)-z, (float)x) * 4096.0f / (2.0f * 3.14159265f)) & 4095;
+}
+
+// Next keyframe like anim_step, with the root motion on all three axes
+// (model space; FUN_8001581c), turned onto the surface by the caller.
+static int anim_motion(Enemy *e, int32_t m[3])
+{
+    const Model *mdl = &types[e->type].model;
+    const ModelAnim *a = &mdl->anims[e->anim];
+    m[0] = m[1] = m[2] = 0;
+    if (!a->count)
+        return 1;
+    int prev = e->key;
+    e->key = (e->key + 1) % a->count;
+    const int16_t *now = model_frame(mdl, ANIM_FRAME(mdl->anim_pool[a->first + e->key]))->speed;
+    const int16_t *was = model_frame(mdl, ANIM_FRAME(mdl->anim_pool[a->first + prev]))->speed;
+    for (int k = 0; k < 3; k++)
+        m[k] = now[k] - (e->key == 0 ? 0 : was[k]);
+    return e->key == a->count - 1;
+}
+
+// root motion on the surface, no room collision (the wall crawl keeps it on
+// its box side; FUN_80014d94). turned: along dir + 180 degrees.
+static int surface_step(Enemy *e, int turned)
+{
+    int32_t m[3], w[3];
+    int done = anim_motion(e, m);
+    if (turned) {
+        m[0] = -m[0];
+        m[2] = -m[2];
+    }
+    surface_vec(e, m[0], m[1], m[2], w);
+    e->x += w[0];
+    e->y += w[1];
+    e->z += w[2];
+    return done;
+}
+
+// the coordinate of side s of a box (FUN_8004cd24)
+static int32_t box_face(const RoomBox *b, int side)
+{
+    switch (side & 3) {
+    case 0: return b->x + b->w;
+    case 1: return b->z;
+    case 2: return b->x;
+    default: return b->z + b->d;
+    }
+}
+
+// the side of the box nearest (x, z): the box cut along its diagonals (FUN_8004c8b8)
+static int box_side(const RoomBox *b, int32_t x, int32_t z)
+{
+    int32_t s = b->w ? (int32_t)((int64_t)b->d * (x - b->x) / b->w) : 0;
+    int32_t dz0 = z - b->z, dz1 = z - (b->z + b->d);
+    if (s < dz0)
+        return -s < dz1 ? 3 : 2;
+    return dz1 < -s ? 1 : 0;
+}
+
+// does the box hold (x, z) within r on floor level `level`, with a flag of
+// mask? (FUN_80048964)
+static int box_near(const RoomBox *b, int32_t x, int32_t z, int32_t r, uint32_t level, uint16_t mask)
+{
+    return (b->flag & mask) && (b->floors & level) && x >= b->x - r && x < b->x + b->w + r &&
+           z >= b->z - r && z < b->z + b->d + r;
+}
+
+// the floor level bit of a height (obj+0x106)
+static uint32_t level_bit(int32_t y)
+{
+    int level = -y / 1800;
+    return 1u << (level < 0 ? 0 : level > 31 ? 31 : level);
+}
+
+// What lies 2200 ahead on its wall (FUN_801007ac)? Also notes the quadrant
+// it crawls toward and keeps it on the side of its box.
+#define WA_ON 0x80000000u       // the wall goes on
+#define WA_EDGE 0x40000000u     // it ends: round the corner onto the box's next side
+#define WA_STOP 0x20000000u     // a box it cannot crawl on: it gets down
+                                // otherwise: the side of a box across its way
+static uint32_t wall_ahead(Enemy *e)
+{
+    int32_t f[3];
+    surface_vec(e, 2200, 0, 0, f); // 0x801073c0
+    e->heading = ((angle_re2(f[0], f[2]) + 0x100) & 0xC00) >> 10;
+    int32_t x = e->x + f[0], z = e->z + f[2];
+    uint32_t bit = level_bit(e->y);
+    int n;
+    const RoomBox *boxes = game_room_boxes(&n);
+    int b = 0;
+    while (b < n && !box_near(&boxes[b], x, z, 10, bit, BOX_CLIMB))
+        b++;
+    if (b == n)
+        return WA_EDGE;
+    uint32_t r = WA_ON;
+    for (b = 0; b < n; b++) {
+        if (!box_near(&boxes[b], x, z, 10, bit, BOX_CLIMB | BOX_ENEMY))
+            continue;
+        if (!(boxes[b].flag & BOX_CLIMB)) {
+            r |= WA_STOP;
+            continue;
+        }
+        int side = box_side(&boxes[b], x, z);
+        if (b + 1 == e->wall_box) {
+            if (wall_side(e) & 1)
+                e->z = box_face(&boxes[b], wall_side(e));
+            else
+                e->x = box_face(&boxes[b], wall_side(e));
+        } else {
+            e->wall_box = b + 1;
+            if ((side ^ wall_side(e)) & 1)
+                return side;
+        }
+    }
+    return r;
+}
+
+// Onto another side after a corner (licker state 7 sub 4 / 6): the whole
+// thing turns k quarters about y in world space, so the side and the facing
+// both move on by k; then it stands dist on along the new side (0x69d into a
+// corner, 0x670 round an edge), on the face of its box.
+static void wall_turn(Enemy *e, int k, int dist)
+{
+    int side = (wall_side(e) + k) & 3;
+    int a = ((e->heading + k) & 3) * 8192;
+    int n;
+    const RoomBox *boxes = game_room_boxes(&n);
+    const RoomBox *b = e->wall_box > 0 && e->wall_box <= n ? &boxes[e->wall_box - 1] : NULL;
+    if (side & 1) {
+        e->x += (dist * cosLerp(a)) >> 12;
+        if (b)
+            e->z = box_face(b, side);
+    } else {
+        e->z -= (dist * sinLerp(a)) >> 12;
+        if (b)
+            e->x = box_face(b, side);
+    }
+    e->surface = SURF_WALL + side;
+    e->dir = (e->dir + k * 8192) & 32767;
+}
+
+// Back on the floor, upright (FUN_80019e54 clears the turn; the facing stays)
+static void surface_leave(Enemy *e)
+{
+    e->surface = SURF_FLOOR;
+    e->wall_box = 0;
 }
 
 // noise: what Leon does (PS1 0x800c77f2): NOISE_WALK, NOISE_RUN
@@ -927,6 +1220,15 @@ static void grab_place(const Model *m, int anim, int key, int32_t *x, int32_t *z
     *z += grab.az;
 }
 
+// Leon's first animation of the grab (zombie set 2): 0 from the front, 3
+// from behind; a crawler at his leg 6 / 10 (FUN_8010ae98, table at its
+// 0x8010cd50 + 8). + 1 he struggles, + 2 he breaks free.
+#define P_CR_STOMP 9            // then he stamps on the crawler's head
+static int grab_first(void)
+{
+    return grab.crawler ? (grab.back ? 10 : 6) : (grab.back ? P_GRAB_BACK : P_GRAB_FRONT);
+}
+
 static void start_grab(Enemy *e, int i, const EnemyTarget *p)
 {
     const Model *m = &types[e->type].model;
@@ -934,7 +1236,8 @@ static void start_grab(Enemy *e, int i, const EnemyTarget *p)
     e->sub = 1;
     e->standing = 0;
     e->dir = angle_to(e, p->x, p->z); // turns to Leon at once
-    set_anim(e, SET_MAIN, A_GRAB, 0);
+    grab.crawler = is_crawler(e);
+    set_anim(e, SET_MAIN, grab.crawler ? A_CR_GRAB : A_GRAB, 0);
     grab.enemy = i;
     grab.dir = e->dir;
     // from behind if Leon looks the same way as the zombie (FUN_800152b0)
@@ -946,7 +1249,7 @@ static void start_grab(Enemy *e, int i, const EnemyTarget *p)
     grab.ax = e->x - ox;
     grab.az = e->z - oz;
     grab.step = 1;
-    grab.anim = types[e->type].set_start[SET_PLAYER] + (grab.back ? P_GRAB_BACK : P_GRAB_FRONT);
+    grab.anim = types[e->type].set_start[SET_PLAYER] + grab_first();
     grab.key = 0;
     game_player_grabbed(1);
     game_player_voice((rnd() & 1) ? 2 : 0);
@@ -963,7 +1266,7 @@ static void grab_player(const Enemy *e)
     switch (grab.step) {
     case 1: // grabbed
         if (++grab.key >= count) {
-            grab.anim = base + (grab.back ? P_GRAB_BACK : P_GRAB_FRONT) + 1;
+            grab.anim = base + grab_first() + 1;
             grab.key = 0;
             grab.step = 3;
         }
@@ -972,11 +1275,25 @@ static void grab_player(const Enemy *e)
         grab.key = (grab.key + 1) % count;
         break;
     case 4: // breaks free
-        grab.anim = base + (grab.back ? P_GRAB_BACK : P_GRAB_FRONT) + 2;
+        grab.anim = base + grab_first() + 2;
         grab.key = 0;
         grab.step = 5;
         break;
     case 5:
+        if (++grab.key >= count) {
+            if (grab.crawler) { // free: he stamps on its head, from behind turned round
+                grab.anim = base + P_CR_STOMP;
+                grab.key = 0;
+                grab.back = 0;
+                grab.step = 8;
+                break;
+            }
+            grab.enemy = -1;
+            game_player_grabbed(0);
+            return;
+        }
+        break;
+    case 8:
         if (++grab.key >= count) {
             grab.enemy = -1;
             game_player_grabbed(0);
@@ -1025,7 +1342,7 @@ static void grab_zombie(Enemy *e, int i, int pressed)
     switch (e->sub) {
     case 1: // grabs
         if (anim_step(e, NULL)) {
-            set_anim(e, SET_MAIN, A_GRAB + 1, 0);
+            set_anim(e, SET_MAIN, (grab.crawler ? A_CR_GRAB : A_GRAB) + 1, 0);
             grab.struggle = STRUGGLE;
             e->sub = 3;
         }
@@ -1040,9 +1357,9 @@ static void grab_zombie(Enemy *e, int i, int pressed)
                 break;
             }
         }
-        if (e->key == BITE_KEY) {
+        if (e->key == (grab.crawler ? CR_BITE_KEY : BITE_KEY)) {
             sound_at(e, SND_BITE);
-            int r = game_player_damage(BITE_DAMAGE);
+            int r = game_player_damage(grab.crawler ? CR_BITE_DAMAGE : BITE_DAMAGE);
             if (r == 1) {         // down to 0 HP the first time: he tears free
                 e->sub = 4;
                 grab.step = 4;
@@ -1052,9 +1369,25 @@ static void grab_zombie(Enemy *e, int i, int pressed)
             }
         }
         break;
-    case 4: // pushed away
-        set_anim(e, SET_MAIN, A_GRAB + 2, 0);
-        e->sub = 5;
+    case 4: // pushed away (a crawler: shaken off, and Leon stamps on it)
+        set_anim(e, SET_MAIN, (grab.crawler ? A_CR_GRAB : A_GRAB) + 2, 0);
+        e->sub = grab.crawler ? 7 : 5;
+        break;
+    case 7: // 0x801025a4 sub 5 of a crawler: part 8 comes off at key 22, dead at the end
+        if (anim_step(e, NULL)) {
+            e->hp = -1;
+            e->sub = 6;
+        } else if (e->key == CR_STOMP_KEY) {
+            e->hide_bones |= 1 << BONE_HEAD;
+            blood_burst(e, (e->dir + 16384) & 32767, 300);
+            sound_at(e, SND_STOMP);
+        }
+        break;
+    case 6: // dead, until Leon's stamp is over
+        if (grab.enemy != i) {
+            e->state = ST_DEAD;
+            return;
+        }
         break;
     case 5: { // staggers back; from key 7 on it has let go and collides
         int32_t x0, z0;
@@ -2076,8 +2409,10 @@ static void crow_shot(Enemy *e, int i, int16_t dir)
 // and goes by sound (FUN_80100db0: any step within 3000, running or a shot
 // within 9000). Attacks: the claw (state 9), the tongue (state 10) and the
 // jump (state 11). Only one licker claws at a time (0x8010752c).
-// The PS1 lets them crawl on ceilings and walls (spawn status bits 8..11);
-// here they stay on the floor.
+// Spawn status bits 8..11 put it on a wall or the ceiling (see surfaces):
+// variant 1 crawls along the walls (state 7), variant 2 hangs from the
+// ceiling until it hears him (state 11), variant 3 until the room script's
+// signal (state 23).
 #define TYPE_LICKER 0x22
 #define TYPE_LICKER2 0x24
 #define LICK_IDLE 0             // listens (state 0, 0x801017c8)
@@ -2087,6 +2422,10 @@ static void crow_shot(Enemy *e, int i, int16_t dir)
 #define LICK_TONGUE 10          // (0x801023c4)
 #define LICK_JUMP 11            // (0x80103cec)
 #define LICK_HURT 12            // flinches, pushed back (0x8010574c)
+#define LICK_WALL 13            // crawls along the walls (state 7, 0x801039a4)
+#define LICK_DOWN 14            // climbs down the wall and steps off (state 13, 0x801044b0)
+#define LICK_HANG 17            // on the ceiling until it drops (states 11 / 16 / 17 / 23)
+#define LICK_FALL 18            // shot off a wall or the ceiling (hit routine 2, 0x801059a8)
 #define LICK_CLAW_DAMAGE 25     // x1.5: 37 HP
 #define LICK_TONGUE_DAMAGE 15   // x1.5: 22 HP
 #define SND_LICK_CLAW 5
@@ -2132,17 +2471,25 @@ static void licker_spawn(Enemy *e)
     if (flag_get(4, 0xa4))
         e->hp -= later[lick_kind(e)][easy()];
     e->floor_y = e->y;
-    e->airborne = ((e->flags >> 8) & 0xF) != 0; // on the ceiling or a wall: drops to the floor
+    static const uint8_t surfaces[6] = { SURF_FLOOR, SURF_WALL + 0, SURF_WALL + 2, SURF_WALL + 3, SURF_WALL + 1, SURF_CEILING };
+    int at = (e->flags >> 8) & 0xF;
+    e->surface = at < 6 ? surfaces[at] : SURF_FLOOR;
     lick_anim(e, LA_IDLE, rnd() & 0x3F);
-    dog_enter(e, (e->flags & EF_SCRIPTED) ? LICK_SCRIPT : LICK_IDLE);
+    if (e->flags & EF_SCRIPTED)
+        dog_enter(e, LICK_SCRIPT);
+    else if (on_wall(e) && !lick_kind(e))
+        dog_enter(e, LICK_WALL);
+    else
+        dog_enter(e, e->surface ? LICK_HANG : LICK_IDLE); // type 0x24 has no wall animations: it drops
 }
 
 // Status 0x4000 (start state from 0x801073bc by variant & 3): the licker is
 // part of a scene and does nothing until the room script sets member 0x17.
-// Variant 2 (room 201: the one passing the window outside, 0x80105114) then
-// crawls along by its animation 0 and stops at the next signal; it never
-// comes in. The others (0x80104d14, 0x80104f74, 0x80105290: hanging on the
-// ceiling, in a corner) come down and hunt.
+// Variant 2 (room 201: the one passing the window outside on its wall,
+// 0x80105114) then crawls along by its animation 0 and stops at the next
+// signal; it never comes in. Variant 0 (16, 0x80104d14: on the ceiling) and 1
+// (17, 0x80104f74: somewhere above) drop (licker_hang), 3 (22, 0x80105290)
+// comes out and hunts.
 static void licker_script(Enemy *e)
 {
     int crawler = (e->flags & 3) == 2;
@@ -2157,63 +2504,21 @@ static void licker_script(Enemy *e)
             e->sub = 1;
         } else {
             e->flags &= ~EF_SCRIPTED;
-            dog_enter(e, LICK_IDLE); // the airborne ones drop first (licker_tick)
+            if (e->surface == SURF_CEILING || (e->flags & 3) == 1) {
+                dog_enter(e, LICK_HANG);
+                e->trigger = 1; // drops at once
+            } else {
+                dog_enter(e, LICK_IDLE);
+            }
         }
         return;
     }
     if (e->sub == 1) { // outside: no walls to stop it
-        int32_t fwd;
-        anim_step(e, &fwd);
-        e->x += (fwd * cosLerp(e->dir)) >> 12;
-        e->z -= (fwd * sinLerp(e->dir)) >> 12;
+        surface_step(e, 0);
         if (e->trigger) {
             e->trigger = 0;
             e->sub = 2; // stays where it stopped
         }
-    }
-}
-
-// Off the ceiling, falling at +72 a tick more each tick (obj+0x146) down to
-// the floor; then the landing animation plays to its end and it hunts.
-// Variant & 3 == 0 (state 16, 0x80104d14) lets go with animation 0x12 first,
-// the others (state 17, 0x80104f74) drop at once with 0x13 and hiss (sound 2)
-// on landing. The PS1 hangs them upside down (orientation from status bits
-// 8..11); the DS draws them upright, so the falls skip that turn (+0xa8c).
-// airborne: 1 up there, 2 falling, 3 landing.
-#define LICK_LET_GO_ANIM 0x12
-#define LICK_FALL_ANIM 0x13
-#define LICK_GRAVITY 72
-#define SND_LICK_LAND 2
-static void licker_drop(Enemy *e, const EnemyTarget *p)
-{
-    int own = !lick_kind(e); // type 0x24 has neither animation
-    int lets_go = (e->flags & 3) == 0;
-    if (e->airborne == 1) {
-        if (own)
-            set_anim(e, SET_GAIT, lets_go ? LICK_LET_GO_ANIM : LICK_FALL_ANIM, 0);
-        e->vspeed = 0;
-        e->airborne = 2;
-    }
-    if (e->airborne == 2) {
-        e->floor_y = p->y;
-        e->vspeed += LICK_GRAVITY;
-        e->y += e->vspeed;
-        if (anim_step(e, NULL) && own && e->anim == types[e->type].set_start[SET_GAIT] + LICK_LET_GO_ANIM)
-            set_anim(e, SET_GAIT, LICK_FALL_ANIM, 0);
-        if (e->y >= e->floor_y) {
-            e->y = e->floor_y;
-            e->vspeed = 0;
-            e->airborne = 3;
-            if (!lets_go)
-                sound_at(e, SND_LICK_LAND);
-            if (own)
-                set_anim(e, SET_GAIT, LICK_FALL_ANIM, 0);
-        }
-        return;
-    }
-    if (!own || anim_step(e, NULL)) {
-        e->airborne = 0;
-        lick_anim(e, LA_IDLE, 3);
     }
 }
 
@@ -2225,6 +2530,271 @@ static int licker_hears(const EnemyTarget *p, uint32_t d)
     if (d < 3000)
         return (p->noise & (NOISE_WALK | NOISE_RUN | NOISE_SHOT)) != 0;
     return d < 9000 && (p->noise & (NOISE_RUN | NOISE_SHOT));
+}
+
+// On the ceiling (state 11 0x80104250, variant 2: until it hears him; 23
+// 0x80102bec, variant 3, and the scene's 16 0x80104d14: until the room
+// script's signal, member 0x17). It lets go with 0x12 and falls at +72 a
+// tick more each tick (obj+0x146); when 0x12 is over it turns upright 0xa8c
+// lower (it hung from its feet), facing the quarter it looked toward
+// (+0x100, & 0xc00), and falls on with 0x13, which it plays to the end on the
+// floor. The scene's variant 1 (17, 0x80104f74) is not on the ceiling: it
+// falls with 0x13 at once and hisses (sound 2) when it lands. Type 0x24 has
+// neither animation (its own overlay is not looked at): it turns over at once
+// and falls with its jump's.
+#define LICK_LET_GO_ANIM 0x12
+#define LICK_FALL_ANIM 0x13
+#define LICK_GRAVITY 72
+#define LICK_HANG_DROP 0xA8C
+#define SND_LICK_LAND 2
+
+// upright on the floor's side of where it clung, facing the nearest quarter
+static void licker_upright(Enemy *e, int32_t lower)
+{
+    int32_t f[3];
+    surface_vec(e, 2200, 0, 0, f);
+    e->dir = (((angle_re2(f[0], f[2]) + 0x100) & 0xC00) * 8) & 32767;
+    e->y += lower;
+    surface_leave(e);
+}
+
+static void licker_hang(Enemy *e, const EnemyTarget *p, uint32_t d)
+{
+    int own = !lick_kind(e);
+    e->floor_y = p->y;
+    switch (e->sub) {
+    case 0: // up there
+        anim_step(e, NULL);
+        if (!e->trigger && ((e->flags & 3) == 3 || !licker_hears(p, d)))
+            break;
+        e->trigger = 0;
+        e->vspeed = 0;
+        if (e->surface == SURF_FLOOR) { // the scene's 17: falls as it is
+            e->timer2 = 1; // hisses when it lands
+            if (own)
+                set_anim(e, SET_GAIT, LICK_FALL_ANIM, 0);
+            e->sub = 2;
+        } else if (own) {
+            set_anim(e, SET_GAIT, LICK_LET_GO_ANIM, 0);
+            e->sub = 1;
+        } else {
+            licker_upright(e, LICK_HANG_DROP);
+            lick_anim(e, LA_AIR, 0);
+            e->sub = 2;
+        }
+        break;
+    case 1: // lets go (0x12)
+        e->vspeed += LICK_GRAVITY;
+        e->y += e->vspeed;
+        if (anim_step(e, NULL)) {
+            licker_upright(e, LICK_HANG_DROP);
+            set_anim(e, SET_GAIT, LICK_FALL_ANIM, 0);
+            e->sub = 2;
+        }
+        break;
+    case 2: // falls (0x13) until the next step would reach the floor
+        e->vspeed += LICK_GRAVITY;
+        e->y += e->vspeed;
+        if (own || e->key + 1 < types[e->type].model.anims[e->anim].count)
+            anim_step(e, NULL);
+        if (e->y + e->vspeed + LICK_GRAVITY >= e->floor_y) {
+            if (e->timer2)
+                sound_at(e, SND_LICK_LAND);
+            if (!own)
+                lick_anim(e, LA_LAND, 0);
+            e->sub = 3;
+        }
+        break;
+    case 3: // on the floor: the animation to its end
+        e->y = e->floor_y;
+        e->vspeed = 0;
+        if (anim_step(e, NULL)) {
+            lick_anim(e, LA_IDLE, 3);
+            dog_enter(e, LICK_IDLE);
+        }
+        break;
+    }
+}
+
+// On a wall (state 7, 0x801039a4): crawls along it (animation 1) while the
+// wall goes on 2200 ahead (wall_ahead); into a corner it crawls onto the wall
+// across with 0x11, round an edge onto the box's next side with 0x10; a box
+// it cannot crawl on, or a sound of him, and it climbs down (state 13).
+#define LICK_EDGE_ANIM 0x10     // root (2200, 1648, 0)
+#define LICK_CORNER_ANIM 0x11   // root (2200, -1693, 0)
+#define LICK_EDGE_ON 0x670
+#define LICK_CORNER_ON 0x69D
+static void licker_wall(Enemy *e, const EnemyTarget *p, uint32_t d)
+{
+    e->floor_y = p->y;
+    switch (e->sub) {
+    case 0:
+        lick_anim(e, LA_CRAWL, e->key);
+        e->sub = 1;
+        // fall through
+    case 1: {
+        uint32_t r = wall_ahead(e);
+        if (licker_hears(p, d) || (r & WA_STOP) || ((r & WA_EDGE) && !e->wall_box)) {
+            dog_enter(e, LICK_DOWN);
+        } else if (r & WA_ON) {
+            surface_step(e, 0);
+        } else if (r & WA_EDGE) {
+            set_anim(e, SET_GAIT, LICK_EDGE_ANIM, 0);
+            e->sub = 3;
+        } else {
+            set_anim(e, SET_GAIT, LICK_CORNER_ANIM, 0);
+            e->timer = (int16_t)r; // the side across (obj+0x218)
+            e->sub = 2;
+        }
+        break;
+    }
+    case 2: // into the corner: on along the side across
+        if (anim_step(e, NULL)) {
+            wall_turn(e, 2 * e->heading - wall_side(e) - e->timer, LICK_CORNER_ON);
+            e->sub = 0;
+        }
+        break;
+    case 3: // round the edge: the box's side it was heading toward
+        if (anim_step(e, NULL)) {
+            wall_turn(e, e->heading - wall_side(e), LICK_EDGE_ON);
+            e->sub = 0;
+        }
+        break;
+    }
+}
+
+// Down the wall (state 13, 0x801044b0): from higher than 0x903 above the
+// floor it crawls down with 0x1b (1338 along the wall a go); then it steps
+// off with 0x0c or 0x1a (they lean opposite ways), easing to 0x64f above the
+// floor over 22 ticks, and stands 0x64f out from the wall on the floor,
+// upright. The PS1 turns the crawl's motion by 0x800 (and takes 0x1a) when
+// the wall's side and its heading make the plain one go up; here: whichever
+// goes down.
+#define LICK_STEP_OFF_ANIM 0x0C
+#define LICK_STEP_OFF2_ANIM 0x1A
+#define LICK_CLIMB_DOWN_ANIM 0x1B
+#define LICK_STEP_HIGH 0x903
+#define LICK_STEP_AT 0x64F
+static void licker_down(Enemy *e, const EnemyTarget *p, uint32_t d)
+{
+    e->floor_y = p->y;
+    switch (e->sub) {
+    case 0: {
+        int32_t way[3];
+        surface_vec(e, 0, 0, -1000, way);
+        e->down_turned = way[1] < 0;
+        if (e->y < e->floor_y - LICK_STEP_HIGH) {
+            set_anim(e, SET_GAIT, LICK_CLIMB_DOWN_ANIM, 0);
+            e->sub = 3;
+            break;
+        }
+        if (e->y > e->floor_y - 0x631 || e->y < e->floor_y - 0x66D) {
+            e->timer2 = e->floor_y - (e->y + LICK_STEP_AT);
+            e->vspeed = e->timer2 / 22;
+        } else {
+            e->timer2 = 0;
+            e->vspeed = 0;
+            e->y = e->floor_y - LICK_STEP_AT;
+        }
+        set_anim(e, SET_GAIT, e->down_turned ? LICK_STEP_OFF2_ANIM : LICK_STEP_OFF_ANIM, 0);
+        e->sub = 1;
+        break;
+    }
+    case 1: // steps off
+        if ((uint16_t)(e->timer2 + 20) > 40) {
+            e->timer2 -= e->vspeed;
+            e->y += e->vspeed;
+        }
+        if (anim_step(e, NULL)) {
+            int a = wall_side(e) * 8192; // out from the wall (0x801001a4)
+            e->x += (1615 * cosLerp(a)) >> 12;
+            e->z -= (1615 * sinLerp(a)) >> 12;
+            e->y = e->floor_y;
+            e->vspeed = 0;
+            surface_leave(e);
+            lick_anim(e, LA_IDLE, 0);
+            e->timer = 0;
+            e->sub = 2;
+        }
+        break;
+    case 2: // a moment, then after him (state 14)
+        anim_step(e, NULL);
+        if (++e->timer >= 4)
+            dog_enter(e, licker_hears(p, d) ? LICK_TURN : LICK_IDLE);
+        break;
+    case 3:
+        if (surface_step(e, e->down_turned))
+            e->sub = 0;
+        break;
+    }
+}
+
+// Shot on a wall or the ceiling (hit routine 2, 0x801059a8): it falls at +48
+// a tick more each tick from the hit on, first still clinging and going on
+// with its animation (FUN_80101244 sets no other for these states) to its
+// end, here at most till the floor; then upright 0x4f5 lower, facing away
+// from where it crawled (quarter * 0x400 - 0x800), flat (0x19) to the floor;
+// dead, or up with 0x16. (The PS1 also drifts by the shot's push; here not,
+// it might go into the wall.)
+#define LICK_FLOP_ANIM 0x19
+#define LICK_GET_UP_ANIM 0x16
+#define LICK_FALL_GRAVITY 48
+#define LICK_SHOT_DROP 0x4F5
+static void licker_fall(Enemy *e, const EnemyTarget *p, uint32_t d)
+{
+    int own = !lick_kind(e);
+    e->floor_y = p->y;
+    if (e->y + e->vspeed + LICK_GRAVITY < e->floor_y) {
+        e->vspeed += LICK_FALL_GRAVITY;
+        e->y += e->vspeed;
+    } else {
+        e->y = e->floor_y;
+    }
+    switch (e->sub) {
+    case 1: // still clinging
+        if (anim_step(e, NULL) || e->y >= e->floor_y) {
+            e->dir = ((e->heading * 0x400 - 0x800) * 8) & 32767;
+            e->y = e->y + LICK_SHOT_DROP < e->floor_y ? e->y + LICK_SHOT_DROP : e->floor_y;
+            surface_leave(e);
+            if (own)
+                set_anim(e, SET_GAIT, LICK_FLOP_ANIM, 0);
+            else
+                lick_anim(e, LA_LAND, 0);
+            e->sub = 2;
+        }
+        break;
+    case 2: // flat to the floor
+        if (e->y < e->floor_y) {
+            if (e->key + 1 < types[e->type].model.anims[e->anim].count)
+                anim_step(e, NULL);
+            break;
+        }
+        e->vspeed = 0;
+        e->sub = 3;
+        break;
+    case 3:
+        if (!anim_step(e, NULL))
+            break;
+        if (e->hp < 0) {
+            sound_at(e, SND_LICK_JUMP);
+            lick_anim(e, LA_DIE, 0);
+            e->state = ST_DYING;
+            e->sub = 0;
+        } else if (own) {
+            set_anim(e, SET_GAIT, LICK_GET_UP_ANIM, 0);
+            e->sub = 4;
+        } else {
+            e->sub = 5;
+        }
+        break;
+    case 4:
+        if (anim_step(e, NULL))
+            e->sub = 5;
+        break;
+    case 5: // FUN_801055cc
+        dog_enter(e, d < 2500 && in_cone(e, p->x, p->z, 0x140) ? LICK_STALK : LICK_TURN);
+        break;
+    }
 }
 
 static void licker_hits(Enemy *e, const EnemyTarget *p, int damage)
@@ -2252,13 +2822,12 @@ static void licker_step(Enemy *e, int i)
 
 static void licker_tick(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
 {
-    if (e->state == LICK_SCRIPT) {
-        licker_script(e);
-        return;
-    }
-    if (e->airborne && e->state < LICK_HURT) { // drops down to his floor first
-        licker_drop(e, p);
-        return;
+    switch (e->state) {
+    case LICK_SCRIPT: licker_script(e); return;
+    case LICK_HANG: licker_hang(e, p, d); return;
+    case LICK_WALL: licker_wall(e, p, d); return;
+    case LICK_DOWN: licker_down(e, p, d); return;
+    case LICK_FALL: licker_fall(e, p, d); return;
     }
     if (e->cooldown)
         e->cooldown--;
@@ -2428,6 +2997,15 @@ static void licker_shot(Enemy *e, int i, int16_t dir)
     if (claw_lock == i)
         claw_lock = -1;
     e->push_dir = dir;
+    if (off_floor(e) || e->state == LICK_FALL) { // falls off first, dead or not
+        sound_at(e, SND_LICK_HIT);
+        if (e->state != LICK_FALL) {
+            e->vspeed = 0;
+            dog_enter(e, LICK_FALL);
+            e->sub = 1;
+        }
+        return;
+    }
     if (e->hp < 0) {
         sound_at(e, SND_LICK_JUMP);
         lick_anim(e, LA_DIE, 0);
@@ -2435,6 +3013,8 @@ static void licker_shot(Enemy *e, int i, int16_t dir)
         e->sub = 0;
         return;
     }
+    if (e->state == LICK_HANG)
+        return; // falling: lands first
     sound_at(e, SND_LICK_HIT);
     if (e->state == LICK_JUMP && e->sub == 3)
         return; // in the air it flies on
@@ -2447,28 +3027,212 @@ static void licker_shot(Enemy *e, int i, int16_t dir)
 // ---------------------------------------------------------------- spider
 // Giant spider (type 0x25; overlay slot 1 at 0x8010d000, floor states in
 // table 0x801132e8; docs/enemy-others.md) and the small ones (0x26). The
-// spider moves by its own speed (no root motion). On ceilings and walls
-// (spawn variants 2..11) the PS1 lets it crawl there; here it drops to the
-// floor when Leon comes near.
+// spider moves by its own speed (no root motion). Variants 2..3 put it on
+// the ceiling, 4..11 on a wall (init 0x8010d1ec, surface obj+0x222); there it
+// has its own states (tables 0x80113334 ceiling, 0x80113364 / 0x80113394
+// wall): it walks the ceiling, goes down a wall near Leon, attacks from it
+// and climbs back. A hit does not bring it down; it falls when it dies.
 #define TYPE_SPIDER 0x25
 #define TYPE_SPIDERLING 0x26
-#define SP_IDLE 0               // decides (0x8010d708)
+#define SP_IDLE 0               // decides (0x8010d708; the ceiling's 0x8010e36c)
+#define SP_WALK 1               // the ceiling: walks at him (0x8010d850 + the wall check 0x8010e4a8)
 #define SP_WANDER 4             // (0x8010da00)
 #define SP_TURN 5               // turns on the spot (0x8010db04)
-#define SP_CHARGE 7             // crouches, aims, rushes, bites (0x8010dc64)
+#define SP_CHARGE 7             // crouches, aims, rushes, bites (0x8010dc64; the ceiling's 0x8010e678 spits)
 #define SP_SPIT 8               // spits poison (0x8010df0c)
 #define SP_EVADE 9              // jumps aside (0x8010e198)
 #define SP_HURT 10              // flinches (0x8010fcd8)
+#define SP_TO_WALL 11           // from the ceiling onto a wall (0x8010e920)
+#define SP_W_DOWN 12            // on a wall: down to 3500 above him (0x8010ed40 / 0x8010ee94)
+#define SP_W_PAUSE 13           // (0x8010ef78)
+#define SP_W_WAIT 14            // set on a wall: until he comes (0x8010fb34)
+#define SP_W_TURN 15            // the head toward his side (0x8010f050)
+#define SP_W_RUSH 16            // along the wall, bites (0x8010f738)
+#define SP_W_SPIT 17            // (0x8010f8dc)
+#define SP_W_CLIMB 18           // head up, up the wall (0x8010f1ec)
+#define SP_TO_CEILING 19        // from a wall onto the ceiling (0x8010f47c)
 #define SP_BITE 20              // x1.5 (FUN_80112974): 30 HP
 #define SP_SPIT_DAMAGE 5
 #define SND_SPIDER_BITE 1
+#define SND_SPIDER_SPIT 3
+#define SND_SPIDER_LAND 5
+enum { SPA_IDLE, SPA_HURT, SPA_WALK, SPA_SLOW, SPA_CROUCH, SPA_RUSH, SPA_STOP = 7, SPA_EVADE, SPA_SPIT = 11,
+       SPA_DIE, SPA_CLIMB = 14 };
 
 // health (0x801131cc) + rand & 3
 static const uint8_t spider_hp[16] = { 109, 109, 109, 109, 129, 109, 109, 129, 109, 109, 109, 129, 109, 99, 109, 109 };
 static const uint8_t spider_hp_easy[16] = { 79, 89, 99, 79, 49, 89, 79, 69, 89, 69, 89, 89, 99, 69, 49, 79 }; // 0x801061ec
+// up a wall: turning by this a tick, at random (0x80113384)
+static const int8_t sp_climb_turn[8] = { 64, -64, 64, -64, 32, -64, 64, -32 };
 
 static int is_spider(const Enemy *e) { int t = types[e->type].type; return t == TYPE_SPIDER || t == TYPE_SPIDERLING; }
 static int is_spiderling(const Enemy *e) { return types[e->type].type == TYPE_SPIDERLING; }
+
+// The spider turns its own model: M = Rx(obj+0x74) * Ry(facing) * Rz(obj+0x78),
+// like the bones. On the ceiling z 0x800: it hangs upside down, so it faces
+// and walks along its facing + 0x800 (obj+0x21a) and aims at Leon mirrored
+// through itself (FUN_80112114). On a wall (FUN_8010ec88) its head points
+// down: an even side turns z 0x400 and the head's turn within the wall
+// (obj+0x226) is about x; an odd side turns x by its facing (side * 0x400)
+// and the head's turn adds to the facing (FUN_80112284).
+static void spider_pose(Enemy *e)
+{
+    int s = wall_side(e);
+    e->roll = e->tilt = 0;
+    if (e->surface == SURF_CEILING) {
+        e->tilt = 0x800 * 8;
+    } else if (on_wall(e) && (s & 1)) {
+        e->roll = (int16_t)(s * 0x400 * 8);
+        e->dir = ((s * 0x400 + e->wall_head) * 8) & 32767;
+    } else if (on_wall(e)) {
+        e->roll = (int16_t)(e->wall_head * 8);
+        e->tilt = 0x400 * 8;
+        e->dir = (s * 0x400 * 8) & 32767;
+    }
+}
+
+// a model-space vector in the world: Rx(roll) * Ry(dir) * Rz(tilt) * v (FUN_801122e4)
+static void spider_vec(const Enemy *e, int32_t x, int32_t y, int32_t z, int32_t out[3])
+{
+    int32_t c = cosLerp(e->tilt), s = sinLerp(e->tilt);
+    int32_t x1 = (c * x - s * y) >> 12, y1 = (s * x + c * y) >> 12;
+    c = cosLerp(e->dir), s = sinLerp(e->dir);
+    int32_t x2 = (c * x1 + s * z) >> 12, z2 = (c * z - s * x1) >> 12;
+    c = cosLerp(e->roll), s = sinLerp(e->roll);
+    out[0] = x2;
+    out[1] = (c * y1 - s * z2) >> 12;
+    out[2] = (s * y1 + c * z2) >> 12;
+}
+
+// on a wall: dist along where its head points
+static void spider_crawl(Enemy *e, int32_t dist)
+{
+    int32_t w[3];
+    spider_vec(e, dist, 0, 0, w);
+    e->x += w[0];
+    e->y += w[1];
+    e->z += w[2];
+}
+
+// where it aims: Leon, or on the ceiling Leon mirrored through it
+static void spider_aim(const Enemy *e, const EnemyTarget *p, int32_t *x, int32_t *z)
+{
+    int up = e->surface != SURF_FLOOR;
+    *x = up ? 2 * e->x - p->x : p->x;
+    *z = up ? 2 * e->z - p->z : p->z;
+}
+
+static int spider_turn(const Enemy *e, const EnemyTarget *p, int rate)
+{
+    int32_t x, z;
+    spider_aim(e, p, &x, &z);
+    return turn_delta(e, x, z, rate);
+}
+
+static int spider_cone(const Enemy *e, const EnemyTarget *p, int half)
+{
+    int32_t x, z;
+    spider_aim(e, p, &x, &z);
+    return in_cone(e, x, z, half);
+}
+
+// along dir (+ 0x800 on the ceiling) against the walls of its own height
+static int spider_move(Enemy *e, int i, int dir, int32_t dist)
+{
+    int32_t floor_y = e->floor_y;
+    if (e->surface == SURF_CEILING) {
+        dir += 16384;
+        e->floor_y = e->y;
+    }
+    int moved = move_dir(e, i, (int16_t)(dir & 32767), dist);
+    e->floor_y = floor_y;
+    return moved;
+}
+
+// On a wall: the turn from straight out of the wall (side * 0x400) toward
+// Leon, 0 within +-rate, else +-rate (FUN_801125b8 / FUN_80014fb4)
+static int spider_wall_aim(const Enemy *e, const EnemyTarget *p, int rate)
+{
+    int u = (rate + angle_re2(p->x - e->x, p->z - e->z) - wall_side(e) * 0x400) & 0xFFF;
+    return u < 2 * rate ? 0 : u > 0x800 ? -rate : rate;
+}
+
+// turns the head within the wall (FUN_80112284: side 0 the other way)
+static void spider_wall_turn(Enemy *e, int t)
+{
+    if (wall_side(e) == 0)
+        t = -t;
+    e->wall_head = (int16_t)((e->wall_head + t) & 0xFFF);
+    spider_pose(e);
+}
+
+static const RoomBox *spider_box(const Enemy *e)
+{
+    int n;
+    const RoomBox *boxes = game_room_boxes(&n);
+    return e->wall_box > 0 && e->wall_box <= n ? &boxes[e->wall_box - 1] : NULL;
+}
+
+// within 2500 of the end of side s of its wall box the head's turn `head`
+// points to? (FUN_80112390)
+static int spider_wall_end(const Enemy *e, int s, int head)
+{
+    const RoomBox *b = spider_box(e);
+    if (!b)
+        return 1;
+    if (!(s & 1))
+        return (head & 0xFFF) == 0x400 ? e->z > box_face(b, 3) - 2500 : e->z < box_face(b, 1) + 2500;
+    return ((head - 0x400 + s * 0x400) & 0xFFF) != 0x400 ? e->x > box_face(b, 0) - 2500 : e->x < box_face(b, 2) + 2500;
+}
+
+// Leon within 3000 of the wall's plane (FUN_80112454)
+static int spider_wall_near(const Enemy *e, const EnemyTarget *p, int side)
+{
+    const RoomBox *b = spider_box(e);
+    if (!b)
+        return 0;
+    int32_t d = (side & 1 ? p->z : p->x) - box_face(b, side);
+    return abs(d) < 3000;
+}
+
+// a box with a flag of mask within r on its height's floor level (FUN_80048964)
+static int spider_box_near(const Enemy *e, int32_t r, uint16_t mask)
+{
+    int n;
+    const RoomBox *boxes = game_room_boxes(&n);
+    for (int b = 0; b < n; b++)
+        if (box_near(&boxes[b], e->x, e->z, r, level_bit(e->y), mask))
+            return 1;
+    return 0;
+}
+
+// the wall it faces, of a box with flag 0x400 within 800 (FUN_801121a0):
+// its side + 1, 0 = none; the box goes to wall_box
+static int spider_find_wall(Enemy *e)
+{
+    int n;
+    const RoomBox *boxes = game_room_boxes(&n);
+    int level = -e->y / 1800;
+    int want = (((e->dir >> 3) + 0x200) & 0xC00) >> 10;
+    for (int b = 0; b < n; b++) {
+        if (!box_near(&boxes[b], e->x, e->z, 800, level_bit(e->y), BOX_ENEMY))
+            continue;
+        if (box_side(&boxes[b], e->x, e->z) == want && (uint32_t)(level < 0 ? 0 : level) <= boxes[b].floors) {
+            e->wall_box = b + 1;
+            return want + 1;
+        }
+    }
+    return 0;
+}
+
+// onto a wall, head down (FUN_8010ec88)
+static void spider_on_wall(Enemy *e, int side)
+{
+    e->surface = SURF_WALL + side;
+    e->wall_head = 0;
+    spider_pose(e);
+    set_anim(e, SET_GAIT, SPA_IDLE, 0);
+}
 
 static void spider_spawn(Enemy *e)
 {
@@ -2476,22 +3240,48 @@ static void spider_spawn(Enemy *e)
     if (is_spiderling(e)) {
         e->hp = 1;
         set_anim(e, SET_GAIT, 1, rnd() & 7);
-    } else {
-        e->hp = (easy() ? spider_hp_easy : spider_hp)[rnd() & 15] + (rnd() & 3);
-        e->airborne = (e->flags & EF_VARIANT) >= 2 && (e->flags & EF_VARIANT) <= 11;
-        set_anim(e, SET_GAIT, 0, rnd() & 15);
+        dog_enter(e, SP_IDLE);
+        return;
     }
+    e->hp = (easy() ? spider_hp_easy : spider_hp)[rnd() & 15] + (rnd() & 3);
+    set_anim(e, SET_GAIT, SPA_IDLE, rnd() & 15);
     dog_enter(e, SP_IDLE);
+    int v = e->flags & 0xF;
+    if (v == 2 || v == 3) {
+        e->surface = SURF_CEILING;
+        e->top_y = e->y + 1250;
+        spider_pose(e);
+    } else if (v >= 4 && v <= 11) {
+        int side = (v - 4) >> 1;
+        int level = (e->flags >> 4) & 0xF;
+        e->dir = (side * 0x400 * 8) & 32767;
+        e->top_y = level ? level * -1800 + 1250 : -3960;
+        spider_find_wall(e);
+        spider_on_wall(e, side);
+        dog_enter(e, SP_W_WAIT);
+    }
+}
+
+static void spider_hurts(Enemy *e, const EnemyTarget *p, int damage)
+{
+    if (game_player_damage(damage) == 2)
+        game_player_killed();
+    else
+        game_player_hurt(((p->dir - e->dir + 8192) & 32767) < 16384 ? 2 : 1);
+}
+
+// its poison reaches him (the spit flies as an effect on the PS1, FUN_80112828)
+static void spider_poison(Enemy *e, const EnemyTarget *p)
+{
+    game_blood(1, p->x, p->y - 1500, p->z, e->dir, 20, p->y);
+    spider_hurts(e, p, SP_SPIT_DAMAGE);
 }
 
 static void spider_bites(Enemy *e, const EnemyTarget *p, int damage)
 {
     sound_at(e, SND_SPIDER_BITE);
     game_blood(0, p->x, p->y - 1200, p->z, e->dir, 20, p->y);
-    if (game_player_damage(damage) == 2)
-        game_player_killed();
-    else
-        game_player_hurt(((p->dir - e->dir + 8192) & 32767) < 16384 ? 2 : 1);
+    spider_hurts(e, p, damage);
 }
 
 // the small ones crawl at Leon and nip him when they touch
@@ -2515,27 +3305,420 @@ static void spiderling_tick(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
     }
 }
 
+// The ceiling's walk (0x8010e4a8) near a wall: by a box with flag 0x200 (a
+// stretch the spiders keep off) nothing; by one with flag 0x400 within 800,
+// if no spider is going between a wall and the ceiling and its wait is over
+// (obj+0x232), onto the wall it faces, when that wall goes on 2500 both ways
+// and Leon is within 3000 of it; otherwise it wanders off. (The PS1 also lets
+// two spiders up there meet, state 11; not here.)
+static void spider_wall_check(Enemy *e, int i, const EnemyTarget *p)
+{
+    if (spider_box_near(e, 800, BOX_CLIMB) || !spider_box_near(e, 800, BOX_ENEMY))
+        return;
+    if (e->climb_wait || spider_lock >= 0) {
+        dog_enter(e, SP_WANDER);
+        return;
+    }
+    int side = spider_find_wall(e) - 1;
+    if (side < 0 || spider_wall_end(e, side, 0x400) || spider_wall_end(e, side, 0xC00) || !spider_wall_near(e, p, side))
+        return;
+    spider_lock = (int8_t)i;
+    dog_enter(e, SP_TO_WALL);
+    e->timer2 = (int16_t)side;
+}
+
+// up there: the states the floor has not (or has otherwise)
+static int spider_ceiling(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
+{
+    switch (e->state) {
+    case SP_IDLE: { // 0x8010e36c
+        if (e->sub == 0) {
+            set_anim(e, SET_GAIT, SPA_IDLE, e->key);
+            e->timer = (rnd() + 10) & 0x1F;
+            e->sub = 1;
+        }
+        anim_step(e, NULL);
+        int next = -1;
+        if (e->timer-- <= 0)
+            next = (rnd() & 1) ? SP_WANDER : SP_WALK;
+        if (!p->dead) {
+            int facing = spider_cone(e, p, 0x80), chance = (0x340 >> (rnd() & 15)) & 1;
+            if (p->noise & NOISE_SHOT)
+                next = (rnd() & 1) ? SP_TURN : SP_EVADE;
+            if (!e->cooldown && d > 3000 && d < 7500)
+                next = facing && chance ? SP_CHARGE : SP_WALK;
+            if (!e->cooldown && d < 3000 && facing)
+                next = chance ? SP_SPIT : SP_CHARGE;
+        }
+        if (next >= 0)
+            dog_enter(e, next);
+        return 1;
+    }
+    case SP_WALK: // at him: anim 2, turning 48, 100 a tick (0x80113310)
+        if (e->sub == 0) {
+            set_anim(e, SET_GAIT, SPA_WALK, e->key);
+            e->timer = rnd() & 0x2E;
+            e->sub = 1;
+        }
+        e->dir = (e->dir + spider_turn(e, p, 48)) & 32767;
+        anim_step(e, NULL);
+        spider_move(e, i, e->dir, 100);
+        if (e->timer-- <= 0)
+            dog_enter(e, SP_IDLE);
+        else
+            spider_wall_check(e, i, p);
+        return 1;
+    case SP_CHARGE: // 0x8010e678: creeps, aims, rushes along the ceiling dripping poison
+        switch (e->sub) {
+        case 0:
+            set_anim(e, SET_GAIT, SPA_CROUCH, 0);
+            e->sub = 1;
+            // fall through
+        case 1:
+            spider_move(e, i, e->dir, 100);
+            if (anim_step(e, NULL)) {
+                set_anim(e, SET_GAIT, SPA_RUSH, 0);
+                e->timer = (rnd() & 0x1F) + 0x2D;
+                e->sub = 2;
+            }
+            break;
+        case 2: { // aims (0x40)
+            int t = spider_turn(e, p, 0x40);
+            e->dir = (e->dir + t) & 32767;
+            anim_step(e, NULL);
+            if (!t) {
+                e->timer = (rnd() & 0x1F) + 10;
+                e->timer2 = 1;
+                e->sub = 3;
+            } else if (e->timer-- <= 0) {
+                e->sub = 4;
+            }
+            break;
+        }
+        case 3: { // 300 a tick, a drop every 12 ticks
+            e->dir = (e->dir + spider_turn(e, p, 0x10)) & 32767;
+            int moved = spider_move(e, i, e->dir, 300);
+            anim_step(e, NULL);
+            if (--e->timer2 <= 0) {
+                sound_at(e, SND_SPIDER_SPIT);
+                if (d < 1500 && p->can_grab)
+                    spider_poison(e, p);
+                e->timer2 = 12;
+            }
+            if (e->timer-- <= 0 || !spider_cone(e, p, 0x200) || !moved)
+                e->sub = 4;
+            break;
+        }
+        case 4:
+            set_anim(e, SET_GAIT, SPA_STOP, 0);
+            e->sub = 5;
+            // fall through
+        case 5:
+            spider_move(e, i, e->dir, 100);
+            if (anim_step(e, NULL)) {
+                e->cooldown = 60;
+                dog_enter(e, SP_IDLE);
+            }
+            break;
+        }
+        return 1;
+    case SP_TO_WALL: { // 0x8010e920: turns to the wall (0x18 a tick) and goes over its edge (anim 14)
+        int want = (e->timer2 * 0x400 * 8) & 32767;
+        if (e->sub == 0) {
+            set_anim(e, SET_GAIT, SPA_SLOW, 0);
+            e->sub = 1;
+        }
+        if (e->sub == 1) {
+            int diff = ((want - e->dir + 16384) & 32767) - 16384;
+            if (abs(diff) <= 0x18 * 8) {
+                e->dir = want;
+                set_anim(e, SET_GAIT, SPA_CLIMB, 0);
+                e->sub = 2;
+            } else {
+                e->dir = (e->dir + (diff > 0 ? 0x18 : -0x18) * 8) & 32767;
+            }
+            anim_step(e, NULL);
+            return 1;
+        }
+        spider_move(e, i, e->dir, 25);
+        if (anim_step(e, NULL)) {
+            // 450 on, 1250 down: on the wall (here onto its face), head down
+            int side = e->timer2;
+            const RoomBox *b = spider_box(e);
+            int a = (e->dir + 16384) & 32767;
+            e->x += (450 * cosLerp(a)) >> 12;
+            e->z -= (450 * sinLerp(a)) >> 12;
+            if (b && (side & 1))
+                e->z = box_face(b, side);
+            else if (b)
+                e->x = box_face(b, side);
+            e->y += 1250;
+            e->top_y = e->y;
+            spider_on_wall(e, side);
+            if (spider_lock == i)
+                spider_lock = -1;
+            dog_enter(e, SP_W_DOWN);
+        }
+        return 1;
+    }
+    }
+    return 0;
+}
+
+// on a wall
+static void spider_wall(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
+{
+    switch (e->state) {
+    case SP_W_DOWN: // 0x8010ed40 / 0x8010ee94: down to 3500 above him, 100 a tick
+        if (e->sub == 0) {
+            int32_t dy = p->y - e->y;
+            e->timer = dy > 0xDAC ? (dy - 0xDAC) / 100 : 0;
+            if (e->timer)
+                e->timer += rnd() & 3;
+            set_anim(e, SET_GAIT, SPA_WALK, 0);
+            e->sub = 1;
+        }
+        anim_step(e, NULL);
+        if (e->timer > 0) {
+            spider_crawl(e, 100);
+            e->timer--;
+        }
+        if (e->timer <= 0) {
+            dog_enter(e, SP_W_PAUSE);
+            e->timer = (rnd() & 0xF) + 0xF;
+        }
+        break;
+    case SP_W_PAUSE: // 0x8010ef78
+        if (e->sub == 0) {
+            set_anim(e, SET_GAIT, SPA_IDLE, 0);
+            e->sub = 1;
+        }
+        anim_step(e, NULL);
+        if (--e->timer <= 0)
+            dog_enter(e, d < 3000 && ((0x340 >> (rnd() & 15)) & 1) ? SP_W_SPIT : SP_W_TURN);
+        break;
+    case SP_W_WAIT: // 0x8010fb34: within 7200, or he is near its wall
+        anim_step(e, NULL);
+        if (!p->dead && (d < 0x1C20 || spider_wall_near(e, p, wall_side(e))))
+            dog_enter(e, d < 3000 ? SP_W_SPIT : SP_W_TURN);
+        break;
+    case SP_W_TURN: // 0x8010f050: the head to his side (+-0x400), 0x20 a tick
+        switch (e->sub) {
+        case 0: {
+            int t = spider_wall_aim(e, p, 0x20);
+            if (!t) {
+                dog_enter(e, SP_W_SPIT);
+                return;
+            }
+            e->turned = (int16_t)t;
+            e->speed = (t > 0) != (wall_side(e) == 0) ? 0x400 : 0xC00; // the head's goal
+            e->sub = 1;
+        }
+            // fall through
+        case 1:
+            e->timer = (rnd() & 0xF) + 0xF;
+            set_anim(e, SET_GAIT, SPA_WALK, e->key);
+            e->sub = 2;
+            // fall through
+        case 2:
+            spider_wall_turn(e, e->turned);
+            anim_step(e, NULL);
+            if (e->wall_head == e->speed) {
+                dog_enter(e, SP_W_RUSH);
+            } else if (--e->timer <= 0) {
+                e->timer = (rnd() & 0xF) + 1;
+                set_anim(e, SET_GAIT, SPA_IDLE, 0);
+                e->sub = 3;
+            }
+            break;
+        case 3:
+            anim_step(e, NULL);
+            if (--e->timer <= 0)
+                e->sub = 1;
+            break;
+        }
+        break;
+    case SP_W_RUSH: // 0x8010f738: 300 a tick along the wall; bites within 2000 (0x10cc in height)
+        switch (e->sub) {
+        case 0:
+            set_anim(e, SET_GAIT, SPA_CROUCH, 0);
+            e->sub = 1;
+            // fall through
+        case 1:
+            if (anim_step(e, NULL)) {
+                set_anim(e, SET_GAIT, SPA_RUSH, 0);
+                e->sub = 2;
+            }
+            break;
+        case 2:
+            spider_crawl(e, 300);
+            anim_step(e, NULL);
+            if (d < 2000 && p->can_grab && abs(p->y - e->y) < 0x10CC) {
+                spider_bites(e, p, SP_BITE);
+                e->sub = 3;
+            } else if (spider_wall_end(e, wall_side(e), e->wall_head)) {
+                e->sub = 3;
+            }
+            if (e->sub == 3)
+                set_anim(e, SET_GAIT, SPA_STOP, 0);
+            break;
+        case 3:
+            if (anim_step(e, NULL)) {
+                e->timer2 = 0;
+                dog_enter(e, SP_W_CLIMB);
+            }
+            break;
+        }
+        break;
+    case SP_W_SPIT: // 0x8010f8dc: turns the head 0x40 a tick for 16 at most, spits
+        switch (e->sub) {
+        case 0:
+            e->timer = 0x10;
+            set_anim(e, SET_GAIT, SPA_HURT, 0);
+            e->sub = 1;
+            // fall through
+        case 1: {
+            int t = spider_wall_aim(e, p, 0x40);
+            spider_wall_turn(e, t);
+            anim_step(e, NULL);
+            if (!t || --e->timer <= 0) {
+                set_anim(e, SET_GAIT, SPA_SPIT, 0);
+                sound_at(e, SND_SPIDER_SPIT);
+                e->sub = 2;
+            }
+            break;
+        }
+        case 2:
+            if (e->key == 20 && d < 6000 && p->can_grab && !spider_wall_aim(e, p, 0x400))
+                spider_poison(e, p);
+            if (anim_step(e, NULL)) {
+                e->timer2 = 0;
+                dog_enter(e, SP_W_CLIMB);
+            }
+            break;
+        }
+        break;
+    case SP_W_CLIMB: // 0x8010f1ec: the head up (turning at random; 0x40 after a hit), up to the top
+        switch (e->sub) {
+        case 0:
+            e->turned = e->timer2 ? 0x40 : sp_climb_turn[rnd() & 7];
+            e->sub = 1;
+            // fall through
+        case 1:
+            e->timer = e->timer2 ? -1 : (rnd() & 0xF) + 0xF;
+            set_anim(e, SET_GAIT, abs(e->turned) == 32 ? SPA_WALK : SPA_HURT, e->key);
+            e->sub = 2;
+            // fall through
+        case 2: {
+            int r = abs(e->turned);
+            spider_wall_turn(e, e->turned);
+            anim_step(e, NULL);
+            if (((e->wall_head + r - 0x800) & 0xFFF) <= 2 * r) {
+                e->sub = spider_lock < 0 ? 5 : 4;
+                set_anim(e, SET_GAIT, SPA_IDLE, 0);
+            } else if (e->timer > 0 && --e->timer == 0) {
+                e->timer = (rnd() & 0xF) + 0xF;
+                set_anim(e, SET_GAIT, SPA_IDLE, 0);
+                e->sub = 3;
+            }
+            break;
+        }
+        case 3:
+            anim_step(e, NULL);
+            if (--e->timer <= 0)
+                e->sub = 1;
+            break;
+        case 4: // another is going up or down: waits
+            anim_step(e, NULL);
+            if (spider_lock < 0)
+                e->sub = 5;
+            break;
+        case 5:
+            e->wall_head = 0x800;
+            spider_pose(e);
+            spider_lock = (int8_t)i;
+            set_anim(e, SET_GAIT, SPA_WALK, 0);
+            e->sub = 6;
+            // fall through
+        case 6:
+            spider_crawl(e, 100);
+            anim_step(e, NULL);
+            if (e->y <= e->top_y) {
+                e->y = e->top_y;
+                dog_enter(e, SP_TO_CEILING);
+            }
+            break;
+        }
+        break;
+    case SP_TO_CEILING: // 0x8010f47c: over the edge (anim 14, 25 a tick up), then 1225 into the room
+        if (e->sub == 0) {
+            set_anim(e, SET_GAIT, SPA_CLIMB, 0);
+            e->sub = 1;
+        }
+        e->y -= 25;
+        if (anim_step(e, NULL)) {
+            e->dir = ((wall_side(e) * 0x400 + 0x800) * 8) & 32767;
+            e->surface = SURF_CEILING;
+            spider_pose(e);
+            e->y = e->top_y - 1250;
+            e->wall_box = 0;
+            e->climb_wait = 150;
+            spider_move(e, i, e->dir, 1225);
+            if (spider_lock == i)
+                spider_lock = -1;
+            dog_enter(e, SP_IDLE);
+        }
+        break;
+    default:
+        anim_step(e, NULL);
+        break;
+    }
+}
+
+// dead: up there it falls first (0x80110e9c: upright, 800 lower, +40 a tick
+// more each tick; off a wall 0x8011118c: 480 a tick, here upright at once)
+static void spider_dying(Enemy *e)
+{
+    if (e->y < e->floor_y) {
+        e->y += e->vspeed;
+        e->vspeed += 40;
+        if (e->y >= e->floor_y) {
+            e->y = e->floor_y;
+            sound_at(e, SND_SPIDER_LAND);
+        }
+        if (e->key + 1 < types[e->type].model.anims[e->anim].count)
+            anim_step(e, NULL);
+        return;
+    }
+    if (e->key + 1 >= types[e->type].model.anims[e->anim].count)
+        e->state = ST_DEAD;
+    else
+        anim_step(e, NULL);
+}
+
 static void spider_tick(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
 {
     if (is_spiderling(e)) {
         spiderling_tick(e, i, p, d);
         return;
     }
-    if (e->airborne) { // waits up there, drops when Leon comes near
-        anim_step(e, NULL);
-        if (d < 4000 || (p->noise & NOISE_SHOT)) {
-            e->floor_y = p->y;
-            e->y += 150;
-            if (e->y >= e->floor_y) {
-                e->y = e->floor_y;
-                e->airborne = 0;
-            }
-        }
-        return;
-    }
     if (e->cooldown)
         e->cooldown--;
-    int facing = in_cone(e, p->x, p->z, 0x80);
+    if (e->climb_wait)
+        e->climb_wait--;
+    if (e->state == ST_DYING) {
+        spider_dying(e);
+        return;
+    }
+    if (off_floor(e))
+        e->floor_y = p->y;
+    if (on_wall(e)) {
+        spider_wall(e, i, p, d);
+        return;
+    }
+    if (e->surface == SURF_CEILING && spider_ceiling(e, i, p, d))
+        return;
+    int facing = spider_cone(e, p, 0x80);
     switch (e->state) {
     case SP_IDLE:
         if (e->sub == 0) {
@@ -2549,7 +3732,7 @@ static void spider_tick(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
             dog_enter(e, (rnd() & 1) ? SP_TURN : SP_EVADE);
             break;
         }
-        if (d < 8000 && !in_cone(e, p->x, p->z, 0x400)) {
+        if (d < 8000 && !spider_cone(e, p, 0x400)) {
             dog_enter(e, SP_TURN);
             break;
         }
@@ -2570,7 +3753,7 @@ static void spider_tick(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
             e->sub = 1;
         }
         e->dir = (e->dir + e->turned) & 32767;
-        move_dir(e, i, e->dir, 40);
+        spider_move(e, i, e->dir, 40);
         anim_step(e, NULL);
         if (e->timer-- <= 0 || d < 8000)
             dog_enter(e, SP_IDLE);
@@ -2582,7 +3765,7 @@ static void spider_tick(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
             e->sub = 1;
         }
         {
-            int delta = turn_delta(e, p->x, p->z, 0x80);
+            int delta = spider_turn(e, p, 0x80);
             e->dir = (e->dir + delta) & 32767;
             anim_step(e, NULL);
             if (e->timer-- <= 0 || delta == 0)
@@ -2596,7 +3779,7 @@ static void spider_tick(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
             e->sub = 1;
             // fall through
         case 1:
-            move_dir(e, i, e->dir, 100);
+            spider_move(e, i, e->dir, 100);
             if (anim_step(e, NULL)) {
                 set_anim(e, SET_GAIT, 5, 0);
                 e->timer = (rnd() & 0x1F) + 20;
@@ -2604,7 +3787,7 @@ static void spider_tick(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
             }
             break;
         case 2: { // aims (0x40 a tick)
-            int delta = turn_delta(e, p->x, p->z, 0x40);
+            int delta = spider_turn(e, p, 0x40);
             e->dir = (e->dir + delta) & 32767;
             anim_step(e, NULL);
             if (delta == 0) {
@@ -2616,13 +3799,13 @@ static void spider_tick(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
             break;
         }
         case 3: // rushes at 300, turning 0x10
-            e->dir = (e->dir + turn_delta(e, p->x, p->z, 0x10)) & 32767;
-            move_dir(e, i, e->dir, 300);
+            e->dir = (e->dir + spider_turn(e, p, 0x10)) & 32767;
+            spider_move(e, i, e->dir, 300);
             anim_step(e, NULL);
             if (d < 1500 && p->can_grab && abs(p->y - e->y) < 0x10CC) {
                 spider_bites(e, p, SP_BITE);
                 e->sub = 4;
-            } else if (e->timer-- <= 0 || !in_cone(e, p->x, p->z, 0x200)) {
+            } else if (e->timer-- <= 0 || !spider_cone(e, p, 0x200)) {
                 e->sub = 4;
             }
             break;
@@ -2631,7 +3814,7 @@ static void spider_tick(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
             e->sub = 5;
             // fall through
         case 5:
-            move_dir(e, i, e->dir, 100);
+            spider_move(e, i, e->dir, 100);
             if (anim_step(e, NULL)) {
                 e->cooldown = 15;
                 dog_enter(e, SP_IDLE);
@@ -2641,14 +3824,13 @@ static void spider_tick(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
         break;
     case SP_SPIT: // anim 11; the spit flies at him (FUN_80112828)
         if (e->sub == 0) {
-            set_anim(e, SET_GAIT, 11, 0);
+            set_anim(e, SET_GAIT, SPA_SPIT, 0);
+            sound_at(e, SND_SPIDER_SPIT);
             e->sub = 1;
         }
-        e->dir = (e->dir + turn_delta(e, p->x, p->z, 0x10)) & 32767;
-        if (e->key == 20 && d < 6000 && in_cone(e, p->x, p->z, 0x100) && p->can_grab) {
-            game_blood(1, e->x, e->y - 300, e->z, e->dir, 40, e->floor_y);
-            spider_bites(e, p, SP_SPIT_DAMAGE);
-        }
+        e->dir = (e->dir + spider_turn(e, p, 0x10)) & 32767;
+        if (e->key == 20 && d < 6000 && spider_cone(e, p, 0x100) && p->can_grab)
+            spider_poison(e, p);
         if (anim_step(e, NULL)) {
             e->cooldown = 15;
             dog_enter(e, SP_IDLE);
@@ -2661,20 +3843,14 @@ static void spider_tick(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
             e->speed = (rnd() & 0x3F) + 400;
             e->sub = 1;
         }
-        e->dir = (e->dir + turn_delta(e, p->x, p->z, 0x60)) & 32767;
-        move_dir(e, i, e->push_dir, e->speed);
+        e->dir = (e->dir + spider_turn(e, p, 0x60)) & 32767;
+        spider_move(e, i, e->push_dir, e->speed);
         if (anim_step(e, NULL))
             dog_enter(e, SP_IDLE);
         break;
     case SP_HURT: // anim 1, then jumps aside or decides again
         if (anim_step(e, NULL))
             dog_enter(e, (rnd() & 1) ? SP_EVADE : SP_IDLE);
-        break;
-    case ST_DYING: // anim 12, the legs curl up
-        if (e->key + 1 >= types[e->type].model.anims[e->anim].count)
-            e->state = ST_DEAD;
-        else
-            anim_step(e, NULL);
         break;
     default:
         anim_step(e, NULL);
@@ -2689,17 +3865,34 @@ static void spider_shot(Enemy *e)
         e->state = ST_DYING;
         return;
     }
-    e->airborne = 0;
-    if (e->y < e->floor_y)
-        e->y = e->floor_y;
-    if (e->hp < 0) {
-        set_anim(e, SET_GAIT, 12, 0);
+    if (e->hp < 0) { // the legs curl up (anim 12); up there it falls first
+        if (e->surface == SURF_CEILING) {
+            e->y += 800;
+            e->vspeed = 40;
+        } else if (on_wall(e)) {
+            int s = wall_side(e);
+            e->dir = ((-(e->wall_head + ((s & 1) ? s * 0x400 : 0))) * 8) & 32767;
+            e->vspeed = 480;
+        }
+        e->surface = SURF_FLOOR;
+        e->wall_box = 0;
+        spider_pose(e);
+        if (spider_lock == e - enemies)
+            spider_lock = -1;
+        set_anim(e, SET_GAIT, SPA_DIE, 0);
         e->state = ST_DYING;
         e->sub = 0;
         return;
     }
     if (e->state == SP_CHARGE && e->sub == 3)
         return; // rushing: it keeps on
+    if (e->state == SP_TO_WALL || e->state == SP_TO_CEILING || e->state == SP_W_CLIMB)
+        return; // on its way between wall and ceiling (obj+0x236)
+    if (on_wall(e)) { // up the wall (0x8010feb0)
+        e->timer2 = 1;
+        dog_enter(e, SP_W_CLIMB);
+        return;
+    }
     set_anim(e, SET_GAIT, 1, 0);
     dog_enter(e, SP_HURT);
     e->sub = 1;
@@ -5053,6 +6246,8 @@ void enemy_tick(const EnemyTarget *p)
         Enemy *e = &enemies[i];
         if (!present(e) || !anim_model(e)->anims[e->anim].count)
             continue;
+        if (e->hit_lock)
+            e->hit_lock--;
         if (e->kill_flag && e->hp < 0) { // killed: it stays dead (scd_op_44 skips it)
             flag_set(e->kill_flag >> 8, e->kill_flag & 0xFF, 1);
             e->kill_flag = 0;
@@ -5154,12 +6349,16 @@ void enemy_tick(const EnemyTarget *p)
             anim_step(e, NULL);
             continue;
         }
-        if (e->flinch) { // hit recoil: holds still a moment
-            e->flinch--;
-            anim_step(e, NULL);
+        if (is_crawler(e)) {
+            crawler_tick(e, i, p, d);
+            continue;
+        }
+        if (e->flinch) { // the hit: bends while it goes on
+            zombie_flinch(e, i, p, d);
             continue;
         }
         switch (e->state) {
+        case ST_SPLIT: split_tick(e, i); break;
         case ST_DYING:
         case ST_DOWN: fallen(e, i); break;
         case ST_LURK: lurk(e, i, p->x, p->z, d, p->noise); break;
@@ -5167,6 +6366,7 @@ void enemy_tick(const EnemyTarget *p)
         case ST_LUNGE: lunge(e, i, p, d); break;
         case ST_GRAB: grab_zombie(e, i, p->pressed); break;
         case ST_LYING: lying(e); break;
+        case ST_RECOIL: recoil(e, i); break;
         case ST_EAT: eat(e, p); break;
         default: anim_step(e, NULL); break;
         }
@@ -5183,6 +6383,8 @@ int enemy_grabbing(void) { return grab.enemy >= 0; }
 static int alive(const Enemy *e)
 {
     return present(e) && e->state < ST_DYING && !is_person(e) && !e->hidden &&
+           !(is_crawler(e) && e->hp < 0) &&               // lies as if dead (HP -1)
+           !(is_zombie(e) && e->state == ST_SPLIT) &&     // coming apart (obj+0x1d3 | 0x80)
            !(is_actor(e) && e->state == ACT_STAND) && // a part of a scene: never aimed at
            !(is_licker(e) && e->state == LICK_SCRIPT);
 }
@@ -5190,7 +6392,10 @@ static int alive(const Enemy *e)
 // A zombie on the ground (status obj+0x10e bit 0x2000: set when it is
 // knocked down or spawns lying, cleared when it gets up) is a target only
 // if no standing one is in sight.
-static int on_ground(const Enemy *e) { return e->state == ST_DOWN || e->state == ST_LYING; }
+static int on_ground(const Enemy *e)
+{
+    return is_zombie(e) && (e->state == ST_DOWN || e->state == ST_LYING || is_crawler(e));
+}
 
 // Nearest living enemy Leon can see within range (0 = any), for the
 // auto-aim when he raises a weapon (FUN_8003ed74): standing ones first, those
@@ -5227,6 +6432,65 @@ int enemy_aim_target(int32_t x, int32_t y, int32_t z, int range, int32_t *tx, in
     return best;
 }
 
+// Leon's head (FUN_8003a9e8, every 45 ticks): of the objects not held by
+// a script (status 0xc000), the nearest standing one within range whose
+// position is within +-cone of his facing and in sight from his head; else
+// the nearest lying one (status 0x2000) at any distance. He looks at the
+// part obj+0x1c1 of it: the head (part 8) of people, zombies and lickers,
+// here the root of the others.
+static int look_bone(const Enemy *e)
+{
+    int bone = is_zombie(e) || is_person(e) || is_licker(e) ? 8 : 0;
+    return bone < types[e->type].model.header->num_bones ? bone : 0;
+}
+
+int enemy_look_point(int slot, int32_t *x, int32_t *y, int32_t *z)
+{
+    if (slot < 0 || slot >= MAX_ENEMIES)
+        return 0;
+    Enemy *e = &enemies[slot];
+    if (!present(e) || e->hidden)
+        return 0;
+    if (off_floor(e)) {
+        *x = e->x;
+        *y = body_y(e, 900);
+        *z = e->z;
+        return 1;
+    }
+    if (!e->pose_valid)
+        update_pose(e);
+    arm_bone(e, look_bone(e), x, y, z);
+    return 1;
+}
+
+int enemy_look_target(int32_t x, int32_t y, int32_t z, int16_t dir, int range, int cone)
+{
+    int best = -1, lying = -1;
+    int64_t best_d = (int64_t)range * range, lying_d = INT64_MAX;
+    for (int i = 0; i < MAX_ENEMIES; i++) {
+        const Enemy *e = &enemies[i];
+        if (!present(e) || e->hidden || (e->flags & 0x4000))
+            continue;
+        int64_t dx = e->x - x, dz = e->z - z, d = dx * dx + dz * dz;
+        int down = e->state >= ST_DYING || on_ground(e);
+        if (d >= (down ? lying_d : best_d))
+            continue;
+        if (((cone + angle_re2((int32_t)dx, (int32_t)dz) - (dir >> 3)) & 0xFFF) >= 2 * cone)
+            continue; // FUN_80014fb4
+        int32_t hx, hy, hz;
+        if (!enemy_look_point(i, &hx, &hy, &hz) || game_sight_blocked(x, y, z, hx, hy, hz))
+            continue;
+        if (down) {
+            lying = i;
+            lying_d = d;
+        } else {
+            best = i;
+            best_d = d;
+        }
+    }
+    return best >= 0 ? best : lying;
+}
+
 static void fall(Enemy *e, int dying)
 {
     e->fall_back = rnd() & 1;
@@ -5254,26 +6518,271 @@ static void push_tick(Enemy *e, int i)
 
 // a burst of blood where the shell hits (0x80109550: two big ones, then 1-4
 // spatters fanned around the shot direction)
-static void blood_burst(const Enemy *e, int16_t dir)
+static void blood_burst(const Enemy *e, int16_t dir, int32_t up)
 {
     int n = 3 + (rnd() & 3);
     for (int k = 0; k < n; k++)
-        game_blood(0, e->x, e->y - 1900 - (rnd() & 0x3FF), e->z, dir + (rnd() & 0x1FFF) - 0x1000,
+        game_blood(0, e->x, e->y - up - (rnd() & 0x3FF), e->z, dir + (rnd() & 0x1FFF) - 0x1000,
                    20 + (rnd() & 31), e->y);
 }
 
+// Hit from behind (obj+0x1d0 & 0x20): the shot goes the way the zombie faces.
+static int shot_from_behind(const Enemy *e, int16_t dir)
+{
+    return abs(((dir - e->dir + 16384) & 32767) - 16384) < 8192;
+}
+
+// The normal hit (0x80105378): the zombie goes on in its gait (switching to
+// it, 15 frames of blending) at half its speed, turning 0x10 a frame to its
+// goal, while its upper body bends - part 0 turned by -a about z, part 1
+// (the hips, with the legs) back by +a: a = frame * bend * 8 for frames
+// 0..3, then 16..0 * bend over 17 frames; bend 0x18 (weapon 0x10: 2), its
+// sign 1 from the front (back), -1 from behind (forward). From the 5th
+// frame it may grab Leon (within 0x514 in front). Then (sub 3) it lunges or
+// chases (each half the time). Each hit starts it again.
+static void zombie_flinch_start(Enemy *e, int behind, int bend)
+{
+    if (e->state == ST_LURK || e->state == ST_EAT)
+        enter_state(e, ST_CHASE); // shot at: comes for Leon
+    if (!e->anim_set && e->anim != types[e->type].set_start[SET_GAIT] + e->gait)
+        set_anim(e, SET_GAIT, e->gait, rnd() & 0x1F);
+    e->flinch = 1;
+    e->flinch_dir = behind ? -1 : 1;
+    e->flinch_bend = (uint8_t)bend;
+}
+
+// the bend of the upper body now, RE2 units (+ = back)
+static int flinch_bend(const Enemy *e)
+{
+    if (!e->flinch || !is_zombie(e))
+        return 0;
+    int n = e->flinch - 1;
+    return (n < 4 ? n * e->flinch_bend * 8 : (20 - n) * e->flinch_bend) * e->flinch_dir;
+}
+
+static void zombie_flinch(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
+{
+    int32_t fwd;
+    turn_toward(e, e->has_goal ? e->goal_x : p->x, e->has_goal ? e->goal_z : p->z, 0x10);
+    anim_step(e, &fwd);
+    walk(e, i, fwd / 2);
+    if (e->flinch > 4 && e->state != ST_GRAB && is_zombie(e) && can_grab(e, p, d)) {
+        e->flinch = 0;
+        start_grab(e, i, p);
+        return;
+    }
+    if (++e->flinch > 21) {
+        e->flinch = 0;
+        if (e->state == ST_CHASE || e->state == ST_LUNGE)
+            enter_state(e, (rnd() & 1) ? ST_LUNGE : ST_CHASE);
+    }
+}
+
+// Reels back (0x80105b00; out of stagger, or the shotgun from middle
+// distance): set 1 animation 4 shoved 450 back (the PS1 in one frame; here
+// 200 + 150 + 100 + 50 over four), from behind animation 3 forward; then it
+// comes on again.
+static void zombie_recoil(Enemy *e, int behind)
+{
+    e->flinch = 0;
+    e->state = ST_RECOIL;
+    e->sub = 1;
+    e->standing = 0;
+    set_anim(e, SET_MAIN, behind ? A_RECOIL - 1 : A_RECOIL, 0);
+    if (!behind) {
+        e->push_dir = (e->dir + 16384) & 32767;
+        e->push = 200;
+    }
+}
+
+static void recoil(Enemy *e, int i)
+{
+    int32_t fwd;
+    int done = anim_step(e, &fwd);
+    walk(e, i, fwd);
+    if (done)
+        enter_state(e, (rnd() & 1) ? ST_LUNGE : ST_CHASE);
+}
+
+// ---------------------------------------------------------------- crawlers
+static int is_crawler(const Enemy *e) { return is_zombie(e) && !is_person(e) && (e->flags & 1); }
+
+static void crawl_on(Enemy *e)
+{
+    e->state = ST_CRAWL;
+    e->sub = 1;
+    set_anim(e, SET_MAIN, A_CRAWL, rnd() & 0xF);
+}
+
+// the hit (0x801077c8): animation 6 from a random key 0-7, a groan; then on
+static void crawler_hit(Enemy *e)
+{
+    e->state = ST_CR_HIT;
+    e->sub = 1;
+    set_anim(e, SET_MAIN, A_CR_HIT, rnd() & 7);
+    if (!e->moan_pause) {
+        sound_at(e, SND_MOAN + 2);
+        e->moan_pause = MOAN_PAUSE;
+    }
+}
+
+// death (0x80108954): animation 7, blood, a groan (0xb / 0xd)
+static void crawler_die(Enemy *e, int i)
+{
+    e->state = ST_DYING;
+    e->sub = 1;
+    e->routine = 1;
+    set_anim(e, SET_MAIN, A_CR_DIE, 0);
+    game_blood(0, e->x, e->y - 300, e->z, e->dir, 20, e->y);
+    sound_at(e, (rnd() & 1) ? SND_MOAN + 3 : SND_MOAN + 1);
+    if (grab.enemy == i)
+        grab.enemy = -1;
+}
+
+// Leon's leg within 1300 and +-45 degrees in front (its two arm cones of
+// 0x80102e14 / 0x801039a4), nobody else holding him
+static int crawler_can_grab(const Enemy *e, const EnemyTarget *p, uint32_t d)
+{
+    return d < CR_GRAB_DISTANCE && grab.enemy < 0 && p->can_grab && in_cone(e, p->x, p->z, 0x200);
+}
+
+// The crawler routine 0x80101178: crawls at Leon (0x80102f58: animation 5,
+// turning CR_TURN a frame toward its goal while its motion is over 20),
+// grabs his leg, or lies still until he comes near (0x801039a4).
+static void crawler_tick(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
+{
+    int32_t fwd;
+    switch (e->state) {
+    case ST_GRAB:
+        grab_zombie(e, i, p->pressed);
+        return;
+    case ST_DYING:
+        fallen(e, i);
+        return;
+    case ST_CR_HIT:
+        if (anim_step(e, NULL))
+            crawl_on(e);
+        return;
+    case ST_CR_LIE:
+        if (crawler_can_grab(e, p, d))
+            start_grab(e, i, p);
+        return;
+    }
+    if (e->state != ST_CRAWL)
+        crawl_on(e);
+    if (crawler_can_grab(e, p, d)) {
+        start_grab(e, i, p);
+        return;
+    }
+    anim_step(e, &fwd);
+    if (fwd > 20)
+        turn_toward(e, e->has_goal ? e->goal_x : p->x, e->has_goal ? e->goal_z : p->z, CR_TURN);
+    walk(e, i, fwd);
+}
+
+// Torn in two by the shotgun (0x8010663c): it reels back (set 1 animation 4,
+// from behind 3) with blood, a groan and sound 9.
+static void zombie_split(Enemy *e, int i, int16_t dir)
+{
+    e->flinch = 0;
+    e->state = ST_SPLIT;
+    e->sub = 1;
+    e->standing = 0;
+    e->routine = 1;
+    e->split_dead = e->hp < 0;
+    e->floor_y = e->y;
+    set_anim(e, SET_MAIN, shot_from_behind(e, dir) ? A_RECOIL - 1 : A_RECOIL, 0);
+    blood_burst(e, dir, 1900);
+    sound_at(e, (rnd() & 1) ? SND_MOAN + 2 : SND_MOAN + 3);
+    sound_at(e, SND_TEAR);
+    if (grab.enemy == i)
+        grab.enemy = -1;
+}
+
+// At key 20 it comes apart: the legs (parts 1-7) stay as they stand, the
+// upper body falls - 10 a frame and 5 more each (55 after key 34), back up
+// at 1/8 when its root is 200 above the floor, twice (sound 4) - and at the
+// end of the animation crawls on: kind 0x2001, HP 10 if the hit was deadly.
+static void split_tick(Enemy *e, int i)
+{
+    int32_t fwd;
+    int done = anim_step(e, &fwd);
+    Legs *l = &legs[i];
+    if (!l->on) {
+        walk(e, i, fwd);
+        if (e->key >= 20) {
+            l->on = 1;
+            l->x = e->x;
+            l->y = e->y;
+            l->z = e->z;
+            l->dir = e->dir;
+            memcpy(l->rot, e->pose_rot, sizeof(l->rot));
+            memcpy(l->ofs, e->pose_ofs, sizeof(l->ofs));
+            e->hide_bones |= LEG_BONES;
+            e->fall_v = 10;
+            e->bounces = 2;
+            game_blood(0, e->x, e->y - 1100, e->z, e->dir, 30, e->y);
+            sound_at(e, SND_TEAR);
+        }
+    } else if (e->bounces) {
+        e->y += e->fall_v;
+        e->fall_v += e->key > 34 ? 55 : 5;
+        if (e->y + e->pose_ofs[1] > e->floor_y - 200) {
+            e->fall_v = -(e->fall_v >> 3);
+            e->y = e->floor_y - 300 - e->pose_ofs[1];
+            e->bounces--;
+            sound_at(e, SND_THUD);
+        }
+    }
+    if (done) {
+        e->flags = (e->flags & ~EF_VARIANT) | 1;
+        e->y = e->floor_y;
+        if (e->split_dead)
+            e->hp = 10;
+        crawl_on(e);
+    }
+}
+
+static void draw_bone(const EnemyType *t, const Enemy *e, int bone);
+
+// The legs left standing: the zombie's model in their pose from key 20,
+// all but parts 1-7 left out.
+static void draw_legs(const EnemyType *t, const Enemy *e, const Legs *l)
+{
+    Enemy g = *e;
+    memcpy(g.pose_rot, l->rot, sizeof(l->rot));
+    memcpy(g.pose_ofs, l->ofs, sizeof(l->ofs));
+    g.hide_bones = (uint16_t)~LEG_BONES;
+    g.flinch = 0;
+    glPushMatrix();
+    glTranslatef32(l->x, l->y, l->z);
+    glRotateYi(l->dir);
+    for (int b = 0; b < t->model.header->num_bones; b++)
+        if (t->model.bones[b].parent < 0)
+            draw_bone(t, &g, b);
+    glPopMatrix(1);
+}
+
+// The hit lock by weapon 1..18 (zombie table 0x8009c470, w1 bits 9..15):
+// after a hit the shots pass the enemy by for so many ticks (FUN_8003dd8c
+// skips obj+0x1d3 != 0). The shotguns check three / four times a shot, the
+// custom magnum three (main.c): each check takes the nearest one not locked,
+// so they hit up to three or four in a row.
+static const uint8_t hit_lock_ticks[19] = { 0, 15, 5, 5, 1, 15, 15, 15, 15, 15, 15, 15, 0, 5, 15, 1, 5, 15, 2 };
+
 // A shot or stab: the nearest living enemy within +-22.5 degrees of dir that
-// Leon can see, within range (0 = any). damage[3] by distance (near < 3000,
-// < 6000, farther; table 0x8009c470). Returns the enemy hit or -1.
-int enemy_hit(int32_t x, int32_t y, int32_t z, int16_t dir, int range, int weapon, const uint16_t damage[3], int low)
+// Leon can see and no hit locks, within range (0 = any). damage[3] by
+// distance (near < 3000, < 6000, farther; table 0x8009c470). Returns the
+// enemy hit or -1.
+int enemy_hit(int32_t x, int32_t y, int32_t z, int16_t dir, int range, int weapon, const uint16_t damage[3], int aim)
 {
     int best = -1;
     int64_t best_d = 0;
     for (int i = 0; i < MAX_ENEMIES; i++) {
         const Enemy *e = &enemies[i];
-        if (!alive(e))
+        if (!alive(e) || e->hit_lock)
             continue;
-        if (!low && (e->state == ST_DOWN || e->state == ST_LYING))
+        if (aim != AIM_DOWN && on_ground(e))
             continue; // on the ground: the shot passes over it
         int64_t dx = e->x - x, dz = e->z - z, d = dx * dx + dz * dz;
         if (range && d > (int64_t)range * range)
@@ -5292,6 +6801,7 @@ int enemy_hit(int32_t x, int32_t y, int32_t z, int16_t dir, int range, int weapo
     if (best < 0)
         return -1;
     Enemy *e = &enemies[best];
+    e->hit_lock = weapon > 0 && weapon < 19 ? hit_lock_ticks[weapon] : 0;
     float dist = sqrtf((float)best_d);
     int box = dist < 3000 ? 0 : dist < 6000 ? 1 : 2;
     if (is_crow(e)) { // 10 HP, every weapon does 15 or more
@@ -5368,14 +6878,14 @@ int enemy_hit(int32_t x, int32_t y, int32_t z, int16_t dir, int range, int weapo
     }
     if (is_spider(e)) {
         e->hp -= damage[box];
-        game_blood(1, e->x, e->y - 400, e->z, dir, 20, e->floor_y);
+        game_blood(1, e->x, body_y(e, 400), e->z, dir, 20, e->floor_y);
         spider_shot(e);
         return best;
     }
     if (is_licker(e)) {
         const uint16_t *ld = lick_damage[lick_kind(e)][weapon > 0 && weapon < 20 ? weapon : 0];
         e->hp -= ld[0] ? ld[box] : damage[box];
-        game_blood(0, e->x, e->y - 900, e->z, dir, 20, e->floor_y);
+        game_blood(0, e->x, body_y(e, 900), e->z, dir, 20, e->floor_y);
         licker_shot(e, best, dir);
         return best;
     }
@@ -5386,6 +6896,15 @@ int enemy_hit(int32_t x, int32_t y, int32_t z, int16_t dir, int range, int weapo
         if (weapon >= 5 && weapon <= 8 && box < 2)
             game_blood(0, e->x, e->y - 600, e->z, dir + 0x800, 30, e->floor_y);
         dog_shot(e, dir, e->hp < 0);
+        return best;
+    }
+    if (is_crawler(e)) {
+        e->hp -= damage[box];
+        game_blood(0, e->x, e->y - 300, e->z, dir, 20, e->y);
+        if (e->hp < 0)
+            crawler_die(e, best);
+        else if (e->state != ST_GRAB)
+            crawler_hit(e);
         return best;
     }
     e->hp -= damage[box];
@@ -5401,7 +6920,7 @@ int enemy_hit(int32_t x, int32_t y, int32_t z, int16_t dir, int range, int weapo
     // (0x80109204, part 8 flies off, which this port does not have yet):
     // the burst of blood and the fall
     if ((weapon == 5 || weapon == 6) && !is_person(e) && e->hp < 0) {
-        blood_burst(e, dir);
+        blood_burst(e, dir, 1900);
         fall(e, 1);
         sound_at(e, (rnd() & 1) ? SND_MOAN + 3 : SND_MOAN + 1);
         return best;
@@ -5409,22 +6928,29 @@ int enemy_hit(int32_t x, int32_t y, int32_t z, int16_t dir, int range, int weapo
     if ((weapon == 7 || weapon == 8) && !is_person(e) && box < 2) {
         e->push_dir = dir;
         if (box == 0) {
-            blood_burst(e, dir);
+            // 0x8010663c, the upper body from near: one on its feet that lives
+            // is torn in two, a dead one a quarter of the time, else it is
+            // thrown back (0x80109550). Aimed up the PS1 tears off the head
+            // and arms instead (0x80108b2c), aimed down the legs (0x80107378):
+            // thrown back here
+            if (aim == AIM_STRAIGHT && e->state != ST_LYING && e->state != ST_DOWN && e->state != ST_GRAB &&
+                (e->hp >= 0 || !(rnd() & 3))) {
+                zombie_split(e, best, dir);
+                return best;
+            }
+            blood_burst(e, dir, 1900);
             e->push = 400;
             fall(e, e->hp < 0);
             sound_at(e, (rnd() & 1) ? SND_MOAN + 3 : SND_MOAN + 1);
             return best;
         }
         if (e->hp >= 0 && e->state != ST_LYING && e->state != ST_DOWN && e->state != ST_GRAB) {
-            e->push = 450;
             e->bleed = 10;
-            e->flinch = 15;
             if (!e->moan_pause) {
                 sound_at(e, (rnd() & 1) ? SND_MOAN + 2 : SND_MOAN + 3);
                 e->moan_pause = MOAN_PAUSE;
             }
-            if (e->state == ST_LURK)
-                enter_state(e, ST_CHASE);
+            zombie_recoil(e, shot_from_behind(e, dir));
             return best;
         }
     }
@@ -5435,25 +6961,32 @@ int enemy_hit(int32_t x, int32_t y, int32_t z, int16_t dir, int range, int weapo
     }
     if (e->state == ST_LYING || e->state == ST_DOWN || e->state == ST_GRAB)
         return best;
-    // the hit (0x80105378): a short recoil, a groan; twice out of stagger: falls
-    e->flinch = 6;
+    // the hit (0x80105378): a groan, and it bends (zombie_flinch); each costs
+    // stagger (obj+0x223, table 0x8010ca57 by weapon), which comes back while
+    // it has more than 80 HP. A hit while out of stagger (the dispatcher
+    // 0x80104e80): the first time it reels back (0x80105b00), the next time
+    // (or a stab) it falls
     if (!e->moan_pause) {
         sound_at(e, (rnd() & 1) ? SND_MOAN + 1 : SND_MOAN + 2);
         e->moan_pause = MOAN_PAUSE;
     }
-    if (weapon > 0 && weapon < 20)
-        e->stagger -= stagger_hit[weapon];
     if (e->stagger <= 0) {
         if (e->stagger_out || weapon == 1) {
-            fall(e, 0);
+            e->stagger = (rnd() & 0xF) + 0x10;
             e->stagger_out = 0;
+            fall(e, 0);
         } else {
             e->stagger_out = 1;
+            zombie_recoil(e, shot_from_behind(e, dir));
         }
-        e->stagger = (rnd() & 0xF) + 0x10;
+        return best;
     }
-    if (e->state == ST_LURK)
-        enter_state(e, ST_CHASE); // shot at: comes for Leon
+    if (weapon > 0 && weapon < 20)
+        e->stagger -= stagger_hit[weapon];
+    if (e->stagger <= 0 && e->hp > 80)
+        e->stagger = (rnd() & 0xF) + 0x10;
+    if (e->state != ST_RECOIL)
+        zombie_flinch_start(e, shot_from_behind(e, dir), weapon == 0x10 ? 2 : 0x18);
     return best;
 }
 
@@ -5496,9 +7029,14 @@ static void draw_bone(const EnemyType *t, const Enemy *e, int bone)
         glTranslatef32(e->pose_ofs[0], e->pose_ofs[1], e->pose_ofs[2]);
     else
         glTranslatef32(b->pos[0], b->pos[1], b->pos[2]);
+    int bend = bone < 2 ? flinch_bend(e) : 0; // the hit: part 0 after its turn, part 1 before
+    if (bone == 1 && bend)
+        glRotateZi(bend * 8);
     glRotateXi(rot[0]);
     glRotateYi(rot[1]);
     glRotateZi(rot[2]);
+    if (bone == 0 && bend)
+        glRotateZi(-bend * 8);
     for (int p = 0; p < t->pages && !(bone < 16 && (e->hide_bones >> bone & 1)); p++) {
         uint32_t off = m->lists[bone * t->pages + p];
         if (off) {
@@ -5516,6 +7054,8 @@ static void draw_bone(const EnemyType *t, const Enemy *e, int bone)
 int camera_sees(int32_t x, int32_t y, int32_t z, int32_t margin);
 // main.c: seen by the camera only through a wall (room boxes, not masks)
 int camera_occluded(int32_t x, int32_t y, int32_t z);
+// main.c: (x, z) inside the view area of the shown camera
+int camera_view_area(int32_t x, int32_t z);
 extern int cull_models;  // main.c: POLY_CULL_* that drops faces turned away
 
 void enemy_draw(int reserve_vertices, int reserve_polygons)
@@ -5527,8 +7067,8 @@ void enemy_draw(int reserve_vertices, int reserve_polygons)
         const Enemy *e = &enemies[i];
         if (!present(e) || e->hidden || !types[e->type].drawable || !anim_model(e)->anims[e->anim].count)
             continue;
-        int32_t d = camera_sees(e->x, e->y - 900, e->z, 1200);
-        if (d >= 0 && camera_occluded(e->x, e->y, e->z))
+        int32_t d = camera_sees(e->x, body_y(e, 900), e->z, 1200);
+        if (d >= 0 && (!camera_view_area(e->x, e->z) || camera_occluded(e->x, e->y, e->z)))
             d = -1;
         if (d < 0) {
             enemies[i].drawn = 0;
@@ -5568,13 +7108,16 @@ void enemy_draw(int reserve_vertices, int reserve_polygons)
         glTranslatef32(e->x, e->y, e->z);
         if (e->roll)
             glRotateXi(e->roll);
+        surface_turn(e);
         glRotateYi(e->dir);
-        if (e->flinch) // the shot pushes the upper body back
-            glRotateZi(-e->flinch * 220);
+        if (e->tilt)
+            glRotateZi(e->tilt);
         for (int b = 0; b < t->model.header->num_bones; b++)
             if (t->model.bones[b].parent < 0)
                 draw_bone(t, e, b);
         glPopMatrix(1);
+        if (legs[order[k]].on)
+            draw_legs(t, e, &legs[order[k]]);
         while (GFX_BUSY)
             ;
         e->cost_v = GFX_VERTEX_RAM_USAGE - v0;
@@ -5597,9 +7140,9 @@ void enemy_debug_print(int tick)
     for (int i = 0; i < MAX_ENEMIES; i++) {
         const Enemy *e = &enemies[i];
         if (e->active)
-            printf("t%d e%d st %d/%d anim %d/%d key %d pos %d %d dir %d verts %d%s\n", tick, i, e->state, e->sub, e->anim,
-                   anim_model(e)->anims[e->anim].count, e->key, (int)e->x, (int)e->z, e->dir, types[e->type].vertices,
-                   e->anim_set ? " (room set)" : "");
+            printf("t%d e%d st %d/%d anim %d/%d key %d pos %d %d y %d surf %d dir %d hp %d bend %d verts %d%s\n", tick, i,
+                   e->state, e->sub, e->anim, anim_model(e)->anims[e->anim].count, e->key, (int)e->x, (int)e->z, (int)e->y,
+                   e->surface, e->dir, e->hp, flinch_bend(e), types[e->type].vertices, e->anim_set ? " (room set)" : "");
     }
 }
 #endif

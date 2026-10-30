@@ -187,18 +187,79 @@ With story flag `0xa4` set there are −10 or −20 HP.
 **Set by a scene** (observed, init `0x80103158`): with status bit `0x4000` the start state
 comes from `0x801073bc[variant & 3]` instead of `0x801073b8`: 16, 17, 18, 22. All of them
 wait for the room script's signal (member 0x17, `obj+0x1d4`) before anything happens:
-16/17 hang on the ceiling (animation 3) and then drop: 16 (`0x80104d14`) lets go with animation
-`0x12`, then turns over and falls with `0x13`; 17 (`0x80104f74`) falls with `0x13` at once.
+16/17 wait with animation 3 and then drop: 16 (`0x80104d14`, on the ceiling) lets go with
+animation `0x12`, then turns over and falls with `0x13`; 17 (`0x80104f74`, set upright
+somewhere above, e.g. room 10B's) falls with `0x13` at once.
 Both fall at +72 a frame more each frame (`obj+0x146`) and play `0x13` to its end on the
 floor; 17 hisses (sound 2) on landing. 22 plays animation `0xe` and then
 backs off (state 5), 18 (`0x80105114`) plays animation 0 once and on the signal crawls on
 by it until the next signal - room 201's licker passing the window outside on the first
-visit, which never comes in. **DS port:** `LICK_SCRIPT` (`licker_script`): waits, not
-aimed at nor in the way; on the signal the crawler crawls, the others hunt.
+visit, which never comes in (room 201's event 4 signals it, and again about 100 frames
+later). **DS port:** `LICK_SCRIPT` (`licker_script`): waits, not aimed at nor in the way; on
+the signal the crawler crawls (on its wall), 16 and 17 drop (`LICK_HANG`), 22 hunts.
 
-**Ceiling and walls** (observed): the spawn variant `(+0x10e >> 8) & 0xF` sets the
-orientation. 1 = ceiling, 2–5 = different walls or corners (gravity vector in
-`0x80107524`/`0x80107528`). The helper `0x8010029c` finds the floor or ceiling height for it.
+**Ceiling and walls** (observed, October 2026): status bits 8–11 (`(+0x10e >> 8) & 0xF`) put
+it on a surface. The init (`0x80103158`) writes a rotation delta to `0x80107524/26/28` (x, y,
+z), which the move routine (`0x80102e5c`) multiplies in **before** the object's matrix
+(`FUN_80072938`: delta × matrix, world space; the facing `+0x76` is applied after it, so
+motion = R(surface) × Ry(dir) × root motion, `FUN_80014d94`):
+
+| Bits 8–11 | Delta | Wall side `+0x16b` | Up (the side's normal) |
+|---|---|---|---|
+| 0 | — | floor | −y |
+| 1 | Rz +0x400 | 0 | +x |
+| 2 | Rz −0x400 | 2 | −x |
+| 3 | Rx −0x400 | 3 | +z |
+| 4 | Rx +0x400 | 1 | −z |
+| 5 | Rx 0x800, Ry 0x800 (= Rz 0x800) | ceiling | +y |
+
+A wall is a side of a room collision box: side 0 = `x + w`, 1 = `z`, 2 = `x`, 3 = `z + d`
+(`FUN_8004cd24`); `FUN_8004c8b8` gives the side a point is nearest to (the box cut along its
+diagonals). Boxes a licker can crawl on have flag `0x200`. The start state comes from
+`0x801073b8[variant & 3]` = 0, 7, 11, 23 (with status `0x4000`: `0x801073bc` = 16, 17, 18, 22);
+states index the table at `0x80107488`.
+
+- **State 7** (`0x801039a4`, variant 1: on a wall): anim 1. Each frame `FUN_801007ac` looks
+  2200 ahead along its facing (`0x801073c0`), notes the quadrant it heads to (`+0x16a`,
+  `(angle + 0x100) & 0xc00`) and lists the boxes there (`FUN_80048964`, radius 10, its floor
+  level `-y / 1800`): no climbable box → the wall ends (`0x40000000`); a box without `0x200`
+  but with `0x400` → `0x20000000`; its own box → x or z snapped onto the side; another box
+  whose nearest side is across (other parity) → that side. Heard him (`FUN_80100db0`) or
+  `0x20000000` → state 13. Wall goes on → root motion (`FUN_8001581c` + `FUN_80014d94`). Into a
+  corner: anim `0x11` (root 2200, −1693, 0), then turned by `(2h − s − r)` quarters about y
+  in world space (the side and the facing both move on) and moved `0x69d` along the new
+  heading. Round an edge: anim `0x10` (root 2200, 1648, 0), turned by `(h − s)`, moved
+  `0x670`. The new side is snapped to the box's face.
+- **State 13** (`0x801044b0`): down the wall. Higher than `0x903` above the floor (`+0x1c2`):
+  anim `0x1b` (root 0, 0, −1338 — down the wall), its motion turned by `0x800` when the side
+  minus the heading quadrant is negative. Lower: anim `0x0c` or `0x1a` (root ±1614 down and
+  1614 out), easing to `0x64f` above the floor over 22 frames; then `0x64f` out from the wall
+  (`0x801001a4` turned by the side), on the floor, rotation cleared (`FUN_80019e54`), anim 3
+  for 4 frames → state 14.
+- **State 11** (`0x80104250`, variant 2: ceiling): anim 3 until it hears him or was shot
+  (`+0x219 == 2`); anim `0x12` falling at +72 a frame more each frame; when `0x12` ends:
+  `+0xa8c` lower, rotation cleared, facing `(angle of its 2200-ahead + 0x100) & 0xc00`; anim
+  `0x13` falling until the next step reaches y 0; `0x13` to its end → state 0. **State 23**
+  (`0x80102bec`, variant 3) is the same but waits for member `0x17`.
+- **Hit on a surface**: with `+0x220` (a wall box) set or above the floor the hit routine is
+  table `0x801074e8[2]` (`0x801059a8`; `[5]` with `+0x22c & 0x80`): it falls from the hit on
+  (+48 a frame more each frame, plus the push `+0x144/+0x148`) with the animation it had
+  (`FUN_80101244` spawns blood and sets no animation for these states) to its end; then
+  `+0x4f5` lower, facing `quadrant * 0x400 − 0x800`, rotation cleared; anim `0x19` to the
+  floor and to its end; dead (HP < 0), or anim `0x16` (up) and the next state by distance
+  (`FUN_801055cc`).
+- **State 1** (`0x801035c4`): a licker on the floor climbs the nearest box side (state 15
+  picks it for status bit `0x10` and HP < 50, a quarter of the time). Not ported.
+
+**DS port:** `SURF_*` and `surface_vec`/`surface_turn` in `enemy.c` (the model is drawn with
+`T × R(surface) × Ry(dir)`), `wall_ahead`, `wall_turn`; states `LICK_WALL` (7), `LICK_DOWN`
+(13), `LICK_HANG` (11/16/17/23) and `LICK_FALL` (hit routine 2). Deviations: the clinging
+part of the fall after a hit ends at the floor at the latest, the shot's push is left out
+(it could carry it into the wall), and the crawl down picks whichever way of `0x1b` goes
+down. Type `0x24` (its own overlay, not read) has no wall animations: on a wall or the
+ceiling it turns over and drops when it hears him. Room 201's licker outside the window
+(status `0x44`, wall side 1, facing `0x770`) now crawls along its wall; the facing is not
+quite along the wall, so it also creeps down a little, as the PS1 computes it.
 
 ### Attacks (observed)
 
@@ -272,6 +333,56 @@ quarter turns); the floor state table is `0x801132e8`. No root motion: the spide
 | 7 | `0x8010dc64` | 4, 5, 5, 7 | crouches (speed 100), aims (`0x40`), rushes at 300 turning `0x10` for 10–41 frames, stops; bites within 1500 and `0x10cc` in height (`FUN_80112a64`): 20 → 30 HP, sound 1 |
 | 8 | `0x8010df0c` | `0x0b` | spits (`FUN_80112828` spawns the projectile) |
 | 9 | `0x8010e198` | 8 | jumps aside: 400–463 toward the player's direction + rand (+ `0x800`) + `0x380` |
+
+**Ceiling and walls** (observed, October 2026; init `0x8010d1ec`): the variant (`& 0xf`) picks
+the surface `+0x222`, which picks the state table: 0 floor (`0x801132e8`), 2–3 ceiling (1,
+`0x80113334`), 4–11 a wall (3, `0x80113394`; 2, `0x80113364`, after it came down from the
+ceiling). Unlike the licker the spider turns its own model: `+0x74/+0x76/+0x78` = x, facing,
+z (`Rx * Ry * Rz`, like the bones).
+
+- **Ceiling:** z `0x800` (upside down), so it walks along its facing + `0x800` (`+0x21a`,
+  `FUN_80014c68`) and aims at Leon mirrored through itself (`FUN_80112114`). `+0x22c` (how high
+  a wall climb ends) = y + 1250. Decide (`0x8010e36c`): idle anim 0 for `(rand + 10) & 0x1f`,
+  then walk (1) or wander (4); a shot → evade (9) or turn (5); with `+0x218` at 0: Leon
+  3001–7499 away → walk, or charge (7) if it faces him (±`0x80`) and 3/16 of the time; nearer
+  than 3000 and facing → spit (8) 3/16, else charge. Walk (`0x8010d850`, table `0x80113310`:
+  anim 2, turn 48) for `rand & 0x2e` frames, then the wall check (`0x8010e4a8`): by a box with
+  flag `0x200` within 800 (stretches they keep off) nothing; by one with `0x400`: if `+0x232`
+  is over and no spider goes between wall and ceiling (`0x800c77f0 & 0x20`) it takes the wall
+  it faces (`FUN_801121a0`: the box side nearest it that its facing quadrant points out of),
+  if that wall goes on 2500 both ways (`FUN_80112390`) and Leon is within 3000 of its plane
+  (`FUN_80112454`) → state 10; otherwise wander. Charge (`0x8010e678`): anim 4 creeping at 100,
+  aims (`0x40`), rushes at 300 turning `0x10` and drops poison (effect `0x8a`, sound 3) every
+  12 frames, stops (anim 7), `+0x218` = 60. State 10 (`0x8010e920`): turns its facing to the
+  side angle `0x18` a frame, anim `0xe` at 25 a frame, then 450 on, y + 1250, `+0x22c` = y.
+- **Wall:** head down (`FUN_8010ec88`): an even side turns z `0x400` and the head's turn
+  within the wall (`+0x226`) goes on x; an odd side turns x by its facing (side × `0x400`) and
+  the head's turn adds to the facing (`FUN_80112284`, side 0 the other way). It crawls along
+  where its head points (`FUN_801122e4`). Set on a wall: facing side × `0x400`, `+0x22c` =
+  variant bits 4–7 × −1800 + 1250 (−3960 for 0); waits (`0x8010fb34`) until Leon is within
+  `0x1c20` or near its plane. Come down from the ceiling (`0x8010ed40`): down at 100 a frame
+  until 3500 above Leon, pause 15–30 frames (`0x8010ef78`). Then: spit (7, `0x8010f8dc`,
+  nearer than 3000 3/16) — the head turns `0x40` a frame toward his side for up to 16 frames,
+  anim `0xb`, effect `0x89` (`0x88` from 3000 on); or turn (3, `0x8010f050`) — the head to
+  ±`0x400` (his side) `0x20` a frame, then rush (6, `0x8010f738`): anim 4, then 300 a frame
+  along the wall until 2500 from its end, or a bite (within 2000, `0x10cc` in height: 20 →
+  30 HP). After either: climb (4, `0x8010f1ec`): the head turns up (rate at random ±64/±32
+  from `0x80113384`, pauses of 15–30), then up at 100 to `+0x22c`; state 5 (`0x8010f47c`): anim
+  `0xe` (25 a frame up), onto the ceiling facing out of the wall, 1225 into the room,
+  `+0x232` = 150.
+- **Hit up there:** no fall. On the ceiling the floor's hit (anim 1, then evade); on a wall
+  it climbs (0x40 a frame, no pauses). Not while going between wall and ceiling (`+0x236`).
+- **Death up there:** ceiling (`0x80110e9c`): z back to 0, 800 lower, falls +40 a frame more
+  each frame, sound 5, anim `0xc`. Wall (`0x8011118c`): 480 a frame down plus +40, upright on
+  landing, facing −(head + side × `0x400` for odd sides).
+
+**DS port:** `spider_pose`, `spider_vec`, `spider_ceiling`, `spider_wall`, states
+`SP_WALK`, `SP_TO_WALL`, `SP_W_*`, `SP_TO_CEILING`. Deviations: the poison is not a flying
+effect but hits at once (drops: within 1500 under it; spits: within 6000 in front of its
+wall), the state where two spiders on the ceiling meet (11) is left out, a spider coming
+down onto a wall is put on its box's face, and a dead one falls upright at once. Also fixed:
+the spider's turn (5) and charge (7) counted as a zombie on the ground (`ST_DOWN` /
+`ST_LYING`), so high shots passed over it and Leon could walk through it.
 
 Hit (`0x8010fcd8`): anim 1, then state 9 or a random one (`0x80113410`). Death (`0x80110d10`):
 anim `0x0c` (206 keys), then dead.
@@ -502,8 +613,8 @@ an answer from them (no `member_cmp 17`), so the scenes run through.
 
 ## 17. Open points
 
-- The lickers' perception (do they react to noise?) and the switch ceiling ↔ floor.
-- The licker on ceilings and walls (the gravity vectors `0x80107524` / `0x80107528`); the
+- The licker climbing from the floor onto a wall (state 1), type `0x24`'s own overlay, two
+  spiders meeting on the ceiling (state 11) and the spiders' poison as a flying effect; the
   crows perched in routine 4 (status `0x4000`).
 - The alligator's bite on the way (`obj+0x224`, Leon's routine 5) and the camera cuts of its
   death and escape.

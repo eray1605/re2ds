@@ -51,11 +51,20 @@ int enemy_grabbing(void);       // a zombie holds Leon
 #define NOISE_SHOT 0x01
 // auto-aim: nearest living enemy Leon sees within range (0 = any); -1 none
 int enemy_aim_target(int32_t x, int32_t y, int32_t z, int range, int32_t *tx, int32_t *tz);
+// what Leon's head turns to, seen from his head (x, y, z) facing dir: the
+// nearest standing one within range and +-cone (RE2 units) of dir, else the
+// nearest lying one; -1 none
+int enemy_look_target(int32_t x, int32_t y, int32_t z, int16_t dir, int range, int cone);
+// the point of it his head turns to; 0 when it is gone
+int enemy_look_point(int slot, int32_t *x, int32_t *y, int32_t *z);
 // shot / stab toward dir: damage[near, mid, far]; returns the enemy hit or -1
-// low: Leon aims down. Zombies on the ground (knocked down or lying) are only
-// hit then - a straight shot passes over them, as the PS1's hit check
-// compares the heights of the body parts (FUN_8003dd8c).
-int enemy_hit(int32_t x, int32_t y, int32_t z, int16_t dir, int range, int weapon, const uint16_t damage[3], int low);
+// aim: AIM_*, Leon's aim posture. Zombies on the ground (knocked down, lying,
+// crawling) are only hit aiming down - a straight shot passes over them, as
+// the PS1's hit check compares the heights of the body parts (FUN_8003dd8c).
+#define AIM_STRAIGHT 0
+#define AIM_UP 1
+#define AIM_DOWN 2
+int enemy_hit(int32_t x, int32_t y, int32_t z, int16_t dir, int range, int weapon, const uint16_t damage[3], int aim);
 // room script access (work_set 3): member 7 = flags; 0 if unknown
 int enemy_member_get(int slot, int member, int *value);
 void enemy_member_set(int slot, int member, int value);

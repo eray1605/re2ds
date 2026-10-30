@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "assets.h"
+#include "music.h"
 #include "sound.h"
 
 void sound_init(void)
@@ -49,8 +50,13 @@ int sound_play(const void *bank, int note, int volume, int pan)
     if (!e)
         return -1;
     int eight = ((const SoundBankHeader *)bank)->reserved == 1;
-    return soundPlaySample((const uint8_t *)bank + e->offset, eight ? SoundFormat_8Bit : SoundFormat_16Bit, e->size & ~3,
-                           e->rate, volume, pan, false, 0);
+    // all 16 channels busy: the music gives one up (music_yield)
+    for (int tries = 0;; tries++) {
+        int ch = soundPlaySample((const uint8_t *)bank + e->offset, eight ? SoundFormat_8Bit : SoundFormat_16Bit,
+                                 e->size & ~3, e->rate, volume, pan, false, 0);
+        if (ch >= 0 || tries || !music_yield())
+            return ch;
+    }
 }
 
 int sound_frames(const void *bank, int note)
@@ -64,11 +70,16 @@ int sound_frames(const void *bank, int note)
 #define VOICE_MAGIC 0x31435652 // "RVC1": u32 rate, u32 samples, IMA-ADPCM
 static uint32_t *voice_data;
 static int voice_channel = -1, voice_left, voice_frames;
+// tickGetCount() a frame before the clip ends. A clip that has played out
+// left its channel to the DS, which may have given it to a music note since:
+// voice_stop kills the channel only before then (it killed it two frames
+// after the end, and with it whatever note had started there).
+static u64 voice_end;
 static char voice_name[12];     // the clip's file name: its subtitle key
 
 void voice_stop(void)
 {
-    if (voice_channel >= 0)
+    if (voice_channel >= 0 && tickGetCount() < voice_end)
         soundKill(voice_channel);
     voice_channel = -1;
     voice_left = 0;
@@ -96,7 +107,11 @@ void voice_play(int stage, int clip)
     DC_FlushRange(voice_data, size);
     voice_channel = soundPlaySample(voice_data + 3, SoundFormat_ADPCM, (size - 12) & ~3, rate, 127, 64,
                                     false, 0);
+    if (voice_channel < 0 && music_yield()) // all channels busy: the music gives one up
+        voice_channel = soundPlaySample(voice_data + 3, SoundFormat_ADPCM, (size - 12) & ~3, rate, 127, 64,
+                                        false, 0);
     voice_left = (int)((uint64_t)samples * 60 / rate) + 2;
+    voice_end = tickGetCount() + (u64)samples * TICK_FREQ / rate - ticksFromHz(60);
     voice_frames = 0;
     strcpy(voice_name, strrchr(path, '/') + 1);
     *strrchr(voice_name, '.') = 0;
