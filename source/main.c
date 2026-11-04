@@ -453,6 +453,7 @@ void game_object_set(const uint8_t *ins)
 }
 
 void game_espr_on(const uint8_t *ins) { roomfx_on(ins); }
+void game_espr3d_on(const uint8_t *ins) { roomfx_3d_on(ins); }
 void game_espr_kill(int id, int type) { roomfx_kill(id, type); }
 
 void game_floor_sound_set(int n, int on)
@@ -845,6 +846,11 @@ static void draw_bone(int bone)
 
 static void draw_player(void)
 {
+    // the PS1 draws him, as every character, only inside the view area of
+    // the shown camera (FUN_80026598): the terminal's close-up of its screen
+    // (room 200) showed his legs in it
+    if (!in_view_area(cur_cam, player.x, player.z))
+        return;
     if (pose_anim < 0)
         update_pose();
     glPushMatrix();
@@ -1403,7 +1409,7 @@ static void check_camera_switch(void)
     int floor = player_floor();
     for (int i = 0; i < room.header->num_switches; i++) {
         const RoomSwitch *s = &room.switches[i];
-        if ((s->role & SWITCH_VIEW_AREA) || cut_replace(s->cam0) != cur_cam)
+        if ((s->role & SWITCH_VIEW_AREA) || !(s->role & SWITCH_ON) || cut_replace(s->cam0) != cur_cam)
             continue;
         if (s->floor != 255 && s->floor != floor)
             continue;
@@ -1925,6 +1931,24 @@ void game_spawn_enemy(int slot, int type, int flags, int voice, int x, int y, in
 
 void game_enemy_motion(int slot, int motion, int ctr) { enemy_set_motion(slot, motion, ctr); }
 void game_enemy_skin(int slot, int model) { enemy_set_skin(slot, model); }
+// cut_be_set (scd_op_61): from the first zone of camera cam, the n-th zone
+// on gets byte 0 = on (room 206 turns off the cut to its fireplace's close-up
+// after the painting burned; 21 zones in 11 rooms start off)
+void game_cut_be_set(int cam, int n, int on)
+{
+    RoomSwitch *sw = (RoomSwitch *)room.switches;
+    for (int i = 0; i < room.header->num_switches; i++)
+        if (sw[i].cam0 == cam) {
+            if (i + n < room.header->num_switches)
+                sw[i + n].role = (uint8_t)(on ? sw[i + n].role | SWITCH_ON : sw[i + n].role & ~SWITCH_ON);
+            return;
+        }
+}
+
+void game_enemy_shadow(int slot, int r, int g, int b, int w, int h, int ox, int oz)
+{
+    enemy_set_shadow(slot, r, g, b, w, h, ox, oz);
+}
 
 // Enemy sounds get quieter with the distance to Leon (the PS1 places them in
 // 3D; this is the simple version).
@@ -2557,10 +2581,12 @@ static void show_file(int k)
 // R on the status screen: the map (menu/maps.bin, tools/map2ds.py). The PS1
 // (map screen 0x8006a4a4, drawing 0x800695ec) assembles a page from pieces,
 // one per room, cut from MAPS.PIX; rooms it has visited are drawn in another
-// colour, the current one blinks with Leon's marker in it. The PS1 shows
-// unvisited rooms only after the area's map was found (flag array 33); here
-// they are always shown, dimmed. Its colours are made at run time, so these
-// are our own. The PS1 screen is 320 x 240: everything is drawn at 4/5.
+// colour, the current one blinks with Leon's marker in it. Rooms not visited
+// yet show only once the area's map was found: flag array 33, bit per page,
+// which the room scripts set where the map lies (room 20B: 2-4, the police
+// station). Its colours are made at run time, so these are our own. The PS1
+// screen is 320 x 240: everything is drawn at 4/5.
+#define FLAGS_MAP_FOUND 33
 #define MAP_MAGIC 0x31504D52 // "RMP1"
 #define MAP_SCALE(v) ((v) * 4 / 5)
 
@@ -2735,6 +2761,9 @@ static struct {
     uint8_t *screen;            // 256 x 192, what is on the lower screen
     MapPiece pieces[32];
     int count;
+    int found;                  // the page's bit in FLAGS_MAP_FOUND
+    uint8_t found_bits[MAP_PAGES]; // every page's (pages 7 / 8 have each other's)
+    uint8_t found_known;
     uint32_t key;               // what the screen shows (redraw when it changes)
     int frame;
 } mapv = { .page = -1, .shown_page = -1 };
@@ -2753,9 +2782,13 @@ static int map_load(int page)
         return 0;
     }
     const MapPage *pg = (const MapPage *)(file + 8) + page;
+    for (int p = 0; p < MAP_PAGES; p++)
+        mapv.found_bits[p] = ((const MapPage *)(file + 8))[p].found;
+    mapv.found_known = 1;
     const MapPiece *pieces = (const MapPiece *)(file + 8 + MAP_PAGES * sizeof(MapPage));
     decompress(file + pg->offset, mapv.img, LZ77);
     mapv.count = pg->count < 32 ? pg->count : 32;
+    mapv.found = pg->found;
     memcpy(mapv.pieces, pieces + pg->first, mapv.count * sizeof(MapPiece));
     asset_free(file);
     mapv.page = page;
@@ -2773,8 +2806,8 @@ static void map_draw(int page, int here)
     for (int i = 0; i < mapv.count; i++) {
         const MapPiece *p = &mapv.pieces[i];
         int seen = (map_seen[page] >> i) & 1;
-        if (!seen && (p->hide[0] & 1))
-            continue; // the PS1 leaves it out in this scenario
+        if (!seen && ((p->hide[0] & 1) || !flag_get(FLAGS_MAP_FOUND, mapv.found)))
+            continue; // not visited, and no map of it yet (or left out in this scenario)
         int base = i == here ? 48 : seen ? 32 : 16;
         int w = MAP_SCALE(p->w), h = MAP_SCALE(p->h), x0 = MAP_SCALE(p->x), y0 = MAP_SCALE(p->y);
         for (int dy = 0; dy < h; dy++) {
@@ -2806,10 +2839,10 @@ static void map_live(int redraw)
     if (keysDown() & KEY_TOUCH) {
         touchPosition t;
         touchRead(&t);
-        if (t.py < 30) // the title strip: the next page with a visited room
+        if (t.py < 30) // the title strip: the next page with a visited room or its map found
             for (int k = 1; k < MAP_PAGES; k++) {
                 int p = (mapv.shown_page + k) % MAP_PAGES;
-                if (map_seen[p] || p == page) {
+                if (map_seen[p] || p == page || (mapv.found_known && flag_get(FLAGS_MAP_FOUND, mapv.found_bits[p]))) {
                     mapv.shown_page = p;
                     game_menu_sound(4);
                     break;
@@ -2821,7 +2854,8 @@ static void map_live(int redraw)
         return;
     // the current room blinks; no marker for Leon himself (the PS1 shows one)
     int here = show == page ? map_piece(page, cur_room) : -1;
-    uint32_t key = (uint32_t)show << 26 ^ (uint32_t)(here & 31) << 21 ^ map_seen[show] * 2654435761u;
+    uint32_t key = (uint32_t)show << 26 ^ (uint32_t)(here & 31) << 21 ^ map_seen[show] * 2654435761u ^
+                   (uint32_t)flag_get(FLAGS_MAP_FOUND, mapv.found) << 20;
     if (redraw || key != mapv.key) {
         map_draw(show, here);
         mapv.key = key;
@@ -4165,6 +4199,9 @@ int main(void)
     bg_id = bgInit(3, BgType_Bmp8, BgSize_B8_256x256, 0, 0);
     bgSetPriority(bg_id, 1);
     bgSetPriority(0, 0);
+    // 3D pixels drawn with alpha (effects, shadows, blood pools) blend with
+    // the background picture only when it is a second target of the mixer
+    REG_BLDCNT = BLEND_DST_BG3;
     BG_PALETTE[0] = 0;
 
     glInit();
@@ -4184,6 +4221,7 @@ int main(void)
     load_room_index();
 
     effect_load();
+    enemy_shadow_init();
     menu_init();
     subs_init();
     voice_bank = sound_bank_load("nitro:/sound/core00.bin");

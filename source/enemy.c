@@ -290,6 +290,23 @@ typedef struct {
     int16_t ofs[3];
 } Legs;
 static Legs legs[MAX_ENEMIES];
+
+// Shadows (obj+0x16c, FUN_80016254): a flat quad on the floor under the body,
+// turned with it, that the PS1 draws subtracting a colour from the picture.
+// The room scripts set them (kage_set, scd_op_60): colour, size along /
+// across the facing, offset - room 100's zombies 0xbf 0xbf 0xbf (grey) and
+// 400 x 600, the corpses of 113, 119, 301 0x10 0xbf 0xbf (red is left: blood)
+// and 800-2000. A zombie that dies gets the blood colour and its shadow grows
+// by 5 a frame on both sides for 120 frames (routine 7, 0x8010a380).
+typedef struct {
+    uint16_t w, h;
+    int16_t ox, oz;
+    uint8_t rgb[3];
+    uint8_t pool;               // frames the blood still spreads
+} Shadow;
+static Shadow shadows[MAX_ENEMIES];
+#define POOL_FRAMES 120
+#define POOL_GROWTH 5
 static const Model *room_sets[MAX_ENEMIES]; // the room's animations per slot (RBJ masks)
 
 // People (types 0x40 and up: Kendo 0x48, ...) do not fight; the room scripts
@@ -307,6 +324,7 @@ static int is_zombie(const Enemy *e);
 static void update_pose(Enemy *e);
 static int is_crawler(const Enemy *e);
 static void blood_burst(const Enemy *e, int16_t dir, int32_t up);
+static void start_pool(const Enemy *e, int i);
 static void crawler_tick(Enemy *e, int i, const EnemyTarget *p, uint32_t d);
 static void split_tick(Enemy *e, int i);
 static void zombie_flinch(Enemy *e, int i, const EnemyTarget *p, uint32_t d);
@@ -372,6 +390,7 @@ void enemy_room_reset(void)
             free_type(&types[i]);
     memset(enemies, 0, sizeof(enemies));
     memset(legs, 0, sizeof(legs));
+    memset(shadows, 0, sizeof(shadows));
     enemy_last_error = 0; // the debug screen shows this room's
     grab.enemy = -1;
     voice_first = voice_second = 0;
@@ -566,6 +585,8 @@ void enemy_spawn(int slot, int type, int flags, int voice, int32_t x, int32_t y,
     }
     e->flags = flags & 0xFFFF;
     e->kill_flag = (flags >> 16) & 0xFFFF; // script.c: the set flag's array and bit
+    if (type <= 0x1F && !shadows[slot].w) // a zombie's shadow, as room 100 sets it
+        enemy_set_shadow(slot, 0xbf, 0xbf, 0xbf, 400, 600, 0, 0);
     e->voice = voice;
     if (voice && voice != voice_first) { // PS1: the room's first and a second voice kind
         if (!voice_first)
@@ -1386,6 +1407,7 @@ static void grab_zombie(Enemy *e, int i, int pressed)
     case 6: // dead, until Leon's stamp is over
         if (grab.enemy != i) {
             e->state = ST_DEAD;
+            start_pool(e, i);
             return;
         }
         break;
@@ -1575,6 +1597,23 @@ static void push_tick(Enemy *e, int i);
 #define A_SCRIPT_LUNGE 0x0A
 #define A_SCRIPT_HOLD 0x18
 #define LUNGE_HOLD_KEY 0x11
+// Mode 3 eats (0x80109f9c): animation 0x15, then one of 0x12-0x14 (table
+// 0x801000a8) after another, every second one with blood at the mouth
+// (effect 0x17b8 at part 8, 200 out) on its keyframes flagged 0x10000 (EDD
+// flag bit 4, the same in every zombie model; the DS keeps only bits 0-3).
+static const uint8_t eat_anims[8] = { 0x12, 0x13, 0x14, 0x12, 0x13, 0x14, 0x12, 0x13 };
+static int eat_bite_key(int anim, int key)
+{
+    switch (anim) {
+    case 0x12: return key == 20 || key == 45;
+    case 0x13: return key == 21 || key == 45 || key == 70;
+    case 0x14: return key == 12 || key == 22;
+    }
+    return 0;
+}
+
+static void arm_bone(const Enemy *e, int bone, int32_t *x, int32_t *y, int32_t *z);
+
 static void start_script_mode(Enemy *e)
 {
     e->sub = 1;
@@ -1616,11 +1655,24 @@ static void script_mode(Enemy *e, int i)
             }
         }
         break;
-    case 3:
+    case 3: {
         if (t)
             turn_toward(e, t->x, t->z, 0x10);
-        anim_step(e, NULL);
+        int done = anim_step(e, NULL);
+        int n = e->anim - types[e->type].set_start[SET_MAIN];
+        if (e->sub == 3 && eat_bite_key(n, e->key)) {
+            int32_t x, y, z;
+            arm_bone(e, BONE_HEAD, &x, &y, &z);
+            x += (200 * cosLerp(e->dir)) >> 12;
+            z -= (200 * sinLerp(e->dir)) >> 12;
+            game_blood(0, x, y, z, rnd() << 4, 20, e->y);
+        }
+        if (done) { // the next mouthful, with blood every second time
+            set_anim(e, SET_MAIN, eat_anims[rnd() & 7], 0);
+            e->sub = e->sub == 3 ? 1 : 3;
+        }
         break;
+    }
     default:
         anim_step(e, NULL);
         break;
@@ -6248,6 +6300,11 @@ void enemy_tick(const EnemyTarget *p)
             continue;
         if (e->hit_lock)
             e->hit_lock--;
+        if (shadows[i].pool) {
+            shadows[i].pool--;
+            shadows[i].w += POOL_GROWTH;
+            shadows[i].h += POOL_GROWTH;
+        }
         if (e->kill_flag && e->hp < 0) { // killed: it stays dead (scd_op_44 skips it)
             flag_set(e->kill_flag >> 8, e->kill_flag & 0xFF, 1);
             e->kill_flag = 0;
@@ -6279,6 +6336,12 @@ void enemy_tick(const EnemyTarget *p)
             const ModelAnim *a = &anim_model(e)->anims[e->anim];
             if (e->key + 1 < a->count)
                 e->key++;
+            // the blood of Leon's death in the same animation (FUN_8010b3a4):
+            // spurts rising from the neck, then on the floor (Kendo, 101)
+            if (e->key >= 41 && e->key <= 98 && !(e->key & 1))
+                game_blood(1, e->x, e->y - 2200 + (e->key - 41) * 30, e->z, rnd() << 7, 15 + (rnd() & 7), e->y);
+            else if (e->key >= 100 && e->key < 105)
+                game_blood(0, e->x, e->y - 300, e->z, rnd() << 7, 8, e->y);
             continue;
         }
         if (is_person(e)) { // stands (routine 1 of the people is not ported)
@@ -6745,6 +6808,95 @@ static void split_tick(Enemy *e, int i)
 
 static void draw_bone(const EnemyType *t, const Enemy *e, int bone);
 
+void enemy_set_shadow(int slot, int r, int g, int b, int w, int h, int ox, int oz)
+{
+    if (slot == 0xFF)
+        slot = PARTNER_SLOT;
+    if (slot < 0 || slot >= MAX_ENEMIES)
+        return;
+    Shadow *s = &shadows[slot];
+    s->rgb[0] = (uint8_t)r;
+    s->rgb[1] = (uint8_t)g;
+    s->rgb[2] = (uint8_t)b;
+    s->w = (uint16_t)w;
+    s->h = (uint16_t)h;
+    s->ox = (int16_t)ox;
+    s->oz = (int16_t)oz;
+}
+
+// dead: the blood colour, spreading from the shadow's size
+static void start_pool(const Enemy *e, int i)
+{
+    if (!is_zombie(e) || is_person(e))
+        return;
+    shadows[i].rgb[0] = 0x10;
+    shadows[i].rgb[1] = 0xbf;
+    shadows[i].rgb[2] = 0xbf;
+    shadows[i].pool = POOL_FRAMES;
+}
+
+// A soft disc (A5I3: alpha 31 inside half the radius, down to 0 at the edge)
+// in VRAM before the enemies' textures come and go.
+#define SHADOW_TEX 32
+static int shadow_tex = -1;
+void enemy_shadow_init(void)
+{
+    static uint8_t texels[SHADOW_TEX * SHADOW_TEX];
+    for (int y = 0; y < SHADOW_TEX; y++)
+        for (int x = 0; x < SHADOW_TEX; x++) {
+            float dx = (x + 0.5f) * 2 / SHADOW_TEX - 1, dy = (y + 0.5f) * 2 / SHADOW_TEX - 1;
+            float r = sqrtf(dx * dx + dy * dy);
+            int a = r >= 1.0f ? 0 : r <= 0.5f ? 31 : (int)(31 * (1.0f - r) * 2);
+            texels[y * SHADOW_TEX + x] = (uint8_t)(a << 3);
+        }
+    static const uint16_t palette[8] = { 0x7FFF, 0x7FFF, 0x7FFF, 0x7FFF, 0x7FFF, 0x7FFF, 0x7FFF, 0x7FFF };
+    DC_FlushRange(texels, sizeof(texels));
+    glGenTextures(1, &shadow_tex);
+    glBindTexture(0, shadow_tex);
+    if (!glTexImage2D(0, 0, GL_RGB8_A5, TEXTURE_SIZE_32, TEXTURE_SIZE_32, 0, TEXGEN_TEXCOORD, texels)) {
+        shadow_tex = -1;
+        return;
+    }
+    glColorTableEXT(0, 0, 8, 0, 0, palette);
+}
+
+// The shadow under part 0 (the chest; the PS1 anchors it at a part too) at
+// floor height. The DS has no subtractive blending: a translucent quad of
+// what the subtraction leaves - dark red when it takes mostly green and blue
+// (blood), else black - as opaque as the most it takes.
+static void draw_shadow(const Enemy *e, const Shadow *s)
+{
+    int32_t c = cosLerp(e->dir), sn = sinLerp(e->dir);
+    int32_t ox = e->pose_ofs[0] + s->ox, oz = e->pose_ofs[2] + s->oz;
+    int32_t x = e->x + ((ox * c + oz * sn) >> 12), z = e->z + ((-ox * sn + oz * c) >> 12);
+    int16_t hw = (int16_t)(s->w / 2), hh = (int16_t)(s->h / 2);
+    int most = s->rgb[0] > s->rgb[1] ? s->rgb[0] : s->rgb[1];
+    if (s->rgb[2] > most)
+        most = s->rgb[2];
+    int alpha = most * 31 / 255;
+    if (alpha < 1)
+        return;
+    int blood = s->rgb[1] > s->rgb[0] + 0x40;
+    glPolyFmt(POLY_ALPHA(alpha) | POLY_CULL_NONE | POLY_ID(60));
+    glBindTexture(0, shadow_tex);
+    glColor3b(blood ? 96 : 0, blood ? 4 : 0, blood ? 4 : 0);
+    glPushMatrix();
+    glTranslatef32(x, e->y - 4, z);
+    glRotateYi(e->dir);
+    glBegin(GL_QUADS);
+    glTexCoord2t16(0, 0);
+    glVertex3v16(-hw, 0, -hh);
+    glTexCoord2t16(inttot16(SHADOW_TEX), 0);
+    glVertex3v16(hw, 0, -hh);
+    glTexCoord2t16(inttot16(SHADOW_TEX), inttot16(SHADOW_TEX));
+    glVertex3v16(hw, 0, hh);
+    glTexCoord2t16(0, inttot16(SHADOW_TEX));
+    glVertex3v16(-hw, 0, hh);
+    glEnd();
+    glPopMatrix(1);
+    glColor3b(255, 255, 255);
+}
+
 // The legs left standing: the zombie's model in their pose from key 20,
 // all but parts 1-7 left out.
 static void draw_legs(const EnemyType *t, const Enemy *e, const Legs *l)
@@ -7000,6 +7152,7 @@ static void fallen(Enemy *e, int i)
         if (done) {
             if (e->state == ST_DYING) {
                 e->state = ST_DEAD;
+                start_pool(e, i);
                 return;
             }
             e->sub = 2;
@@ -7068,7 +7221,11 @@ void enemy_draw(int reserve_vertices, int reserve_polygons)
         if (!present(e) || e->hidden || !types[e->type].drawable || !anim_model(e)->anims[e->anim].count)
             continue;
         int32_t d = camera_sees(e->x, body_y(e, 900), e->z, 1200);
-        if (d >= 0 && (!camera_view_area(e->x, e->z) || camera_occluded(e->x, e->y, e->z)))
+        // the PS1 tests only the view area; the walls are this port's (masks
+        // at fixed depths) - not for what the room script shows, room 201's
+        // licker passing the window outside
+        if (d >= 0 && (!camera_view_area(e->x, e->z) ||
+                       (!(is_licker(e) && e->state == LICK_SCRIPT) && camera_occluded(e->x, e->y, e->z))))
             d = -1;
         if (d < 0) {
             enemies[i].drawn = 0;
@@ -7124,6 +7281,12 @@ void enemy_draw(int reserve_vertices, int reserve_polygons)
         e->cost_p = GFX_POLYGON_RAM_USAGE - p0;
         e->drawn = 1;
     }
+    if (shadow_tex >= 0) // translucent: the DS draws them after the bodies
+        for (int k = 0; k < n; k++) {
+            const Shadow *s = &shadows[order[k]];
+            if (enemies[order[k]].drawn && s->w && s->h)
+                draw_shadow(&enemies[order[k]], s);
+        }
     for (int k = 0; k < n; k++) {
         Enemy *e = &enemies[order[k]];
         if (e->was_visible && e->was_drawn != e->drawn)
@@ -7140,9 +7303,10 @@ void enemy_debug_print(int tick)
     for (int i = 0; i < MAX_ENEMIES; i++) {
         const Enemy *e = &enemies[i];
         if (e->active)
-            printf("t%d e%d st %d/%d anim %d/%d key %d pos %d %d y %d surf %d dir %d hp %d bend %d verts %d%s\n", tick, i,
-                   e->state, e->sub, e->anim, anim_model(e)->anims[e->anim].count, e->key, (int)e->x, (int)e->z, (int)e->y,
-                   e->surface, e->dir, e->hp, flinch_bend(e), types[e->type].vertices, e->anim_set ? " (room set)" : "");
+            printf("t%d e%d st %d/%d anim %d/%d key %d pos %d %d y %d surf %d dir %d hp %d bend %d verts %d shadow %dx%d %02x%02x%02x%s\n",
+                   tick, i, e->state, e->sub, e->anim, anim_model(e)->anims[e->anim].count, e->key, (int)e->x, (int)e->z,
+                   (int)e->y, e->surface, e->dir, e->hp, flinch_bend(e), types[e->type].vertices, shadows[i].w, shadows[i].h,
+                   shadows[i].rgb[0], shadows[i].rgb[1], shadows[i].rgb[2], e->anim_set ? " (room set)" : "");
     }
 }
 #endif

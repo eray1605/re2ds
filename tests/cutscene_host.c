@@ -73,6 +73,8 @@ void game_spawn_enemy(int s, int t, int v, int voice, int x, int y, int z, int d
 }
 void game_enemy_motion(int s, int m, int c) { enemy_set_motion(s, m, c); }
 void game_enemy_skin(int s, int m) { enemy_set_skin(s, m); }
+void game_cut_be_set(int c, int n, int on) { (void)c; (void)n; (void)on; }
+void game_enemy_shadow(int s, int r, int g, int b, int w, int h, int ox, int oz) { enemy_set_shadow(s, r, g, b, w, h, ox, oz); }
 void game_enemy_sound(int sound, int32_t x, int32_t z) { (void)sound; (void)x; (void)z; }
 void game_player_voice(int sound) { (void)sound; }
 int game_player_damage(int dmg) { (void)dmg; return 0; }
@@ -97,6 +99,7 @@ int game_voice_playing(void) { return voice_left > 0; }
 void game_object_set(const uint8_t *ins) { (void)ins; }
 void game_object_hide(int model) { (void)model; }
 void game_espr_on(const uint8_t *ins) { (void)ins; }
+void game_espr3d_on(const uint8_t *ins) { (void)ins; }
 void game_espr_kill(int id, int type) { (void)id; (void)type; }
 void game_floor_sound_set(int n, int on) { (void)n; (void)on; }
 static int16_t obj_pos[32][3], obj_dir[32];

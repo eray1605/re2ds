@@ -73,6 +73,39 @@ addresses (`SLES_009.72`, disc 1, Europe). **observed** = in the code as written
   music starts; flag 4:6 is set either way. After Marvin (flag 4:7): event 5, Leon turns to
   a sound. Event 8: the Unicorn Medal (item `0x47`) in the statue plays movie 5.
 
+### Camera zones, random numbers, object compares (observed, October 2026)
+
+- **Camera zones** (RVD, 20 bytes): byte 0 switches the record on, 1 the floor (`0xFF` any),
+  2 / 3 cam0 / cam1, then the quad. The cut check (`FUN_8002ba94`) walks the records after
+  the shown camera's first one while their cam0 is that camera and takes one only if byte 0
+  is set: 21 zones in 11 rooms start off. `cut_be_set` (op `0x61`, `scd_op_61`: camera, n,
+  value) sets byte 0 of the n-th record from the camera's first (room 206 turns off the cut to
+  the fireplace's close-up after the painting burned). **DS:** room format 5, `role` bit
+  `SWITCH_ON`; `game_cut_be_set`.
+- The first record of a camera is its view area (`FUN_8002bbbc`, `0x800c5f78` on each cut);
+  characters outside it are not drawn (`FUN_80026598`; parts flagged `0x9000`, the shotgun's
+  standing legs, still are) - Leon too (he stood in the terminal's close-up).
+- **Threads** (observed): at room entry `FUN_8004fb28` runs the init script's function 0 in
+  thread 0 and starts the main script's function 0 in thread 1; `evt_exec ff` takes a free
+  thread from 2 on. Every frame the main loop (`FUN_8004fbdc`) starts the main script's
+  **function 1 afresh in thread 0** before the threads run: the rooms' checks that go on all
+  the time. Room 101's stops the fight music (`sce_bgm_control 01 05`, a fade) once flag 5:5
+  and the four zombies' kill flags 6:3e-41 are set - the DS never ran it.
+- **Variable `0x1d`** is a random number: the script runner (`FUN_8004fb28`) draws a new one
+  every frame before the threads (`FUN_8004f338`: `s = (s + ((s & 0x7fffffff) >> 15) &
+  0xffff) + (s & 0x7fff8000) * 2`, the low 16 bits), and `sce_rnd` (op `0x28`) once more.
+  It stayed 0 here: room 204's dripping blood (`if cmp 00 1d 01 48 71`: over `0x7148`, then
+  sound `0x11` and effect 6/5 where the drop lands) and other random sounds never came.
+- `member_cmp` compares Leon's and room objects' members too (position, facing): room 206's
+  painting falls `while member_cmp 00 0c 03 a0 f6`; taken as always true the event never
+  ended and the automatic cuts stayed off.
+- `sce_espr3d_on` (op `0x54`): id, sub, object it follows, u16 parameter, s16 x y z, s16
+  vector, s16 direction (`FUN_8001bc10`); without an object the DS starts it like
+  `sce_espr_on`.
+- Flag array 33: the area maps found (bit per map page, `maps.bin`), set by the scripts where
+  a map lies (room 20B: 2-4); not set at the start (`INIT_TBL`). The map shows rooms not
+  visited only with the page's bit.
+
 ## 2. Characters moved by the scripts (plc_*)
 
 The `plc_*` commands put an object (Leon, Kendo, a zombie) into routine 4 (`0x80061488`) with
@@ -195,6 +228,24 @@ which keeps the shots' fading boom that 8 bits turned to noise after 0.2 s.
   parameter (high byte looks like a size), s16 x, y, z, s16 direction. `sce_espr_kill`
   (`0x4c`, 5 bytes): id, type, object.
 - `tools/resp2ds.py`, `source/roomfx.c` (the engine plays the first part of each sub effect).
+
+### Shadows and blood pools
+
+Every character has a shadow (`obj+0x16c`, placed each frame by `FUN_80016254`): a flat
+quad on the floor under one of its parts, turned with it, that the PS1 draws by subtracting a
+colour from the picture. Its fields (shorts): 0 / 1 offset (turned by the facing), 2 / 3 size
+along / across the facing, 4-6 world position at floor height, 7 flags, 8 facing, 10 the
+part it follows. The room scripts set it with `kage_set` (op `0x60`, `scd_op_60`: work 1 / 2 /
+3 + index, colour, u16 sizes, s16 offsets): room 100's zombies `bf bf bf` (grey) 400 x 600,
+the corpses of 113, 119 and 301 `10 bf bf` 800-2000 - a subtraction that takes little red:
+blood. A zombie that dies (routine 7, `0x8010a380`) gets that colour, and its shadow grows by
+5 a frame on both sides for 120 frames; Leon's (`0x8003ce98`) by 8 for 60.
+**DS** (`enemy.c`): zombies start with the grey 400 x 600, `kage_set` sets any enemy's; the
+DS has no subtractive blending, so it is a translucent soft disc (a 32 x 32 A5I3 texture) of
+what the subtraction leaves (dark red or black) at the strongest subtracted part's opacity.
+3D pixels with alpha only blend with the background picture when it is the mixer's second
+target: `REG_BLDCNT = BLEND_DST_BG3` (before, the effects' alpha was ignored over the picture).
+Leon has no shadow yet.
 
 ## 6. Item pictures
 

@@ -41,13 +41,14 @@ enum {
     OP_FOR = 13, OP_NEXT = 14, OP_WHILE = 15, OP_EWHILE = 16, OP_DO = 17, OP_EDWHILE = 18,
     OP_SWITCH = 19, OP_CASE = 20, OP_DEFAULT = 21, OP_ESWITCH = 22, OP_GOTO = 23, OP_GOSUB = 24,
     OP_RETURN = 25, OP_BREAK = 26, OP_WORK_COPY = 29, OP_CK = 33, OP_SET = 34, OP_CMP = 35, OP_SAVE = 36,
-    OP_COPY = 37, OP_CALC = 38, OP_CALC2 = 39, OP_CUT_CHG = 41, OP_CUT_OLD = 42,
+    OP_COPY = 37, OP_CALC = 38, OP_CALC2 = 39, OP_SCE_RND = 40, OP_CUT_CHG = 41, OP_CUT_OLD = 42,
     OP_MESSAGE_ON = 43, OP_AOT_SET = 44, OP_OBJ_MODEL_SET = 45, OP_FLR_SET = 56, OP_SCE_ESPR_ON = 58, OP_SCE_ESPR_KILL = 76, OP_WORK_SET = 46, OP_SPEED_SET = 47, OP_ADD_SPEED = 48, OP_ADD_ASPEED = 49, OP_POS_SET = 50, OP_DIR_SET = 51,
     OP_MEMBER_SET = 52, OP_MEMBER_SET2 = 53, OP_SE_ON = 54, OP_SCA_ID_SET = 55, OP_DIR_CK = 57, OP_SCE_EM_SET = 68, OP_DOOR_AOT_SET = 59, OP_CUT_AUTO = 60, OP_MEMBER_COPY = 61, OP_MEMBER_CMP = 62,
     OP_AOT_RESET = 70, OP_AOT_ON = 71, OP_CUT_REPLACE = 75, OP_ITEM_AOT_SET = 78,
     OP_SCE_TRG_CK = 80, OP_SCE_BGM_CONTROL = 81, OP_KEEP_ITEM_CK = 94, OP_SCE_ITEM_LOST = 98, OP_SCE_ITEM_GET = 118, OP_AOT_SET_4P = 103, OP_DOOR_AOT_SET_4P = 104,
     OP_ITEM_AOT_SET_4P = 105, OP_PLC_MOTION = 63, OP_PLC_DEST = 64, OP_PLC_RET = 66, OP_PLC_ROT = 88,
     OP_PLC_CNT = 91, OP_PLC_STOP = 102, OP_XA_ON = 89, OP_MOVIE_ON = 111, OP_SCE_BGMTBL_SET = 87,
+    OP_KAGE_SET = 96, OP_CUT_BE_SET = 97, OP_SCE_ESPR3D_ON = 84,
 };
 
 enum { B_IF, B_FOR, B_WHILE, B_DO, B_DOCOND, B_SWITCH };
@@ -88,6 +89,7 @@ static Thread threads[NUM_THREADS];
 static const Room *cur_room;
 static uint8_t flags[NUM_FLAG_ARRAYS][32];
 static int16_t vars[NUM_VARS];
+static void script_rnd(void);
 static uint8_t cam_map[32];
 static uint8_t cam_auto = 1;
 static uint8_t old_cam;
@@ -303,8 +305,8 @@ static Thread *start_thread(int slot, const uint8_t *code, uint16_t code_size, i
     uint16_t pc = function_start(code, function);
     if (pc == 0xFFFF)
         return NULL;
-    if (slot < 0 || slot >= NUM_THREADS) {
-        for (slot = 1; slot < NUM_THREADS && threads[slot].active; slot++)
+    if (slot < 0 || slot >= NUM_THREADS) { // any free one from 2 on (FUN_8004f79c)
+        for (slot = 2; slot < NUM_THREADS && threads[slot].active; slot++)
             ;
         if (slot == NUM_THREADS)
             return NULL;
@@ -631,12 +633,16 @@ static void run_thread(Thread *t)
             inventory_remove(ins[1]);
             break;
         case OP_MEMBER_CMP: { // pad, member, compare op, s16 value
+            // Leon and room objects too (position, facing): room 206's
+            // painting falls `while member_cmp 00 0c 03 a0 f6` (its y under
+            // -2400) - taken as always true, the event never ended and the
+            // automatic cuts stayed off. A member not modelled counts as true.
             int value;
-            if (t->work_type != 3 && t->work_type != 2)
-                cond = 1; // player / objects: state not modelled yet
-            else
+            if (t->work_type == 2 || t->work_type == 3)
                 cond = game_enemy_member(t->work_type == 2 ? PARTNER_SLOT : t->work_index, ins[2], &value) &&
                        compare((int16_t)value, ins[3], rd16(ins + 4));
+            else
+                cond = !work_member(t, ins[2], &value) || compare((int16_t)value, ins[3], rd16(ins + 4));
             break;
         }
         case OP_DIR_CK:
@@ -651,12 +657,18 @@ static void run_thread(Thread *t)
         case OP_CUT_OLD:
             game_cut_change(old_cam);
             break;
+        case OP_SCE_RND: // scd_op_28
+            script_rnd();
+            break;
         case OP_CUT_AUTO:
             cam_auto = ins[1];
             break;
         case OP_CUT_REPLACE:
             if (ins[1] < 32)
                 cam_map[ins[1]] = ins[2];
+            break;
+        case OP_CUT_BE_SET: // scd_op_61: camera, n-th zone from its first, on
+            game_cut_be_set(ins[1], ins[2], ins[3]);
             break;
         case OP_MESSAGE_ON: {
             // The English disc leaves the spoken lines (Marvin, Ada, ...) empty
@@ -692,6 +704,11 @@ static void run_thread(Thread *t)
             break;
         case OP_SCE_ESPR_ON: // scd_op_3a: an effect of the room's ESP
             game_espr_on(ins);
+            break;
+        case OP_SCE_ESPR3D_ON: // scd_op_54: id, sub, object it follows (0: none),
+                               // u16 parameter, s16 x y z, s16 vector[3], s16 dir
+            if (!ins[4])
+                game_espr3d_on(ins);
             break;
         case OP_SCE_ESPR_KILL: // scd_op_4c: id, type, object
             game_espr_kill(ins[1], ins[2]);
@@ -765,6 +782,11 @@ static void run_thread(Thread *t)
             game_enemy_skin(ins[2], ins[8]);
             break;
         }
+        case OP_KAGE_SET: // scd_op_60: work 1 / 2 / 3 + index, the colour, u16 size, s16 offset
+            if (ins[1] == 2 || ins[1] == 3)
+                game_enemy_shadow(ins[1] == 2 ? PARTNER_SLOT : ins[2], ins[3], ins[4], ins[5], ru16(ins + 6),
+                                  ru16(ins + 8), rd16(ins + 10), rd16(ins + 12));
+            break;
         case OP_SE_ON: // bank, s16 sound (low byte = number), position source, offset
             game_play_sound(ins[1], rd16(ins + 2) & 0xFF);
             break;
@@ -812,8 +834,26 @@ static void run_thread(Thread *t)
     }
 }
 
+// VAR_RND (0x800cc422) from the PS1's generator FUN_8004f338, which the
+// script runner (FUN_8004fb28) calls every frame before the threads and
+// sce_rnd once more. Room 204's dripping blood waits for it to be over 0x7148
+// (`if cmp 00 1d 01 48 71`): it stayed 0 and the drops never came.
+static uint32_t rnd_seed = 0x2D53A1;
+static void script_rnd(void)
+{
+    rnd_seed = ((rnd_seed + ((rnd_seed & 0x7FFFFFFF) >> 15)) & 0xFFFF) + (rnd_seed & 0x7FFF8000) * 2;
+    vars[VAR_RND] = (int16_t)rnd_seed;
+}
+
+// Every frame the PS1 (FUN_8004fbdc from the main loop) draws a random
+// number and starts the main script's function 1 afresh in thread 0, before
+// the threads run: the rooms' checks that go on all the time - room 101 stops
+// its fight music there once the four zombies' kill flags are set.
 void script_tick(void)
 {
+    script_rnd();
+    if (cur_room && cur_room->exec_script)
+        start_thread(0, cur_room->exec_script, cur_room->header->size_exec, 1);
     script_threads_running = 0;
     for (int i = 0; i < NUM_THREADS; i++) {
         if (threads[i].active) {
@@ -849,8 +889,10 @@ void script_room_enter(const Room *room)
         if (t)
             t->active = 0;
     }
+    // the main script's function 0 in thread 1 (FUN_8004fb28); thread 0 is
+    // its function 1's, every frame (script_tick)
     if (room->exec_script)
-        start_thread(0, room->exec_script, room->header->size_exec, 0);
+        start_thread(1, room->exec_script, room->header->size_exec, 0);
 
     // Doors the converter found in the scripts but that were not set (the init
     // script stopped early at an unsupported opcode): add them so every room

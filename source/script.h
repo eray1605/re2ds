@@ -38,6 +38,7 @@ enum {
 
 // Script variables the engine keeps up to date
 #define VAR_CUT 0x1A           // current camera (room 102 waits for it to open the gate)
+#define VAR_RND 0x1D           // a random number, new every frame and on sce_rnd
 
 // Flag arrays with a known meaning
 #define FLAGS_ITEM_PICKED 8    // bit n set = item AOT with picked index n taken
@@ -85,6 +86,10 @@ void game_movie(int n);                     // movie_on: plays movie table entry
 void game_spawn_enemy(int slot, int type, int flags, int voice, int x, int y, int z, int dir_re2);
 void game_enemy_motion(int slot, int motion, int ctr); // sce_em_set's motion, control word
 void game_enemy_skin(int slot, int model);            // sce_em_set's model byte (obj+0x1cf)
+// kage_set: an enemy's shadow - the colour the PS1 subtracts (r, g, b),
+// size along / across its facing, offset from its body (enemy.c)
+void game_enemy_shadow(int slot, int r, int g, int b, int w, int h, int ox, int oz);
+void game_cut_be_set(int cam, int n, int on); // cut_be_set: a camera zone on / off
 // enemy object members for the room scripts (member_set / member_copy /
 // member_cmp after work_set 3): 0 if the member is not modelled
 int game_enemy_member(int slot, int member, int *value);
@@ -106,6 +111,7 @@ void game_object_hide(int model);
 int game_object_member(int n, int member, int *value);
 // sce_espr_on (the 16-byte instruction) / sce_espr_kill: room effect sprites
 void game_espr_on(const uint8_t *ins);
+void game_espr3d_on(const uint8_t *ins); // sce_espr3d_on at a world position (room 204's drops)
 void game_espr_kill(int id, int type);
 // flr_set: the room's floor sound area n on / off (RoomFloorSound.floor & 0x80)
 void game_floor_sound_set(int n, int on);

@@ -13,6 +13,7 @@
 void roomfx_load(int stage, int room);   // frees the previous room's
 // ins = the 16-byte sce_espr_on instruction
 void roomfx_on(const uint8_t *ins);
+void roomfx_3d_on(const uint8_t *ins); // sce_espr3d_on
 // effect id (the room's, else CORE00.ESP's), sub effect | palette row << 3,
 // size = the sce_espr_on parameter's high byte (0 = 1:1)
 void roomfx_spawn(int id, int type, int32_t x, int32_t y, int32_t z, int size, int dir_re2);
