@@ -141,7 +141,8 @@ tools/build_assets.sh build/disc1
 make
 ```
 
-This makes `re2ds.nds`. If the script set up Docker: after restarting Windows run
+This makes `re2ds.nds` (and `re2ds_boot.nds`, see [Android](#android-retroarch-with-melonds-ds)).
+If the script set up Docker: after restarting Windows run
 `sudo service docker start` once before `make`.
 
 **6. Play.** Copy the ROM to your Windows desktop and open it in melonDS for Windows
@@ -246,6 +247,27 @@ Saving needs an SD card: on a flashcart or a DSi it is the card the ROM runs fro
 
 The save file `re2ds.sav` then appears in that folder. (A 512 MB image is too small: melonDS
 keeps the ROM there padded to 512 MB.)
+
+## Android (RetroArch with melonDS DS)
+
+Do not load `re2ds.nds` itself: RetroArch's melonDS DS core holds several copies of a ROM in
+memory while loading it (up to about 1.8 GB for re2ds.nds), and Android closes RetroArch for
+that. Load `re2ds_boot.nds` instead, which `make` builds next to `re2ds.nds`: it is the same
+ROM without the game data (under 1 MB) and reads the data from `re2ds.nds` on melonDS DS's
+virtual SD card.
+
+1. Copy `re2ds_boot.nds` and `re2ds.nds` of the same build to the phone.
+2. In RetroArch load `re2ds_boot.nds` with melonDS DS. The first time it stops with
+   *NitroFS init failed*.
+3. *Quick Menu → Core Options → System*: leave **Virtual SD Card** on (the default) and turn
+   **Sync SD Card to Host** on. Then *Quick Menu → Close Content*.
+4. Copy `re2ds.nds` into `melonDS DS/dldi_sd_card/` in RetroArch's save folder (*Settings →
+   Directory → Save Files* shows where that is). Create `dldi_sd_card` if it is not there.
+5. Load `re2ds_boot.nds` again. The first start takes a while: melonDS DS copies `re2ds.nds`
+   into its SD card image (`dldi_sd_card.bin` next to the folder).
+
+After a new build copy both files again. Saves (`re2ds.sav`) appear in `dldi_sd_card/` when
+the game is closed. Keep the core in DS mode (the default): the boot ROM has no DSi code.
 
 ## Tests
 

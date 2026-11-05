@@ -2363,12 +2363,29 @@ static void sd_rom_close(void *user)
 
 static const NitroRomIface sd_rom_iface = { sd_rom_read, sd_rom_close };
 
+// The boot ROM (tools/make_boot_rom.py) has the file tables but not the files:
+// read from the cartridge, its NitroFS finds other bytes where the files were.
+static bool nitro_has_data(void)
+{
+    uint32_t magic = 0;
+    FILE *f = fopen("nitro:/model/leon.bin", "rb");
+    if (!f)
+        return false;
+    size_t n = fread(&magic, sizeof(magic), 1, f);
+    fclose(f);
+    return n == 1 && magic == MODEL_MAGIC;
+}
+
 static bool nitro_init(void)
 {
     static const char *const paths[] = { "fat:/re2ds.nds", "sd:/re2ds.nds" };
     nitro_step = 1;
-    if (nitroFSInit(NULL)) // also mounts the SD card (fatInitDefault)
-        return true;
+    if (nitroFSInit(NULL)) { // also mounts the SD card (fatInitDefault)
+        if (nitro_has_data())
+            return true;
+        nitro_step = 5;
+        return false;
+    }
     for (unsigned i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
         FILE *f = fopen(paths[i], "rb");
         if (!f)
@@ -4154,7 +4171,8 @@ int main(void)
     if (!nitro_init()) {
         consoleDemoInit();
         iprintf("\x1b[1;1HERROR:\nNitroFS init failed (step %d,\nboot %d)\n\n"
-                "With DLDI (melonDS) copy\nre2ds.nds to the SD card root\n(step 4: the copy there is\nanother build).\n",
+                "With DLDI (melonDS) copy\nre2ds.nds to the SD card root\n(step 4: the copy there is\nanother build).\n\n"
+                "step 5: this is the boot ROM\n(no game data): turn the\nvirtual SD card on.\n",
                 nitro_step, g_envBootParam->boot_src);
         while (1)
             swiWaitForVBlank();

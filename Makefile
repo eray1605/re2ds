@@ -84,13 +84,16 @@ export LIBPATHS := $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 
 .PHONY: $(BUILD) clean
 
+# and re2ds_boot.nds: the ROM without the game data, which it reads from
+# re2ds.nds on the SD card (for RetroArch on phones; tools/make_boot_rom.py)
 $(BUILD):
 	@mkdir -p $@
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
+	@python3 -I tools/make_boot_rom.py $(TARGET).nds $(TARGET)_boot.nds
 
 clean:
 	@echo clean ...
-	@rm -fr $(BUILD) $(TARGET).elf $(TARGET).nds
+	@rm -fr $(BUILD) $(TARGET).elf $(TARGET).nds $(TARGET)_boot.nds
 
 #---------------------------------------------------------------------------------
 else
