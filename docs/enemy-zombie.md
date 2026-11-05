@@ -118,6 +118,14 @@ Routine 8 (room script modes, observed): mode 0 stand, 1 walk to the destination
   `0,2,0,2,0,2,2,0`, index `(rand >> (rand & 3)) & 7`). The faster variants 1/3 and the
   gaits 4–7 are not used here.
 
+**Eating** (routine 8 mode 3, `0x80109f9c`, observed): animation `0x15`, then one of
+`0x12`-`0x14` (table `0x801000a8`) after another, every second one with blood at the mouth
+(effect `0x17b8` at part 8, 200 out) on the keyframes with EDD flag `0x10000` - in every zombie
+model `0x12`: 20, 45; `0x13`: 21, 45, 70; `0x14`: 12, 22 (the DS model keeps only the flag bits
+0-3, so `enemy.c` lists them). Mode 2 (`0x80109d98`) lunges and at key `0x11` holds the target,
+which plays the zombie's set 2 (routine `0x2004`): Kendo in room 101. **DS:** the victim gets
+the blood of Leon's death in that animation (spurts from key 41, the floor from 100).
+
 **Spawn variants** (`obj+0x10e & 0x3f`, from the room script):
 
 | Value | Start                                                   |

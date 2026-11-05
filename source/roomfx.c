@@ -282,6 +282,12 @@ void roomfx_throw(int id, int first, int row, int32_t x, int32_t y, int32_t z, i
     }
 }
 
+// sce_espr3d_on: the same layout up to the position, the direction at +20
+void roomfx_3d_on(const uint8_t *ins)
+{
+    roomfx_spawn(ins[2], ins[3], rd16(ins + 8), rd16(ins + 10), rd16(ins + 12), ins[7], rd16(ins + 20));
+}
+
 void roomfx_on(const uint8_t *ins)
 {
     // op, ?, id, sub | row << 3, object type, object index, u16 parameter,

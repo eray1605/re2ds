@@ -13,9 +13,10 @@ import struct
 import sys
 
 ROOM_MAGIC = 0x314D5252  # "RRM1"
-ROOM_VERSION = 4
+ROOM_VERSION = 5
 HEADER_SIZE = 60
 SWITCH_VIEW_AREA = 0x01
+SWITCH_ON = 0x02   # the record's byte 0: a transition switches only while it is set
 SPAWN_MARGIN = 450
 
 
@@ -99,6 +100,7 @@ def main():
     for sw, role in zip(switches, room["_roles"]):
         xs = [p[0] for p in sw["quad_xz"]]
         zs = [p[1] for p in sw["quad_xz"]]
+        role |= SWITCH_ON if sw["flag"] else 0
         out += struct.pack("<4B4h4h", sw["cam0"], sw["cam1"], sw["floor"], role, *xs, *zs)
     for b in boxes:
         out += struct.pack("<hhHHHHHHI", b["x"], b["z"], b["w"], b["d"], b["shape"], b["flag"],

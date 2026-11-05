@@ -57,7 +57,7 @@ typedef struct {
 // room10a0 for Leon). room/index.bin lists the converted rooms: u16 count,
 // then count x (u8 stage, u8 room).
 #define ROOM_MAGIC 0x314D5252 // "RRM1"
-#define ROOM_VERSION 4
+#define ROOM_VERSION 5
 
 typedef struct {
     uint32_t magic;
@@ -109,11 +109,13 @@ typedef struct {
 // OpenBiohazard2: per camera, the first zone with cam1 == 0 is that camera's
 // own view area and never switches.
 #define SWITCH_VIEW_AREA 0x01  // role bit: this zone is cam0's view area
+#define SWITCH_ON 0x02         // role bit: the RVD record's byte 0 is set: a transition
+                               // switches only then; the scripts turn it with cut_be_set
 typedef struct {
     uint8_t cam0;          // active camera
     uint8_t cam1;          // camera to switch to
     uint8_t floor;         // 255 = any floor
-    uint8_t role;          // SWITCH_VIEW_AREA or 0 (= transition)
+    uint8_t role;          // SWITCH_VIEW_AREA, SWITCH_ON
     int16_t x[4];
     int16_t z[4];
 } RoomSwitch;              // 20 bytes

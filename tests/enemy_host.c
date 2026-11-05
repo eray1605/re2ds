@@ -54,15 +54,15 @@ void game_aot_on(int n) { (void)n; }
 int game_busy(void) { return 0; }
 void game_show_message(const char *t) { (void)t; }
 int game_message_open(void) { return 0; }
-void game_cut_change(int c) { (void)c; }
+void game_cut_change(int c) { if (getenv("TRACE_CUTS")) printf("  cut %d\n", c); }
 void game_set_player_pos(int32_t x, int32_t y, int32_t z) { (void)x; (void)y; (void)z; }
 void game_set_player_dir(int16_t d) { (void)d; }
 void game_set_box_flag(int b, int f) { if (host_room.data && b >= 0 && b < host_room.header->num_boxes) ((RoomBox *)host_room.boxes)[b].flag = f; printf("  box %d flag %04x\n", b, f & 0xFFFF); }
-void game_bgm_control(int i, int o, int t, int l, int r) { (void)i; (void)o; (void)t; (void)l; (void)r; }
+void game_bgm_control(int i, int o, int t, int l, int r) { (void)t; (void)l; (void)r; printf("  bgm control %d op %d\n", i, o); }
 void game_bgmtbl_set(int s, int r, int m, int u) { (void)s; (void)r; (void)m; (void)u; }
 void game_item_get(int item, int count) { printf("  item get %02x x%d\n", item, count); }
 void game_movie(int n) { (void)n; }
-void game_play_sound(int bank, int sound) { (void)bank; (void)sound; }
+void game_play_sound(int bank, int sound) { if (getenv("TRACE_SOUNDS")) printf("  sound bank %d %#x\n", bank, sound); }
 void game_spawn_enemy(int s, int t, int v, int voice, int x, int y, int z, int d)
 {
     printf("  spawn slot %d type %02x flags %04x voice %d at %d %d %d dir %d\n", s, t, v, voice, x, y, z, d);
@@ -70,6 +70,8 @@ void game_spawn_enemy(int s, int t, int v, int voice, int x, int y, int z, int d
 }
 void game_enemy_motion(int s, int m, int c) { enemy_set_motion(s, m, c); }
 void game_enemy_skin(int s, int m) { enemy_set_skin(s, m); }
+void game_cut_be_set(int c, int n, int on) { (void)c; (void)n; (void)on; }
+void game_enemy_shadow(int s, int r, int g, int b, int w, int h, int ox, int oz) { enemy_set_shadow(s, r, g, b, w, h, ox, oz); }
 // Leon for the grab test: stands still at PX, 0
 static int host_hp = 200, host_held, host_dead;
 static int32_t host_px, host_pz;
@@ -87,13 +89,33 @@ int game_player_member(int m, int *v) { (void)m; (void)v; return 0; }
 void game_player_member_set(int m, int v) { (void)m; (void)v; }
 void game_voice(int k, int n) { (void)k; (void)n; }
 int game_voice_playing(void) { return 0; }
-void game_object_set(const uint8_t *ins) { (void)ins; }
+// room objects: position and facing for the scripts (member 0x0B-0x0D, 0x0F)
+static int16_t host_obj[32][4];
+void game_object_set(const uint8_t *ins)
+{
+    if (ins[1] >= 32)
+        return;
+    for (int k = 0; k < 3; k++)
+        host_obj[ins[1]][k] = (int16_t)(ins[14 + 2 * k] | ins[15 + 2 * k] << 8);
+    host_obj[ins[1]][3] = (int16_t)(ins[22] | ins[23] << 8);
+}
 void game_object_hide(int model) { (void)model; }
 void game_espr_on(const uint8_t *ins) { (void)ins; }
+void game_espr3d_on(const uint8_t *ins) { (void)ins; }
 void game_espr_kill(int id, int type) { (void)id; (void)type; }
 void game_floor_sound_set(int n, int on) { (void)n; (void)on; }
-int game_object_member(int n, int m, int *v) { (void)n; (void)m; (void)v; return 0; }
-void game_object_member_set(int n, int m, int v) { (void)n; (void)m; (void)v; }
+int game_object_member(int n, int m, int *v)
+{
+    if (n >= 32 || !((m >= 0x0B && m <= 0x0D) || m == 0x0F))
+        return 0;
+    *v = host_obj[n][m == 0x0F ? 3 : m - 0x0B];
+    return 1;
+}
+void game_object_member_set(int n, int m, int v)
+{
+    if (n < 32 && ((m >= 0x0B && m <= 0x0D) || m == 0x0F))
+        host_obj[n][m == 0x0F ? 3 : m - 0x0B] = (int16_t)v;
+}
 int game_plc(int w, int i, const uint8_t *ins) { return w == 3 ? enemy_plc(i, ins) : 1; }
 void game_enemy_member_set(int s, int m, int v) { printf("  member_set enemy %d member %d = %04x\n", s, m, v & 0xFFFF); enemy_member_set(s, m, v); }
 int game_sight_blocked(int32_t a, int32_t b, int32_t c, int32_t d, int32_t e, int32_t f) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; return 0; }
@@ -160,6 +182,6 @@ int main(int argc, char **argv)
         if (enemy_spawn_calls != before) printf("tick %d: %d spawn calls total, %d active\n", t, enemy_spawn_calls, enemy_count());
         if (getenv("TRACE")) enemy_debug_print(t);
     }
-    printf("enemies active: %d\n", enemy_count());
+    printf("enemies active: %d, automatic cuts %s\n", enemy_count(), cut_auto_enabled() ? "on" : "off");
     return 0;
 }

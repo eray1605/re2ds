@@ -32,6 +32,7 @@ int game_voice_playing(void) { return 0; }
 void game_object_set(const uint8_t *ins) { (void)ins; }
 void game_object_hide(int model) { (void)model; }
 void game_espr_on(const uint8_t *ins) { (void)ins; }
+void game_espr3d_on(const uint8_t *ins) { (void)ins; }
 void game_espr_kill(int id, int type) { (void)id; (void)type; }
 void game_floor_sound_set(int n, int on) { (void)n; (void)on; }
 int game_object_member(int n, int m, int *v) { (void)n; (void)m; (void)v; return 0; }
@@ -40,6 +41,11 @@ int game_plc(int w, int i, const uint8_t *ins) { (void)w; (void)i; (void)ins; re
 void game_spawn_enemy(int s, int t, int v, int voice, int x, int y, int z, int d) { (void)voice; if (getenv("SHOW_SPAWNS")) printf("  spawn slot %d type %02x variant %d at %d %d %d dir %d\n", s, t, v, x, y, z, d); }
 void game_enemy_motion(int s, int m, int c) { (void)s; (void)m; (void)c; }
 void game_enemy_skin(int s, int m) { (void)s; (void)m; }
+void game_cut_be_set(int c, int n, int on) { (void)c; (void)n; (void)on; }
+void game_enemy_shadow(int s, int r, int g, int b, int w, int h, int ox, int oz)
+{
+    printf("  shadow enemy %d colour %02x %02x %02x size %d x %d offset %d %d\n", s, r, g, b, w, h, ox, oz);
+}
 
 const char *room_message(const Room *room, int n)
 {
