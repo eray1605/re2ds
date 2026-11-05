@@ -331,7 +331,7 @@ Per type (details and PS1 addresses in `docs/enemy-zombie.md` and `docs/enemy-ot
 | 0x29 | cockroaches | IDLE, CRAWL, JUMP, CLING, FALL | room 40B pipe (axis built in) |
 | 0x3e/0x3f | lab machines | ST_PROP | only animate |
 | 0x23 | alligator | WAIT, CRAWL, TURN, END, CYLINDER, FLINCH, AWAY | room 40A chase; gas cylinder ends it (flag 5:0x1e) |
-| 0x40+ | people | stand / plc | Ada (0x41) as partner, Ben (0x46), Kendo (0x48) ... |
+| 0x40+ | people | stand / plc; the partner follows Leon (flag 1:3) | Ada (0x41) as partner, Ben (0x46), Kendo (0x48) ... |
 | 0x27 0x28 0x2b 0x2c 0x30 0x33 0x36 0x37 | scene actors / plain fights | ACT_STAND (no set flag), ACT_IDLE/WALK/ATTACK/FLINCH | stand-ins, table actor_types |
 | others | none left in Leon's rooms | (zombie AI + `strike` as a fallback) | |
 
@@ -556,7 +556,7 @@ DS screen; only host tests. **Host tests run the real engine C files with stubbe
 | Test | Build | Run / purpose |
 |---|---|---|
 | `script_host.c` | `cc -O1 -g -fsanitize=undefined -Isource tests/script_host.c -o build/script_host` | `build/script_host $(ls nitrofiles/room/room????.bin)` (not `room*0.bin`: that also matches the `_rbj_e0.bin` files, counted as "bad header") — runs every room's scripts, reports unknown opcodes, hangs, out-of-range access. `SHOW_SPAWNS=1` prints sce_em_set, `AOTS=1` every AOT (type, data bytes), `ITEMS=1` the item AOTs. |
-| `enemy_host.c` | `cc -O1 -g -fsanitize=undefined -Itests/stubs -Isource tests/enemy_host.c source/script.c source/enemy.c source/plc.c -o build/enemy_host -lm` | one room's enemies vs a fake Leon. Env: `TICKS` (default 100), `PX`/`PZ`/`PY` (Leon position), `NOISE` (from tick `NOISE_AT` on), `SHOOT` (Leon shoots every 15 ticks), `MASH` (button mashing when grabbed), `TRACE` (per-tick enemy dump with y and surface, sounds, blood), `ZONES=nitrofiles/room/room1020_blk.bin`, `WALLS` (use room collision; the lickers' wall crawl reads the boxes always), `EVENT=n` (start event function n at tick 5, e.g. `EVENT=3` lets the arms of room 205 out), `MEMBERS=tick:slot:member:value,...`, `LOOK=<Leon's facing>` (what his head turns to, every 45 ticks), `SPAWN=slot:type:flags:x:y:z:dir,...` (an enemy the script only sets behind flags, e.g. room 10A's wall licker `0:0x22:0x0101:-27000:-3000:-12400:1024`). |
+| `enemy_host.c` | `cc -O1 -g -fsanitize=undefined -Itests/stubs -Isource tests/enemy_host.c source/script.c source/enemy.c source/plc.c -o build/enemy_host -lm` | one room's enemies vs a fake Leon. Env: `TICKS` (default 100), `PX`/`PZ`/`PY` (Leon position), `NOISE` (from tick `NOISE_AT` on), `SHOOT` (Leon shoots every 15 ticks), `MASH` (button mashing when grabbed), `TRACE` (per-tick enemy dump with y and surface, sounds, blood), `ZONES=nitrofiles/room/room1020_blk.bin`, `WALLS` (use room collision; the lickers' wall crawl reads the boxes always), `EVENT=n` (start event function n at tick 5, e.g. `EVENT=3` lets the arms of room 205 out), `MEMBERS=tick:slot:member:value,...`, `LOOK=<Leon's facing>` (what his head turns to, every 45 ticks), `SPAWN=slot:type:flags:x:y:z:dir,...` (an enemy the script only sets behind flags, e.g. room 10A's wall licker `0:0x22:0x0101:-27000:-3000:-12400:1024`), `FLAGS=array:bit,...` (set after the room's init, e.g. `1:3` for the partner following), `PDIR` (Leon's facing, DS units), `PMOVE=from:to:vx:vz` (Leon walks that much a tick in those ticks, facing that way). |
 | `cutscene_host.c` | `cc -Itests/stubs -Isource tests/cutscene_host.c source/script.c source/enemy.c source/plc.c -o build/cutscene_host` | `./build/cutscene_host nitro:/room/room3010.bin <event> [ticks]` — runs a scene (plc, messages, cuts, voices, spawns); ends when no thread runs. Loads `_rbj_eN.bin` and `_rbj_p.bin`. `TRACE_MEMBERS=1` prints the script's enemy member sets (e.g. when room 201's event 4 signals its licker). |
 | `door_host.c` | `cc -Itests/stubs -Isource tests/door_host.c source/script.c -o build/door_host` | `build/door_host 0` — door program positions; `DOOR_DUMP=30,120` dumps frames. **Stale:** misses many `game_*` stubs and does not link. |
 | `music_host.c` | `cc -O1 -g -fsanitize=undefined -Itests/stubs -Isource tests/music_host.c -o build/music_host -lm` (`-DMAX_VOICES=n` to try other limits) | `./build/music_host <stage> <room hex> [seconds] [frame:id:op,...] [slow]` — plays a room's music: voices busy, notes that took a sounding voice (held / fading), DS channels missing (one-shots free theirs at their end), sound messages per frame, summed channel volume (peak/average; the DS clips past about 127, the music's limit is 160). |
@@ -682,8 +682,10 @@ Specific risks:
    flag 33 mechanism not understood). Page flipping by touch only.
 4. Terminal: only the door-lock service program; fingerprint program says "does not respond".
 5. Message paging: question boxes use 3 text lines + YES/NO; long questions may be cut.
-6. Partner (Ada/Sherry/Ben in slot 0xff) only follows plc; no free AI following Leon (Ada
-   walking with Leon in the B1 parking area is not done).
+6. Partner (slot 0xff): follows Leon while flag 1:3 is set and shoots zombies (PS1 routine
+   `FUN_8005be50`, `docs/enemy-others.md` section 17); her shot's sound source and damage are
+   assumed (the VP70's); being hit, the spiders' reactions and the health animations are not
+   ported.
 7. Alligator (0x23, room 40A0): ported (course, cylinder, explosion -> flag 5:0x1e); its camera
    cuts and the exact bite are not.
 8. G (Birkin 0x30-0x36), cockroaches (0x29): placeholder AI; Ivy's vines and damage values are approximations.
@@ -702,7 +704,7 @@ Specific risks:
 2. Release: PR develop -> main, then delete develop (remote + local) and recreate from main.
 3. Alligator scene (room 40A0): RE the overlay of type 0x23, port the scripted sequence
    (gas tank shot), flags 5:0a/0b.
-4. Partner following AI (Ada in B1/sewers): PS1 partner routine in the type 0x41 overlay.
+4. Partner AI rest: states 6-10, spiders, her real weapon (`obj[0] >> 29`) and shot sound.
 5. G-type enemies and plants/moths (stage 4-6): overlays, then AIs like the dog's.
 6. Remaining weapons (grenade launcher with ammo kinds, bowgun, rocket launcher) — PLW sets
    exist (`leon_wNN.bin`); effects from CORE00.ESP.
