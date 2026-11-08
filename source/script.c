@@ -861,7 +861,20 @@ void script_tick(void)
             script_threads_running++;
         }
     }
+    // FUN_8004f484 after the threads: the AOT and item variables last one
+    // frame (room 206's frame function: "cmp 00 02 00 2f" = the lighter used)
+    vars[VAR_AOT_FRONT] = vars[VAR_AOT_HERE] = vars[VAR_ITEM_USED] = -1;
 }
+
+// The PS1 clears flag array 10 (its first 128 bits) with the variables; here
+// it is cleared just before the AOT check that sets it again, so that the
+// status screen, opened between two frames, still sees this frame's.
+void script_aot_frame_reset(void)
+{
+    memset(flags[FLAGS_ITEM_USABLE], 0, 16);
+}
+
+void script_set_var(int n, int value) { *var(n) = (int16_t)value; }
 
 void script_camera_changed(int previous, int cam)
 {
@@ -872,6 +885,8 @@ void script_camera_changed(int previous, int cam)
 void script_room_enter(const Room *room)
 {
     cur_room = room;
+    vars[VAR_AOT_FRONT] = vars[VAR_AOT_HERE] = vars[VAR_ITEM_USED] = -1; // FUN_8004fb28
+    memset(flags[FLAGS_ITEM_USABLE], 0, 16);
     memset(aots, 0, sizeof(aots));
     memset(threads, 0, sizeof(threads));
     for (int i = 0; i < 32; i++)

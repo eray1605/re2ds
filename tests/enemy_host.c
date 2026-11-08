@@ -170,6 +170,15 @@ int main(int argc, char **argv)
         }
         if (getenv("EVENT") && t == 5) // e.g. EVENT=3: the room's event function 3
             script_start_event((int)strtol(getenv("EVENT"), NULL, 0));
+        if (getenv("USE")) { // tick:item[:aot] - the item USEd (variable 2), at that AOT (variable 0)
+            int at = -1, item = 0, aot = -1;
+            if (sscanf(getenv("USE"), "%i:%i:%i", &at, &item, &aot) >= 2 && at == t) {
+                script_set_var(VAR_ITEM_USED, item);
+                if (aot >= 0)
+                    script_set_var(VAR_AOT_FRONT, aot);
+                printf("t%d used item %#x\n", t, item);
+            }
+        }
         script_tick();
         EnemyTarget p = { .x = host_held ? host_px : (getenv("PX") ? atoi(getenv("PX")) : 5899) + moved_x,
                           .z = host_held ? host_pz : (getenv("PZ") ? atoi(getenv("PZ")) : 0) + moved_z,

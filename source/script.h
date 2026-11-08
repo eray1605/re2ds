@@ -31,17 +31,27 @@ enum {
     SCE_NORMAL = 3,
     SCE_MESSAGE = 4,
     SCE_EVENT = 5,
+    SCE_FLAG_CHG = 6,          // sets flag data[0]:data[2] = data[4] (handler 0x8004e168)
+    SCE_WATER = 7,             // s16 data[0]: the water's surface (0x8004e1d4: obj+0x10c)
     SCE_SAVE = 9,              // typewriter
     SCE_ITEMBOX = 10,
+    SCE_DAMAGE = 11,           // hurt kind data[0], damage data[2] (0x8004e61c)
+    SCE_STATUS = 12,           // opens the status screen (0x8004e794)
+    SCE_DRAWER = 13,           // a desk locked with the small key: lock, item AOT, camera (0x8004e7d4)
     SCE_TERMINAL = 14,         // a computer: data[0] | data[2] << 4 picks the program (0x80036a90)
 };
 
 // Script variables the engine keeps up to date
+#define VAR_AOT_FRONT 0        // the AOT whose area the point before Leon is in (SAT 0x20)
+#define VAR_AOT_HERE 1         // ... Leon himself is in (SAT 0x40)
+#define VAR_ITEM_USED 2        // the item USEd on the status screen (0x800cc3ec)
 #define VAR_CUT 0x1A           // current camera (room 102 waits for it to open the gate)
 #define VAR_RND 0x1D           // a random number, new every frame and on sce_rnd
 
 // Flag arrays with a known meaning
 #define FLAGS_ITEM_PICKED 8    // bit n set = item AOT with picked index n taken
+#define FLAGS_ITEM_USABLE 10   // bit n set = item n can be USEd here (SCE_FLAG_CHG, every frame)
+#define FLAGS_DRAWER 63        // DS: desks unlocked (the PS1 keeps them with the doors' locks, 0x800cc630)
 
 typedef struct {
     uint8_t active;
@@ -118,7 +128,11 @@ void game_floor_sound_set(int n, int on);
 void game_object_member_set(int n, int member, int value);
 
 void script_room_enter(const Room *room);   // resets AOTs/threads, runs init, starts main
-void script_tick(void);
+void script_tick(void);                      // ends with variables 0-2 back to -1
+// After every frame's scripts (FUN_8004f484): variables 0-2 back to -1;
+// flag array 10 is cleared before the next AOT check (aot_frame_reset)
+void script_aot_frame_reset(void);
+void script_set_var(int n, int value);
 void script_start_event(int function);      // run a main-script function as a new thread
 
 int flag_get(int array, int bit);

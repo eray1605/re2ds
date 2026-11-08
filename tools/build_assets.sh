@@ -109,6 +109,9 @@ python3 -I tools/icon2ds.py "$DISC/COMMON/DATA/TIT_BG.TIM" "$DISC/COMMON/DATA/TM
 # the documents (items 0x68-0x80): one picture per page
 python3 -I tools/files2ds.py "$DISC/COMMON/DATA/FILES.TIM" build/ds/files > /dev/null
 
+# the ending: its pictures and the results' texts (ENDING.BIN, END00, END10-14)
+python3 -I tools/ending2ds.py "$DISC/COMMON/BIN/ENDING.BIN" "$DISC/COMMON/DATA" build/ds/ending > /dev/null
+
 # "YOU DIED" (Leon)
 mkdir -p build/ds/die
 python3 -I tools/die2ds.py "$DISC/COMMON/DATA/DIED00.DIE" build/ds/die/died00.bin
@@ -126,6 +129,7 @@ python3 -I tools/xa2ds.py --common "$DISC/SLES_009.72" "$DISC/PL0/VOICE/VOICE00.
 # ROM. Four at a time: each takes a while.
 mkdir -p build/ds/movie
 for m in PL0/ZMOVIE/TITLEL:titlel:15 PL0/ZMOVIE/OPN1STL:opn1:15 PL0/ZMOVIE/OPN2NDL:opn2:15 \
+         PL0/ZMOVIE/OPN2NDRL:opn2r:15 \
          ZMOVIE/R10B:r10b:10 ZMOVIE/R200:r200:10 ZMOVIE/R505:r505:10 ZMOVIE/R109:r109:10 \
          PL0/ZMOVIE/R108L:r108l:10 PL0/ZMOVIE/R204L:r204l:10 PL0/ZMOVIE/R409:r409:10 \
          PL0/ZMOVIE/R700L:r700l:10 PL0/ZMOVIE/R703L:r703l:10 PL0/ZMOVIE/R704L:r704l:10; do
@@ -139,5 +143,5 @@ done | xargs -P 4 -n 3 sh -c 'python3 -I tools/str2ds.py "$0" "$1" --fps "$2" > 
 mkdir -p build/ds/subs
 python3 -I tools/subs2ds.py build/ds build/ds/subs/subs.txt build/subs_work
 
-cp -R build/ds/bg build/ds/room build/ds/model build/ds/mask build/ds/sound build/ds/door build/ds/effect build/ds/music build/ds/menu build/ds/movie build/ds/die build/ds/voice build/ds/files build/ds/title build/ds/subs nitrofiles/
+cp -R build/ds/bg build/ds/room build/ds/model build/ds/mask build/ds/sound build/ds/door build/ds/effect build/ds/music build/ds/menu build/ds/movie build/ds/die build/ds/voice build/ds/files build/ds/title build/ds/subs build/ds/ending nitrofiles/
 du -sh nitrofiles nitrofiles/*

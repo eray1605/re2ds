@@ -26,6 +26,7 @@
 #include "effect.h"
 #include "music.h"
 #include "menu.h"
+#include "ending.h"
 #include "sound.h"
 #include "subs.h"
 
@@ -89,6 +90,7 @@ static const uint8_t rbj_move_keys[4] = { 50, 15, 20, 20 };
 static uint8_t bg_ram[BG_BYTES] __attribute__((aligned(32)));
 
 typedef enum { ST_IDLE, ST_WALK, ST_RUN, ST_BACK, ST_TURN, ST_AIM, ST_FIRE, ST_RELOAD, ST_CLIMB, ST_JUMP, ST_FALL, ST_LAND,
+               ST_PICKUP,
                ST_HURT, ST_SCRIPT, ST_GRABBED, ST_DEAD } PlayerState; // script: plc.c; held / killed: enemy.c
 
 typedef struct {
@@ -148,6 +150,17 @@ static uint32_t files_found;         // bit n: document FIRST_FILE + n
 #define MAP_PAGES 20
 static uint32_t map_seen[MAP_PAGES];  // the map: bit n = piece n of the page visited (PS1 array 9)
 static uint16_t save_count;         // saves of this game so far
+// For the ending's rank: the play time (the PS1 adds the VSyncs since the
+// start or the load to the saved count, 0x800cc2a0) and the first aid sprays
+// used (0x800cc2be, counted on the status screen)
+static uint32_t play_base;          // 1/60 s from the save
+static u64 play_start;              // tickGetCount() at the start or the load
+static uint16_t sprays_used;
+
+static uint32_t play_frames(void)
+{
+    return play_base + (uint32_t)((tickGetCount() - play_start) * 60 / TICK_FREQ);
+}
 static int last_slot;               // the slot saved to or loaded from
 
 static struct {
@@ -172,6 +185,9 @@ static struct {
     uint8_t saved_once;       // survived a bite once with 0 HP (PS1 0x800c7948 & 0x1000)
     int16_t hurt_push;        // ST_HURT: pushed this far along his facing per tick ...
     uint8_t hurt_ticks;       // ... for this many ticks
+    uint8_t hurt_angled;      // ... or away from a damage area (SCE_DAMAGE), at hurt_angle
+    int16_t hurt_angle;
+    int16_t water;            // the surface of the water he stands in (SCE_WATER), 0 none
     Plc plc;                  // the room script moves him (ST_SCRIPT)
 } player;
 #define PLAYER_HP 200
@@ -1127,6 +1143,10 @@ static void render_frame(void)
     int fx = effect_count() + roomfx_count();
     enemy_draw((have_masks ? 4 * masks.header->num_quads : 0) + 4 * fx,
                (have_masks ? masks.header->num_quads : 0) + fx);
+    // his shadow, translucent after the bodies like the enemies' (obj+0x16c)
+    if (die.step < DIE_ORBIT && player.state != ST_FALL && player.state != ST_JUMP &&
+        in_view_area(cur_cam, player.x, player.z))
+        enemy_player_shadow(player.x, player.y, player.z, player.dir);
     effect_draw(cam->from, cam->to);
     roomfx_draw(cam->from, cam->to);
     glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(2));
@@ -1508,13 +1528,24 @@ static void place_player(int32_t x, int32_t y, int32_t z, int16_t dir, int cam)
 #define SND_TERM_CLOSE 7
 #define SND_TERM_KEY 0x10
 #define SND_TERM_LOCK 0x12
-enum { TS_OPEN, TS_TITLE, TS_STATE, TS_HINT, TS_CARD, TS_ANSWER, TS_CHECK, TS_DOORS, TS_DONE, TS_CLOSE };
+enum { TS_OPEN, TS_TITLE, TS_STATE, TS_HINT, TS_CARD, TS_ANSWER, TS_CHECK, TS_DOORS, TS_DONE, TS_CLOSE,
+       // the fingerprint registry (terminal_rodem_fingerprint 0x800384dc, steps 0x800cbe31)
+       TR_TITLE, TR_REGISTRY, TR_ACCESS, TR_ASK, TR_INPUT, TR_WRONG, TR_REGISTER, TR_WAIT, TR_COMPLETE, TR_VALID };
+// The name entry (FUN_80036b24, 8 characters): a board of 10 x 3 keys, the
+// pad moving over it (FUN_80036e00). Its letters are drawn by the PS1, not
+// read here: A-Z, '.', '-', then delete and end.
+#define TR_NAME_MAX 8
+static const char tr_keys[3][11] = { "ABCDEFGHIJ", "KLMNOPQRST", "UVWXYZ.-<>" };
 enum { TC_FILL, TC_FRAME, TC_TEXT };    // palette slots; TC_TEXT + colour 0..2
 static const uint16_t term_rgb[5] = { RGB15(0, 0, 13), RGB15(20, 22, 26), RGB15(28, 28, 28), RGB15(8, 30, 8),
                                       RGB15(31, 8, 6) };
 static const int term_door_cams[2] = { 9, 2 };
 static struct {
     uint8_t active, step, open, done, key, dirty;
+    uint8_t program;                    // 0 door lock service, 1 the fingerprint registry
+    uint32_t pad;                       // keys pressed since the last frame (the name entry)
+    char name[TR_NAME_MAX + 1];
+    int key_x, key_y, name_row, name_col;
     int prev_cam, screen_cam;
     char ch[TERM_ROWS][TERM_COLS];
     uint8_t colour[TERM_ROWS][TERM_COLS];
@@ -1622,6 +1653,17 @@ static void terminal_draw(void)
         for (int r = 0; r < TERM_ROWS; r++)
             for (int c = 0; c < TERM_COLS; c++)
                 terminal_glyph(TERM_X(c), TERM_Y(r), term.ch[r][c], term.pal[TC_TEXT + term.colour[r][c]]);
+        if (term.step == TR_INPUT) // the name so far and the board, the key under the cursor green
+            for (int r = 0; r < 3; r++)
+                for (int c = 0; c < 10; c++) {
+                    int on = r == term.key_y && c == term.key_x;
+                    terminal_glyph(TERM_X(5 + 2 * c), TERM_Y(TERM_ROWS - 3 + r), tr_keys[r][c],
+                                   term.pal[TC_TEXT + (on ? 1 : 0)]);
+                    if (on && (term.blink & 0x10))
+                        for (int j = 7; j < 8; j++)
+                            memset(term_fb + (TERM_Y(TERM_ROWS - 3 + r) + j) * 256 + TERM_X(5 + 2 * c),
+                                   term.pal[TC_TEXT + 1], 6);
+                }
         if (term.text && !term.done && (term.blink & 0x10) && term.row < TERM_ROWS && term.col < TERM_COLS)
             for (int j = 6; j < 8; j++) // the cursor
                 memset(term_fb + (TERM_Y(term.row) + j) * 256 + TERM_X(term.col), term.pal[TC_TEXT + term.colour_now], 6);
@@ -1629,6 +1671,8 @@ static void terminal_draw(void)
     DC_FlushRange(term_fb, 256 * 192);
     dmaCopy(term_fb, BG_GFX, 256 * 192);
 }
+
+static int term_quiet;                  // terminal_print: no key sounds
 
 // types s, a character a frame (FUN_80037510); 1 when all of it is there
 static int terminal_type(const char *s)
@@ -1685,10 +1729,21 @@ static int terminal_type(const char *s)
         }
         term.dirty = 1;
         if (shown) {
-            game_play_sound(2, SND_TERM_KEY);
+            if (!term_quiet)
+                game_play_sound(2, SND_TERM_KEY);
             return 0;
         }
     }
+}
+
+// all of s at once (FUN_80037510 with mode 0)
+static void terminal_print(const char *s)
+{
+    term_quiet = 1;
+    while (!terminal_type(s))
+        term.delay = 1;
+    term_quiet = 0;
+    term.text = NULL;
 }
 
 // a text, then a button
@@ -1715,12 +1770,13 @@ static void terminal_screen(void)
 static void terminal_start(const Aot *a)
 {
     int program = a->data[0] & 3;
-    if (program != 0 || a->data[2] >= room.header->num_cameras) {
+    if (program > 1 || a->data[2] >= room.header->num_cameras) {
         game_show_message("The computer does not respond.");
-        return; // 1: the fingerprint check (terminal_rodem_fingerprint), not ported yet
+        return;
     }
     memset(&term, 0, sizeof(term));
     term.active = 1;
+    term.program = (uint8_t)program;
     term.prev_cam = cur_cam;
     term.screen_cam = a->data[2];
     terminal_clear();
@@ -1738,8 +1794,97 @@ static void terminal_tick(void)
     switch (term.step) {
     case TS_OPEN:
         term.dirty = 1;
-        if (++term.open >= TERM_OPEN)
+        if (++term.open < TERM_OPEN)
+            break;
+        if (term.program == 0) {
             terminal_go(TS_TITLE);
+        } else if (flag_get(1, 0x16)) { // the name was given: now the finger (step 0)
+            terminal_print("Register your fingerprint.]");
+            terminal_go(TR_WAIT);
+        } else {
+            terminal_go(TR_TITLE);
+        }
+        break;
+    case TR_TITLE:
+        if (terminal_type("UMBRELLA \"RODEM\" SYSTEM]                      Ver 5.0]"))
+            terminal_go(TR_REGISTRY);
+        break;
+    case TR_REGISTRY:
+        if (terminal_text("Culture Experiment Room Staff Registry.]]"))
+            terminal_go(TR_ACCESS);
+        break;
+    case TR_ACCESS:
+        if (terminal_type("Accessing[020.[020.[020.[020.[020.]]"))
+            terminal_go(TR_ASK);
+        break;
+    case TR_ASK:
+        if (terminal_text("Enter your user name.]>")) {
+            terminal_go(TR_INPUT);
+            term.name[0] = 0;
+            term.name_row = term.row;
+            term.name_col = term.col;
+            term.key_x = term.key_y = 0;
+            term.pad = 0;
+        }
+        break;
+    case TR_INPUT: { // pad: the board; A a key, B deletes, START ends
+        uint32_t p = term.pad;
+        term.pad = 0;
+        int moved = 0, len = (int)strlen(term.name);
+        if (p & KEY_UP)
+            term.key_y = (term.key_y + 2) % 3, moved = 1;
+        if (p & KEY_DOWN)
+            term.key_y = (term.key_y + 1) % 3, moved = 1;
+        if (p & KEY_LEFT)
+            term.key_x = (term.key_x + 9) % 10, moved = 1;
+        if (p & KEY_RIGHT)
+            term.key_x = (term.key_x + 1) % 10, moved = 1;
+        if (moved)
+            game_play_sound(2, SND_TERM_KEY);
+        char k = (p & KEY_A) ? tr_keys[term.key_y][term.key_x] : (p & KEY_B) ? '<' : (p & KEY_START) ? '>' : 0;
+        if (k == '<' && len > 0) {
+            term.name[--len] = 0;
+            term.ch[term.name_row][term.name_col + len] = ' ';
+        } else if (k && k != '<' && k != '>' && len < TR_NAME_MAX && term.name_col + len < TERM_COLS) {
+            term.ch[term.name_row][term.name_col + len] = k;
+            term.colour[term.name_row][term.name_col + len] = 0;
+            term.name[len++] = k;
+            term.name[len] = 0;
+            game_play_sound(2, SND_TERM_KEY);
+        }
+        term.dirty = 1;
+        if (k == '>') {
+            term.row = term.name_row;
+            term.col = term.name_col + len;
+            terminal_print("]");
+            terminal_go(strcmp(term.name, "GUEST") ? TR_WRONG : TR_REGISTER);
+        }
+        break;
+    }
+    case TR_WRONG:
+        if (terminal_text("|1This name is not in the]researcher data base.|0]"))
+            terminal_go(TR_ASK);
+        break;
+    case TR_REGISTER: // 0x8003885c: the name is known (flag 1:0x16), the room's flag 4:0x5b
+        if (terminal_text("Register your fingerprint.")) {
+            flag_set(1, 0x16, 1);
+            flag_set(4, 0x5B, 1);
+            terminal_go(TS_CLOSE);
+        }
+        break;
+    case TR_WAIT:
+        if (terminal_type("Please wait[025.[025.[025.[025.[025.]"))
+            terminal_go(TR_COMPLETE);
+        break;
+    case TR_COMPLETE:
+        if (terminal_text("Registration complete.]]"))
+            terminal_go(TR_VALID);
+        break;
+    case TR_VALID:
+        if (terminal_text("Guest registration is valid]for 24 hours.]")) {
+            flag_set(1, 0x16, 0);
+            terminal_go(TS_CLOSE);
+        }
         break;
     case TS_TITLE:
         if (terminal_text("DOOR LOCK SERVICE]------------------------------"))
@@ -2025,6 +2170,7 @@ void game_player_hurt(int kind)
     player.state = ST_HURT;
     player.slope = -1;
     player.aim_raised = 0;
+    player.hurt_angled = 0;
     player.set = &leon;
     player.anim = anims[kind];
     player.key = 0;
@@ -2050,8 +2196,14 @@ static void hurt_tick(void)
 {
     if (player.hurt_ticks) {
         player.hurt_ticks--;
-        if (player.hurt_push)
+        if (player.hurt_angled) {
+            int16_t d = player.dir;
+            player.dir = player.hurt_angle;
+            move_forward(200);
+            player.dir = d;
+        } else if (player.hurt_push) {
             move_forward(player.hurt_push);
+        }
         check_camera_switch();
     }
     if (player.key + 1 >= leon.anims[player.anim].count) {
@@ -2153,6 +2305,33 @@ void game_bgmtbl_set(int stage, int room, int main, int sub)
 }
 
 // status screen sounds (menu.c): CORE00, as the PS1's bank 4
+// USE on the status screen (menu.c): a herb or the spray (counted for the rank)
+void game_player_heal(int item, int amount)
+{
+    player.hp = player.hp + amount > PLAYER_HP ? PLAYER_HP : player.hp + amount;
+    if (item == 0x23)
+        sprays_used++;
+}
+
+// System flag 0:0x0a: the last room faded out (700 after R700L, 703): the
+// PS1's main loop runs ENDING.BIN (0x80025ed4, sub-program 5), then the title.
+static void run_ending(void)
+{
+    EndingStats st = { .frames = play_frames(), .saves = save_count, .sprays = sprays_used,
+                       .claire = flag_get(1, 0), .scenario_b = flag_get(1, 1), .special_weapon = flag_get(1, 8) };
+    ending_run(&st, bg_ram);
+    REG_DISPCNT |= DISPLAY_BG0_ACTIVE | DISPLAY_SPR_ACTIVE; // the title screen keeps what it finds
+    bgShow(bg_id);
+    start_game();
+}
+
+// ... an item where an item AOT allows it (0x80066790): the room's frame
+// function finds it in variable 2 on the next frame
+void game_item_use(int item)
+{
+    script_set_var(VAR_ITEM_USED, item);
+}
+
 void game_menu_sound(int sound)
 {
     sound_play(voice_bank, sound, 127, 64);
@@ -2465,10 +2644,25 @@ static void enter_room(int stage, int id, int arrival_cam)
 // rooms pick their items and enemies by it ("ck 00 19 01"): without it the
 // herbs, ammunition and zombies of the other set appear.
 static int easy_chosen; // NEW GAME on EASY (difficulty_screen: flag 0:0x1a)
+// Disc 1 holds Leon's B scenario as well (flag 1:1). The PS1 starts it only
+// from the clear data of Claire's A (disc 2: ENDING.BIN's FUN_8011c1bc sets
+// the start - room 104 at -17920, -21722 facing 400); the DS lets NEW GAME
+// choose it.
+static int scenario_b_chosen;
+#define START_B_ROOM 0x04
+#define START_B_X (-17920)
+#define START_B_Z (-21722)
+#define START_B_DIR (400 * 8)
 
+// Flag 3:0xa2: the status screen puts Leon's lighter (item 0x2F) into his
+// own slot while it is set (0x80063fd8); rooms 206, 20D and 403 have AOTs to
+// USE it. Of the scripts on disc 1 only room 611 sets it, and where the PS1
+// sets it for the start was not found: the DS sets it from the start (and in
+// saves from before).
 static void system_flags(void)
 {
     flag_set(0, 0x19, 1);
+    flag_set(3, 0xA2, 1);
 }
 
 // New game, and after Leon died (the PS1 shows "YOU DIED" and goes back to
@@ -2479,6 +2673,10 @@ static void new_game(void)
     script_state_reset();
     system_flags();
     flag_set(0, 0x1a, easy_chosen);
+    flag_set(1, 1, scenario_b_chosen);
+    play_base = 0;
+    play_start = tickGetCount();
+    sprays_used = 0;
     pending_item = 0;
     music_table_reset();
     memset(lock_open, 0, sizeof(lock_open));
@@ -2495,10 +2693,13 @@ static void new_game(void)
     inventory_add(0x02, 18);
     inventory_equipped = 1;
     player.aim_target = -1;
-    enter_room(START_STAGE, START_ROOM, -1);
+    enter_room(START_STAGE, scenario_b_chosen ? START_B_ROOM : START_ROOM, -1);
     if (!room.data)
         fatal("room/room1000.bin missing");
-    place_player(START_X, 0, START_Z, START_DIR, START_CAM);
+    if (scenario_b_chosen)
+        place_player(START_B_X, 0, START_B_Z, START_B_DIR, START_CAM);
+    else
+        place_player(START_X, 0, START_Z, START_DIR, START_CAM);
     objects_ready = 1;
     upload_objects();
     fade(-1);
@@ -2948,6 +3149,8 @@ static void use_typewriter(void)
     s->room = cur_room;
     s->cam = cur_cam;
     s->saves = ++save_count;
+    s->play_frames = play_frames();
+    s->sprays = sprays_used;
     s->hp = player.hp;
     s->x = player.x;
     s->y = player.y;
@@ -3004,6 +3207,9 @@ static void load_game(int n)
         pending_count = 1;
     }
     save_count = s->saves;
+    play_base = s->play_frames;
+    play_start = tickGetCount();
+    sprays_used = s->sprays;
     last_slot = n;
     player.state = ST_IDLE;
     player.hp = s->hp;
@@ -3119,17 +3325,27 @@ static int title_screen(void)
 static void start_game(void)
 {
     for (;;) {
-        if (title_screen() == 0)
+        if (title_screen() == 0) {
+            static const char *const scenarios[2] = { "LEON A", "LEON B" };
+            int n = menu_choose("Which scenario?", scenarios, 2, 0, 1, choice_frame);
+            if (n < 0)
+                continue;
+            scenario_b_chosen = n;
             break;
+        }
         int n = pick_slot("Load which file?", 0);
         if (n >= 0) {
             load_game(n);
             return;
         }
     }
-    // NEW GAME: the opening (Leon meets Claire, the tanker crash) first
-    if (!skip_movies && !movie_play("opn1"))
+    // NEW GAME: the opening (Leon meets Claire, the tanker crash) first; B its own (OPN2NDRL)
+    if (scenario_b_chosen) {
+        if (!skip_movies)
+            movie_play("opn2r");
+    } else if (!skip_movies && !movie_play("opn1")) {
         movie_play("opn2");
+    }
     movie_end();
     setBrightness(1, -16);
     new_game();
@@ -3263,14 +3479,74 @@ static void use_door(const Aot *a)
 // "item found" (0x800cd750 = 2) with the item's picture and asks "Will you
 // take the <item>?" (the system message at 0x80098bf0, the name in the names'
 // colour); taken only on YES, "You can't carry any more items." when the
-// slots are full. (Data byte 7 bit 0 makes Leon crouch for it first, player
-// routine 6; not here.) The answer comes in flag 11:0x1F when the box closes.
+// slots are full. Data byte 7 bit 0 makes Leon crouch for it first (player
+// routine 6, pl_move_06 0x8003afe4: PLD animation 6 down, the question, the
+// animation backwards up again; ST_PICKUP). The answer comes in flag 11:0x1F
+// when the box closes. With system flag 0:0x19 ink ribbons come as 2.
 static Aot *pickup;
+static Aot *crouch_for;              // the item Leon crouches for
+static uint8_t crouch_phase;         // 0 down, 1 the question, 2 up
+#define PLD_CROUCH 6
+static void item_question(Aot *a);
+
+// SCE_DRAWER (0x8004e7d4, rooms 10E, 113, 115, 201): data[0] its lock (the
+// doors' lock bits, below 0x80), data[1] the item AOT inside (at 0, 0), data[2]
+// the camera that shows the desk. Locked: with the Small Key (item 0x1f,
+// FUN_80064ba8(31)) the PS1 asks to use it, else "It's locked."; open: the
+// drawer's sound (room sound 0x28), the camera, the item's question; then
+// the camera Leon was in. The key is used up.
+#define ITEM_SMALL_KEY 0x1F
+#define SND_DRAWER 0x28
+static Aot *drawer_asking;           // "Will you use the Small Key?" is open
+static int drawer_cam = -1;          // the camera to go back to after the drawer's item
+
+static void open_drawer(Aot *a);
+
+static void drawer_step(void)
+{
+    Aot *a = drawer_asking;
+    drawer_asking = NULL;
+    if (flag_get(11, 0x1F)) // no
+        return;
+    flag_set(FLAGS_DRAWER, a->data[0], 1);
+    inventory_remove(ITEM_SMALL_KEY);
+    open_drawer(a);
+}
+
+static void open_drawer(Aot *a)
+{
+    int slot = a->data[1], cam = a->data[2];
+    Aot *it = slot < NUM_AOTS ? &aots[slot] : NULL;
+    if (!it || !it->active || it->type != SCE_ITEM ||
+        flag_get(FLAGS_ITEM_PICKED, it->data[4] | it->data[5] << 8)) {
+        game_show_message("There's nothing else in it.");
+        return;
+    }
+    if (!flag_get(FLAGS_DRAWER, a->data[0])) {
+        if (inventory_has(ITEM_SMALL_KEY)) {
+            drawer_asking = a;
+            game_show_message("Will you use the\n\x01Small Key\x01?\v");
+        } else {
+            game_show_message("It's locked.");
+        }
+        return;
+    }
+    game_play_sound(2, SND_DRAWER);
+    if (cam < room.header->num_cameras && cam != cur_cam) {
+        drawer_cam = cur_cam;
+        set_camera(cam);
+    }
+    item_question(it);
+}
 
 static void pickup_step(void)
 {
     Aot *a = pickup;
     pickup = NULL;
+    if (drawer_cam >= 0) { // back from the desk's close-up
+        set_camera(drawer_cam);
+        drawer_cam = -1;
+    }
     if (!a->active || flag_get(11, 0x1F))
         return; // no
     int item = a->data[0] | a->data[1] << 8, amount = a->data[2] | a->data[3] << 8;
@@ -3281,6 +3557,16 @@ static void pickup_step(void)
     flag_set(FLAGS_ITEM_PICKED, a->data[4] | a->data[5] << 8, 1);
     a->active = 0;
     game_object_hide(a->data[6]);
+}
+
+static void item_question(Aot *a)
+{
+    static char text[96];
+    int item = a->data[0] | a->data[1] << 8;
+    pickup = a;
+    snprintf(text, sizeof(text), "Will you take the\n\x01%s\x01?\v", item_name(item));
+    game_show_message(text);
+    menu_picture(item);
 }
 
 static void trigger(Aot *a)
@@ -3308,10 +3594,20 @@ static void trigger(Aot *a)
             break;
         }
         (void)amount;
-        pickup = a;
-        snprintf(text, sizeof(text), "Will you take the\n\x01%s\x01?\v", item_name(item));
-        game_show_message(text);
-        menu_picture(item);
+        if (flag_get(0, 0x19) && item == 0x1E) { // 0x8004e05c
+            a->data[2] = 2;
+            a->data[3] = 0;
+        }
+        if ((a->data[7] & 1) && player.state < ST_CLIMB) {
+            player.state = ST_PICKUP;
+            player.set = &leon;
+            player.anim = PLD_CROUCH;
+            player.key = 0;
+            crouch_for = a;
+            crouch_phase = 0;
+            break;
+        }
+        item_question(a);
         break;
     }
     case SCE_MESSAGE: {
@@ -3330,6 +3626,12 @@ static void trigger(Aot *a)
     case SCE_ITEMBOX:
         menu_item_box(item_box, BOX_SLOTS, choice_frame);
         break;
+    case SCE_STATUS: // 0x8004e794: the status screen, to USE something here
+        menu_focus(1);
+        break;
+    case SCE_DRAWER:
+        open_drawer(a);
+        break;
     default:
         break;
     }
@@ -3342,8 +3644,40 @@ void game_aot_on(int n)
         trigger(&aots[n]);
 }
 
+// SCE_DAMAGE (0x8004e61c): once per hit lock (obj+0x1d3 & 0x80; here while
+// he is hurt) the area takes data[2] HP and hurts him with kind data[0],
+// pushed at 200 away from its middle (FUN_80014e4c from the centre, 0x144 =
+// 200). Room 100's fires are such areas with 0 damage: they only push.
+static void aot_damage(const Aot *a)
+{
+    if (player.state >= ST_HURT)
+        return;
+    int damage = a->data[2] | a->data[3] << 8, kind = a->data[0];
+    int32_t cx = 0, cz = 0;
+    for (int k = 0; k < 4; k++) {
+        cx += a->x[k];
+        cz += a->z[k];
+    }
+    cx /= 4;
+    cz /= 4;
+    player.hp -= damage;
+    if (player.hp < 0) {
+        game_player_killed();
+        return;
+    }
+    game_player_hurt(kind > 2 ? 0 : kind);
+    player.hurt_angled = 1;
+    player.hurt_angle = (int16_t)((int)(atan2f((float)-(player.z - cz), (float)(player.x - cx)) * 32768.0f / 6.2831853f) & 32767);
+}
+
 // Triggers without AOT_SAT_MANUAL fire when Leon walks into them; manual ones
 // need A while Leon stands in or faces the area.
+// SCE_FLAG_CHG (type 6) works every frame like the PS1's AOT loop
+// (0x8004d9c0): SAT 0x40 with Leon in the area sets variable 1 to its
+// number, else SAT 0x20 with the point before him in it variable 0; then the
+// flag is set. The item AOTs set flag 10:item - what the status screen lets
+// him USE there (rooms 108, 10B, 206, 20D, 403 ...).
+#define AOT_SAT_HERE 0x40
 static void check_aots(uint32_t pressed)
 {
     int floor = player_floor();
@@ -3355,6 +3689,20 @@ static void check_aots(uint32_t pressed)
         if (!a->active || !(a->sat & AOT_SAT_PLAYER) || (a->floor != 255 && a->floor != floor))
             continue;
         int inside = point_in_quad(player.x, player.z, a->x, a->z);
+        if (a->type == SCE_FLAG_CHG || a->type == SCE_WATER || a->type == SCE_DAMAGE) {
+            int var = (a->sat & AOT_SAT_HERE) && inside ? VAR_AOT_HERE
+                    : (a->sat & AOT_SAT_FRONT) && point_in_quad(px, pz, a->x, a->z) ? VAR_AOT_FRONT : -1;
+            if (var < 0 || ((a->sat & AOT_SAT_MANUAL) && !(pressed & KEY_A)))
+                continue;
+            script_set_var(var, i);
+            if (a->type == SCE_FLAG_CHG)
+                flag_set(a->data[0] | a->data[1] << 8, a->data[2] | a->data[3] << 8, a->data[4] | a->data[5] << 8);
+            else if (a->type == SCE_WATER)
+                player.water = (int16_t)(a->data[0] | a->data[1] << 8);
+            else
+                aot_damage(a);
+            continue;
+        }
         if (!(a->sat & AOT_SAT_MANUAL)) {
             int entered = inside && !a->inside;
             a->inside = inside;
@@ -3433,6 +3781,7 @@ static const Weapon weapons[] = {
     { 0x08, 0, { 300, 80, 60 }, 40, { 27, 42, 56 }, { 3, 3, 3 }, 0, { 0 }, 0, 0x55 },        // custom shotgun
     { 0x0F, 0, { 4, 4, 4 }, 0, { 8, 30 }, { 4, 3 }, 1, { 0 }, 0, 0x01 },                      // sub machine gun
     { 0x10, 4000, { 15, 15, 15 }, 0, { 11, 25 }, { 3, 3 }, 1, { 0 }, 0, 0x01 },               // flamethrower
+    { 0x11, 0, { 900, 900, 900 }, 90, { 0 }, { 0 }, 0, { 0 }, 0, 0x01 },                       // rocket launcher
 };
 // hit_keys: the frame list of the shot shape (table 0x8009ea60 + weapon * 0x18,
 // second word; pairs of box set and frames, 0xFF a pause or with 0xFF frames
@@ -3597,6 +3946,8 @@ static const ShotFx shot_fx[] = {
     { 0x06, 1, 3, 0x0A, 0x18, 130, 900, -10, 0 }, { 0x06, 1, 1, 0x00, 0x20, 130, 900, -10, 0 },
     { 0x06, 1, 1, 0x02, 0x30, 130, 1100, -10, 0 },
     { 0x06, 4, 3, 0x08, 0x09, 330, 50, 0, 0 }, { 0x06, 4, 2, CASING_HANDGUN, 0, 330, 50, 0, 0x694 },
+    // rocket launcher: its own frame handler is not read; the shotgun's flash and smoke at its mouth
+    { 0x11, 1, 1, 0x00, 0x1D, 150, 1300, 0, 0 }, { 0x11, 1, 3, 0x0C, 0x18, 150, 1300, 0, 0 },
     // shotgun 0x80041138: the blast along the barrel, the pump
     { 0x07, 1, 1, 0x00, 0x1D, 150, 1300, 0, 0 }, { 0x07, 1, 1, 0x04, 0x10, 150, 1300, 0, 0 },
     { 0x07, 1, 3, 0x0C, 0x18, 150, 1300, 0, 0 }, { 0x07, 1, 3, 0x0E, 0x10, 150, 1800, 0, 0 },
@@ -3713,6 +4064,23 @@ static void reload_tick(void)
     }
 }
 
+// The rocket launcher (item 0x11, Leon B's last fight): the PS1 flies a
+// rocket that bursts on what it hits; here the hit is at once (900 for every
+// distance, the zombie table) and the burst - the shotgun's blast effects,
+// large - where it struck, or 6000 ahead.
+static void rocket_blast(int hit)
+{
+    int32_t x, y, z;
+    if (hit < 0 || !enemy_look_point(hit, &x, &y, &z)) {
+        x = player.x + ((6000 * cosLerp(player.dir)) >> 12);
+        y = player.y - 1200;
+        z = player.z - ((6000 * sinLerp(player.dir)) >> 12);
+    }
+    roomfx_spawn(1, 0x00, x, y, z, GUN_FX(0x1D) * 3, 0);
+    roomfx_spawn(3, 0x0C, x, y, z, GUN_FX(0x1D) * 3, 0);
+    roomfx_spawn(3, 0x0E, x, y - 500, z, GUN_FX(0x1D) * 2, 0);
+}
+
 static void fire(void)
 {
     const Weapon *w = weapon_in_hand();
@@ -3735,7 +4103,9 @@ static void fire(void)
         slot->count--;
     player.anim = PLW_FIRST + plw_fire[player.aim_posture];
     sound_play(weapon_bank, 0, 127, 64);
-    enemy_hit(player.x, player.y, player.z, player.dir, w->range, w->item, w->damage, player.aim_posture);
+    int hit = enemy_hit(player.x, player.y, player.z, player.dir, w->range, w->item, w->damage, player.aim_posture);
+    if (w->item == 0x11)
+        rocket_blast(hit);
 }
 
 // One tick of continuous fire (phase 2, 0x80044584, frame handlers SMG
@@ -3892,6 +4262,8 @@ static void update_player_frame(uint32_t held, uint32_t down)
 // Floor sound under Leon (FUN_8004f078): last matching FLR area of his floor.
 static int floor_sound(void)
 {
+    if (player.water) // FUN_8005797c: in water the splashing steps
+        return 0x1A;
     int floor = player_floor();
     for (int i = room.header->num_flr - 1; i >= 0; i--) {
         const RoomFloorSound *f = &room.floor_sounds[i];
@@ -3971,6 +4343,27 @@ static void special_move_tick(void)
             set_anim(ANIM_IDLE);
         } else {
             player.key++;
+        }
+        break;
+    case ST_PICKUP: // pl_move_06
+        if (crouch_phase == 0) {
+            if (!last) {
+                player.key++;
+            } else if (crouch_for) {
+                crouch_phase = 1;
+                item_question(crouch_for);
+            } else {
+                crouch_phase = 2;
+            }
+        } else if (crouch_phase == 1) {
+            if (!pickup) // answered (pickup_step)
+                crouch_phase = 2;
+        } else if (player.key > 0) {
+            player.key--;
+        } else {
+            crouch_for = NULL;
+            player.state = ST_IDLE;
+            set_anim(ANIM_IDLE);
         }
         break;
     default:
@@ -4087,8 +4480,13 @@ static void update_player_tick(void)
     // footsteps: keyframes flagged 0x4000 (0x2000 = other foot, only picks the
     // PS1 voice); the sound depends on the floor (FUN_8005797c)
     uint16_t entry = leon.anim_pool[a->first + player.key];
-    if (st != ST_IDLE && (entry & ANIM_FLAG_STEP))
+    if (st != ST_IDLE && (entry & ANIM_FLAG_STEP)) {
         sound_play(room_bank, floor_sound() + (st == ST_RUN ? 1 : 0), 100, 64);
+        // a splash where the water is above his feet (pl_move_01_walk 0x80039cf0:
+        // the room's effect 0x1a at each foot, the surface less than 300 above it)
+        if (player.water && player.water < player.y + 300)
+            roomfx_spawn(0x1A, 0, player.x, player.water, player.z, 6, player.dir / 8);
+    }
 
     if (st != ST_IDLE && st != ST_TURN) {
         // root motion: cumulative distance along +X between the two keyframes
@@ -4099,6 +4497,8 @@ static void update_player_tick(void)
         int32_t step = s1 - s0;
         if (step < 0)
             step = s1;
+        if (player.water && player.water < player.y - 500) // deep water: a third slower (0x80039dac)
+            step -= step / 3;
         move_forward(st == ST_BACK ? -step : step);
         check_camera_switch();
     }
@@ -4112,6 +4512,10 @@ static const char *aot_name(int type)
     case SCE_ITEM: return "Item";
     case SCE_MESSAGE: return "Text";
     case SCE_EVENT: return "Event";
+    case SCE_FLAG_CHG: return "Flag";
+    case SCE_WATER: return "Water";
+    case SCE_DAMAGE: return "Damage";
+    case SCE_DRAWER: return "Desk";
     default: return "?";
     }
 }
@@ -4166,16 +4570,18 @@ static void update_menu(uint32_t down)
     if (down & (KEY_RIGHT | KEY_R))
         menu_sel += 10;
     menu_sel = (menu_sel % room_count + room_count) % room_count;
-    if (down & (KEY_A | KEY_B)) {
+    if (down & (KEY_A | KEY_B | KEY_X)) {
         menu_open = 0;
         menu_debug(0);
         if (down & KEY_A)
             warp_to(menu_sel);
+        if (down & KEY_X)
+            flag_set(0, 0x0A, 1); // the ending, as after the last room
         return;
     }
 
     printf("\x1b[0;0HChoose a room (%d rooms)\n", room_count);
-    printf("up/down, L/R +-10\nA warp, B back\n\n");
+    printf("up/down, L/R +-10\nA warp, B back, X ending\n\n");
     int first = menu_sel - 7;
     if (first < 0)
         first = 0;
@@ -4302,9 +4708,13 @@ int main(void)
                 update_player_frame(keysHeld(), down);
             if (pickup && !menu_message_open())
                 pickup_step();
+            if (drawer_asking && !menu_message_open())
+                drawer_step();
             game_tick_acc += GAME_HZ;
             if (term.active && term.done && (down & (KEY_A | KEY_B | KEY_TOUCH)))
                 term.key = 1;
+            if (term.active)
+                term.pad |= down;
             while (term.active && !menu_message_open() && game_tick_acc >= DS_HZ) {
                 game_tick_acc -= DS_HZ;
                 terminal_tick();
@@ -4329,14 +4739,20 @@ int main(void)
                 effect_tick();
                 roomfx_tick();
                 player.shot = 0;
+                script_aot_frame_reset();
+                player.water = 0;
                 if (player.state < ST_HURT && player.state != ST_AIM && player.state != ST_FIRE && player.state != ST_RELOAD &&
-                    !flag_get(2, 7))
+                    player.state != ST_PICKUP && !flag_get(2, 7))
                     check_aots(pending_keys);
                 if (!near_aot && !message_text)
                     try_special_move(pending_keys);
                 pending_keys = 0;
                 script_tick();
                 map_mark_room();
+                if (flag_get(0, 0x0A)) {
+                    run_ending();
+                    break;
+                }
             }
         }
         if (menu_open)

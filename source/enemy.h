@@ -36,6 +36,7 @@ void enemy_set_motion(int slot, int motion, int ctr);
 void enemy_set_skin(int slot, int model); // sce_em_set's model byte: zombie clothes
 void enemy_set_shadow(int slot, int r, int g, int b, int w, int h, int ox, int oz); // kage_set
 void enemy_shadow_init(void);   // the shadow texture, before the enemies' (VRAM)
+void enemy_player_shadow(int32_t x, int32_t y, int32_t z, int16_t dir); // Leon's, after the bodies
 
 #define NOISE_WALK 0x02
 #define NOISE_RUN 0x04

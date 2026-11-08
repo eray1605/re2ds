@@ -7333,25 +7333,41 @@ void enemy_shadow_init(void)
 // floor height. The DS has no subtractive blending: a translucent quad of
 // what the subtraction leaves - dark red when it takes mostly green and blue
 // (blood), else black - as opaque as the most it takes.
+static void shadow_quad(int32_t x, int32_t y, int32_t z, int16_t dir, int w, int h, const uint8_t rgb[3]);
+
 static void draw_shadow(const Enemy *e, const Shadow *s)
 {
     int32_t c = cosLerp(e->dir), sn = sinLerp(e->dir);
     int32_t ox = e->pose_ofs[0] + s->ox, oz = e->pose_ofs[2] + s->oz;
-    int32_t x = e->x + ((ox * c + oz * sn) >> 12), z = e->z + ((-ox * sn + oz * c) >> 12);
-    int16_t hw = (int16_t)(s->w / 2), hh = (int16_t)(s->h / 2);
-    int most = s->rgb[0] > s->rgb[1] ? s->rgb[0] : s->rgb[1];
-    if (s->rgb[2] > most)
-        most = s->rgb[2];
+    shadow_quad(e->x + ((ox * c + oz * sn) >> 12), e->y, e->z + ((-ox * sn + oz * c) >> 12), e->dir, s->w, s->h,
+                s->rgb);
+}
+
+// Leon's (main.c): the same blob as a zombie's (kage_set's bf bf bf, 400 x 600;
+// work 1 of the opcode would change it, no room of disc 1 does)
+void enemy_player_shadow(int32_t x, int32_t y, int32_t z, int16_t dir)
+{
+    static const uint8_t rgb[3] = { 0xbf, 0xbf, 0xbf };
+    if (shadow_tex >= 0)
+        shadow_quad(x, y, z, dir, 400, 600, rgb);
+}
+
+static void shadow_quad(int32_t x, int32_t y, int32_t z, int16_t dir, int w, int h, const uint8_t rgb[3])
+{
+    int16_t hw = (int16_t)(w / 2), hh = (int16_t)(h / 2);
+    int most = rgb[0] > rgb[1] ? rgb[0] : rgb[1];
+    if (rgb[2] > most)
+        most = rgb[2];
     int alpha = most * 31 / 255;
     if (alpha < 1)
         return;
-    int blood = s->rgb[1] > s->rgb[0] + 0x40;
+    int blood = rgb[1] > rgb[0] + 0x40;
     glPolyFmt(POLY_ALPHA(alpha) | POLY_CULL_NONE | POLY_ID(60));
     glBindTexture(0, shadow_tex);
     glColor3b(blood ? 96 : 0, blood ? 4 : 0, blood ? 4 : 0);
     glPushMatrix();
-    glTranslatef32(x, e->y - 4, z);
-    glRotateYi(e->dir);
+    glTranslatef32(x, y - 4, z);
+    glRotateYi(dir);
     glBegin(GL_QUADS);
     glTexCoord2t16(0, 0);
     glVertex3v16(-hw, 0, -hh);

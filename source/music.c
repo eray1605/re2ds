@@ -736,6 +736,8 @@ void music_table_set(int stage, int room, int main, int sub)
 // waiting mode it fades out instead. The sub byte's bits 0-5 pick SUB_xx (0xFF
 // none), bit 6 / 7 make its first / second sequence wait (FUN_80056828, the
 // others start at once, FUN_8005631c); a new main reloads it as well.
+static void music_entry(int entry, int sub_entry);
+
 void music_room(int stage, int room)
 {
     if (!table_load())
@@ -747,7 +749,15 @@ void music_room(int stage, int room)
     int index = table[stage] + room; // first room of the stage + room
     if (index >= rooms)
         return;
-    int entry = table[3 + stages + 2 * index], sub_entry = table[4 + stages + 2 * index];
+    music_entry(table[3 + stages + 2 * index], table[4 + stages + 2 * index]);
+}
+
+// A pair the way the room table gives it, without a room (the ending's
+// FUN_80056410 with its own u16: main | sub << 8, 0xFF none)
+void music_pair(int main, int sub) { music_entry(main, sub); }
+
+static void music_entry(int entry, int sub_entry)
+{
     int reloaded = 0;
     char path[40];
     Player *m = &players[P_MAIN];
