@@ -11,7 +11,7 @@
 #include "save.h"
 
 #define SAVE_MAGIC 0x31565352  // "RSV1"
-#define SAVE_VERSION 4
+#define SAVE_VERSION 5
 // version 1 slots ended before bgm_saved (padded to the struct's 4-byte alignment)
 #define SLOT_V1_SIZE ((offsetof(SaveSlot, bgm_saved) + 3) & ~(size_t)3)
 
@@ -68,6 +68,7 @@ int save_read(SaveSlot slots[SAVE_SLOTS])
     // no documents).
     if (ok && h.version >= 1 && h.version <= SAVE_VERSION && h.slot_size >= SLOT_V1_SIZE &&
         h.slot_size <= sizeof(SaveSlot)) {
+        memset(slots, 0, sizeof(SaveSlot) * SAVE_SLOTS);
         for (int i = 0; i < SAVE_SLOTS && ok; i++) {
             ok = fread(&slots[i], h.slot_size, 1, f) == 1;
             if (h.version < 2)

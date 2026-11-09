@@ -33,6 +33,9 @@ typedef struct {
     uint32_t files;
     // version 4: the map's visited rooms (bit n = piece n of page p)
     uint32_t map_seen[20];
+    // version 5: for the ending's rank: play time (1/60 s), first aid sprays used
+    uint32_t play_frames;
+    uint16_t sprays;
 } SaveSlot;
 
 int save_init(void);                     // mounts the SD card; 0 if there is none

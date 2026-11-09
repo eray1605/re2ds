@@ -50,6 +50,56 @@ addresses (`SLES_009.72`, disc 1, Europe). **observed** = in the code as written
   carry any\nmore items." (`0x80098c14`). **DS port:** the question in the message box with
   the picture (`pickup_step` in `main.c` reads the answer, flag 11:`0x1F`); the name in green
   (menu.c control code `\x01`); no crouching yet.
+- **Using items** (observed, November 2026). AOT type 6 (`SCE_FLAG_CHG`, handler `0x8004e168`)
+  sets flag `data[0]`:`data[2]` = `data[4]`. The AOT loop (`0x8004d9c0`) runs every frame: with
+  SAT `0x40` and Leon in the area it writes the AOT's number to variable 1, else with SAT
+  `0x20` and the point before him in it to variable 0, then calls the handler. The item places
+  are type 6 with array 10: e.g. room 206 `aot_set 02 06 21 … 0a 00 2f 00 01 00` = flag 10:`0x2f`
+  (the lighter) while Leon faces the fireplace. USE on the status screen (`0x800665a4`): items
+  under 30 only buzz (sound 7); the spray and the herbs heal (jump table `0x800117f0`, part of
+  the maximum HP `0x800c7956`: spray, G+R, G+G+G, G+R+B all; G+G, G+G+B half; G, G+B a
+  quarter; blue and the mixes with it cure poison; a counter for the results); anything else
+  needs flag 10:item (`FUN_8007282c` on `0x800c77dc`): then the item goes to variable 2
+  (`0x800cc3ec`, step `0x80066790`) and the screen closes, else the buzz. The room's frame
+  function asks for it (`cmp 00 02 00 2f 00` in 206, then its event; 10B also checks variable 0
+  for which statue). After every frame's scripts `FUN_8004f484` sets variables 0–2 to −1 and
+  clears the first 128 bits of array 10 (also at room entry). **DS port:** `check_aots` /
+  `script_aot_frame_reset` / `game_item_use` (`main.c`), `use_item` (`menu.c`); array 10 is
+  cleared just before the AOT check instead of after the scripts, so the status screen opened
+  between two frames still sees it.
+- **More AOT types** (handler table `0x8009f490`, observed November 2026). The AOT loop
+  (`0x8004d880`) is run per object with a mask: SAT bit 0 the player, the others partner and
+  enemies; byte 2 the floor (`0x80` any), byte 3 bit 7 a position relative to an object.
+  - 7 water (`0x8004e1d4`): `obj+0x10c` = s16 `data[0]`, the surface (negative = above the
+    floor). Walking (`pl_move_01_walk` `0x80039cf0`): on a step frame room effect `0x1a` at
+    each foot while the surface is under 300 above it, the floor sound `0x1a` (`FUN_8005797c`);
+    deeper than 500 above the floor (`obj+0x1c2`, `FUN_8004c348`) a third slower.
+  - 8 move (`0x8004e1f0`): adds `data[0..2]` to the position (not on disc 1).
+  - 11 damage (`0x8004e61c`): once per hit lock (`obj+0x1d3 & 0x80`) HP − `data[2]`, the hurt
+    routine with kind `data[0]`, pushed at 200 away from the area's middle; room 100's fires
+    (and 104, 108, 10A) are such areas with 0 damage.
+  - 12 status (`0x8004e794`): opens the status screen.
+  - 13 desk (`0x8004e7d4`): `data[0]` its lock bit (the doors' lock array `0x800cc630`, below
+    `0x80`), `data[1]` the item AOT inside (at 0, 0), `data[2]` the camera of the desk. Locked:
+    the Small Key (`0x1f`, `FUN_80064ba8(31)`; Claire's lockpick in slot 10) or "locked"; open:
+    room sound `0x28`, the camera, the item's question. Rooms 10E, 113 (H. Gun Parts), 115,
+    201. **DS:** the locks in flag array 63, the key used up.
+  - 14 terminal: program 1 is the "RODEM" fingerprint registry (`0x800384dc`, 13 steps at
+    `0x800cbe31`): the title, "Enter your user name." and a 10 × 3 letter board
+    (`FUN_80036b24` / `FUN_80036e00`); "GUEST" (`0x80010ac0`) → "Register your fingerprint.",
+    flags 1:`0x16` and 4:`0x5b`; the next time "Please wait", "Registration complete", "valid
+    for 24 hours" and 1:`0x16` cleared. **DS:** `terminal_tick` `TR_*`.
+- **Picking items up** (`0x8004e02c`): data byte 7 bit 0 sends Leon into routine 6 first
+  (`pl_move_06` `0x8003afe4`: PLD animation 6 forward, the "item found" screen, the animation
+  backwards); with system flag 0:`0x19` ink ribbons come as 2. **DS:** `ST_PICKUP`.
+- **Combining** (table `0x800a1cb8`, 4 bytes: item, operation, item / result, extra): operation 5
+  loads ammunition, 4 upgrades a weapon with its parts (VP70 + `0x20` → `0x04`, magnum + `0x21`
+  → `0x06`, shotgun + `0x22` → `0x08`), `0x0b` mixes herbs.
+- **Leon's own item** (observed): when the status screen opens it puts the lighter (`0x2F`)
+  into inventory slot 10 (`0x800cc660`, after the 8 + 2 others) while flag 3:`0xa2` is set
+  (`0x80063fd8`). On disc 1 only room 611 sets that flag (in a scene); where it is set for the
+  start was not found. **DS port:** set at a new game and when loading (`system_flags`); the
+  status screen shows it in a box beside the condition (`SEL_SPECIAL` in `menu.c`).
 - `sce_item_get` (`0x76`, 3 bytes: item, count; `0x80054498`): someone hands Leon an item –
   Marvin's Blue Card Key in room 202. Into the inventory, else (DS) the item box.
   `sce_item_lost` (`0x62`, 2 bytes: item; `0x800542c4`): clears the slot holding the item
@@ -279,6 +329,43 @@ Each is named after the room that plays it (room 2040 plays 10, the licker).
    ripple effect) behind the body, the light flashes red (`0x80190e88`, 170 ticks).
 5. The camera rises and spins, the light dies, the screen fades out (`0x80191080`, 163 ticks);
    then the title.
+
+### The ending (ENDING.BIN, observed November 2026)
+
+The last rooms fade out and set system flag 0:`0x0a` (700 after movie 12 R700L, 703 after its
+scene; also 11C), then loop. The main loop (`0x80025ed4`) sees it, blanks the screen
+(`FUN_8002b1f4(2)`) and runs sub-program 5 (`FUN_80031244`; table `0x8009a4d4`, 12 bytes:
+file, entry, load address pointer): file 2 of `COMMON/BIN` = `ENDING.BIN` at `0x8011a000`,
+entry `0x8011a0c4`. Its main states (`0x8011c904` by `0x8011f0ac`: fade in, the script,
+fade out, the end) run the script `0x8011a5b8` - 19 steps (jump table `0x8011a024`, step
+`0x8011f01c`, frame counter `0x8011f0b0`). Flags 1:0 = Claire, 1:1 = scenario B.
+
+- Steps 0/1: A plays MAIN26 (`FUN_80056410` with `0xff26`: main `0x26`, no sub) for 300 frames,
+  then movie 17 (R704L); B movie 14 at once.
+- Step 4: picture `END10` (Leon) / `END11` (Claire) (`FUN_8011c81c`: raw 320 × 240 16 bpp files
+  `COMMON/DATA/END10..14.TIM`), MAIN2A, fade in.
+- Step 5: after 480 frames (START: at once) the results fade in over it: texts 13-17 of the
+  table `0x8011cb50` (CONGRATULATIONS!!, RANKING, CLEAR GAME, TOTAL TIME, NUMBER OF SAVES), the
+  letter (text 4 + rank) and the scenario (texts 9-12), and ten glyphs (`FUN_8011b704`) for
+  hh:mm:ss and the saves. 1200 frames later (START after 300) the picture fades out.
+- Steps 6-18: the reward (special weapons, "YOUR REWARD … CHECK ITEM BOX!!"), the clear data
+  for the other scenario (`FUN_8011c1bc` sets its start: character, HP, room; MEM_CARD.BIN via
+  `FUN_800311c4`), the extra modes' pictures; then `0x8011a334`: 60 frames, the new-game reset,
+  the title (sub-program 0).
+
+**Rank** (`0x8011b9dc`): the play time (`0x800cc2a0` + VSyncs since the start / load; 216000 an
+hour) costs 10 points for every started hour over 2.5 (at most 10); saves (`0x800cc2c0`) 5 each
+(20 or more: all 100); first aid sprays used (`0x800cc2be`) 15 each (6 or more: all 100). The
+sum of the three; a special weapon (flag 1:8) takes 50 off. Rank = how many of 269, 199, 144,
+99, 0 the sum is under: A (269 and more) … E. The rewards, each with rank A or B and unless
+already owned (`FUN_8011c0d8`): all time points (2.5 h) → item `0x11`; scenario B with no
+spray → `0x0F`; no save → `0x12`.
+
+Texts: a glyph table at `0x8011c914` (10 bytes: tpage, clut, u, v, w, h, screen w, h; `END00.TIM`
+sits at VRAM x 512, its palettes from y 480), strings of glyph numbers at `0x8011ccc4` (0xFF
+ends one; A = 0 … Y = 22, digits 23-32, `:` 36, space 38). **DS port:** `ending.c` (steps 0-5
+and the end; no rewards, clear data or extra modes), `tools/ending2ds.py` (`ending/pic0..4.bin`,
+`ending/text.bin`), play time and sprays in the saves (version 5), the debug menu's X starts it.
 
 ## 9. Item use, reloading, effects of a shot
 

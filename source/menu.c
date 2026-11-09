@@ -54,6 +54,8 @@ static int picture;                    // item whose picture covers the slots (0
 // blip, 8 the long reload click (assignment by ear, not traced to the calls).
 enum { SND_CURSOR = 4, SND_SELECT = 5, SND_BACK = 6, SND_NO = 7, SND_RELOAD = 8 };
 void game_menu_sound(int sound);
+void game_player_heal(int item, int amount); // main.c: HP up, to the maximum
+void game_item_use(int item);        // main.c: USEd at an item AOT (variable 2)
 
 static int col(int c) { return ui ? ui[c] : (c == C_WHITE ? 255 : 0); }
 
@@ -159,8 +161,31 @@ const char *item_name(int item)
 
 static int is_weapon(int item) { return item >= 0x01 && item <= 0x13; }
 
+// Leon's own item, in a box of its own (the PS1's slot 10, 0x800cc660): the
+// status screen puts the lighter there while flag 3:0xa2 is set (0x80063fd8)
+#define SEL_SPECIAL INV_SLOTS
+#define ITEM_LIGHTER 0x2F
+static InvSlot special_slot;
+
+static int special_item(void) { return flag_get(3, 0xA2) ? ITEM_LIGHTER : 0; }
+
+static InvSlot *slot_at(int i)
+{
+    if (i == SEL_SPECIAL) {
+        special_slot.item = (uint8_t)special_item();
+        special_slot.count = 0;
+        return &special_slot;
+    }
+    return &inventory[i];
+}
+
 static void slot_pos(int i, int *x, int *y)
 {
+    if (i == SEL_SPECIAL) {
+        *x = 146;
+        *y = 4;
+        return;
+    }
     *x = 8 + (i % 4) * 62;
     *y = 56 + (i / 4) * 40;
 }
@@ -169,16 +194,17 @@ static void draw_slot(int i)
 {
     int x, y;
     slot_pos(i, &x, &y);
+    const InvSlot *s = slot_at(i);
     int c = focus && row == 0 && sel == i ? C_YELLOW : i == combine_from ? C_RED
           : i == inventory_equipped ? C_GREEN : C_DARK;
     fill(x, y, 48, 36, C_BLACK);
     frame(x, y, 48, 36, c);
-    if (inventory[i].item) {
-        icon(x + 4, y + 3, inventory[i].item);
-        int item = inventory[i].item;
+    if (s->item) {
+        icon(x + 4, y + 3, s->item);
+        int item = s->item;
         if (item >= 0x02 && item <= 0x1E) { // guns, ammunition, ink ribbons (not the knife, herbs)
             char n[8];
-            snprintf(n, sizeof(n), "%d", inventory[i].count);
+            snprintf(n, sizeof(n), "%d", s->count);
             text(x + 46 - 8 * (int)strlen(n), y + 27, n, C_WHITE);
         }
     }
@@ -218,7 +244,7 @@ static int ecg_wave(int t)
 }
 
 #define ECG_X 54
-#define ECG_W 140
+#define ECG_W 88                // Leon's own item's box beside it
 #define ECG_BASE 40
 
 static void draw_condition(int hp)
@@ -226,7 +252,7 @@ static void draw_condition(int hp)
     int c = hp < 21 ? C_RED : hp < 101 ? C_YELLOW : C_GREEN;
     int dim = hp < 21 ? C_DIM_RED : hp < 101 ? C_DIM_YELLOW : C_DIM_GREEN;
     const char *s = hp < 21 ? "DANGER " : hp < 101 ? "CAUTION" : "FINE   ";
-    fill(52, 2, 144, 52, C_BLACK);
+    fill(52, 2, 92, 52, C_BLACK);
     text(54, 5, "CONDITION", C_GREY);
     text(54, 17, s, c);
     // a monitor sweep: the trace is written left to right at the cursor,
@@ -300,6 +326,8 @@ static void redraw(int hp)
     draw_weapon();
     for (int i = 0; i < INV_SLOTS; i++)
         draw_slot(i);
+    if (special_item())
+        draw_slot(SEL_SPECIAL);
     draw_commands();
     draw_picture();
     if (message)
@@ -825,8 +853,8 @@ void menu_lower_toggle(void) { lower_status = !lower_status; }
 
 static void set_info(int slot)
 {
-    if (slot >= 0 && inventory[slot].item)
-        snprintf(info, sizeof(info), "%s", item_name(inventory[slot].item));
+    if (slot >= 0 && slot_at(slot)->item)
+        snprintf(info, sizeof(info), "%s", item_name(slot_at(slot)->item));
     else
         info[0] = 0;
 }
@@ -842,6 +870,11 @@ static const struct { uint8_t weapon, ammo, capacity; } loads[] = {
     { 0x07, 0x15, 5 }, { 0x08, 0x15, 7 },                         // shotguns
     { 0x09, 0x18, 6 }, { 0x0A, 0x19, 6 }, { 0x0B, 0x1A, 6 },      // grenade launcher
     { 0x0C, 0x1D, 18 }, { 0x0E, 0x1C, 100 }, { 0x0F, 0x1B, 100 }, { 0x10, 0x17, 100 },
+};
+// a weapon + its parts: the custom weapon, the rounds in it kept (the
+// combine table 0x800a1cb8, operation 4: 20 04 04 00, 21 04 06 01, 22 04 08 02)
+static const struct { uint8_t weapon, part, result; } upgrades[] = {
+    { 0x02, 0x20, 0x04 }, { 0x05, 0x21, 0x06 }, { 0x07, 0x22, 0x08 },
 };
 // mixed herbs 0x29.. : G+G, G+R, G+B, G+G+G, G+G+B, G+R+B
 static const uint8_t mixes[][3] = {
@@ -894,6 +927,10 @@ void inventory_reload(void)
 
 static int combine(int a, int b)
 {
+    if (a == SEL_SPECIAL || b == SEL_SPECIAL) {
+        snprintf(info, sizeof(info), "You cannot combine these.");
+        return 0;
+    }
     InvSlot *x = &inventory[a], *y = &inventory[b];
     if (a == b || !x->item || !y->item)
         return 0;
@@ -917,6 +954,31 @@ static int combine(int a, int b)
         game_menu_sound(SND_RELOAD);
         return 1;
     }
+    // two of the same ammunition (table 0x800a1cb8: 14 05 14 ff, 15 05 15 ff ...): one stack
+    if (x->item == y->item && x->item >= 0x14 && x->item <= 0x1D && x->item != 0x1E) {
+        int sum = x->count + y->count;
+        x->count = (uint8_t)(sum > 255 ? 255 : sum);
+        y->count = (uint8_t)(sum > 255 ? sum - 255 : 0);
+        if (!y->count)
+            y->item = 0;
+        snprintf(info, sizeof(info), "%s combined.", item_name(x->item));
+        game_menu_sound(SND_SELECT);
+        return 1;
+    }
+    for (unsigned i = 0; i < sizeof(upgrades) / sizeof(upgrades[0]); i++) {
+        InvSlot *w = x->item == upgrades[i].weapon ? x : y->item == upgrades[i].weapon ? y : NULL;
+        InvSlot *p = w == x ? y : x;
+        if (!w || p->item != upgrades[i].part)
+            continue;
+        w->item = upgrades[i].result;
+        p->item = 0;
+        p->count = 0;
+        if (inventory_equipped == (p == x ? a : b))
+            inventory_equipped = -1;
+        snprintf(info, sizeof(info), "%s made.", item_name(w->item));
+        game_menu_sound(SND_RELOAD);
+        return 1;
+    }
     for (unsigned i = 0; i < sizeof(mixes) / sizeof(mixes[0]); i++) {
         if (!((x->item == mixes[i][0] && y->item == mixes[i][1]) ||
               (y->item == mixes[i][0] && x->item == mixes[i][1])))
@@ -935,9 +997,53 @@ static int combine(int a, int b)
     return 0;
 }
 
+// USE (status screen 0x800665a4): weapons, ammunition and ribbons (items
+// under 30) only buzz; the spray and the herbs heal by a part of the maximum
+// (0x800117f0: spray, G+R, G+G+G all, G+G and G+G+B half, G and G+B a
+// quarter; blue cures poison - the DS has none); anything else only where
+// an item AOT set flag 10:item this frame: then it goes to variable 2 and
+// the screen closes (0x80066790), else the buzz.
+static int heal_part(int item)
+{
+    switch (item) {
+    case 0x23: case 0x2A: case 0x2C: case 0x2E: return 4; // F. Aid Spray, G+R, G+G+G, G+R+B
+    case 0x29: case 0x2D: return 2;                        // G+G, G+G+B
+    case 0x26: case 0x2B: return 1;                        // Green Herb, G+B
+    case 0x28: return 0;                                   // Blue Herb
+    }
+    return -1;
+}
+
+static void use_item(int slot)
+{
+    InvSlot *s = slot_at(slot);
+    int item = s->item, part = heal_part(item);
+    info[0] = 0;
+    if (item < 0x1E) {
+        game_menu_sound(SND_NO);
+        return;
+    }
+    if (part >= 0) {
+        game_player_heal(item, 200 * part / 4); // PLAYER_HP
+        s->item = 0;
+        s->count = 0;
+        snprintf(info, sizeof(info), "%s used.", item_name(item));
+        game_menu_sound(SND_SELECT);
+        return;
+    }
+    if (!flag_get(FLAGS_ITEM_USABLE, item)) {
+        game_menu_sound(SND_NO);
+        return;
+    }
+    game_item_use(item);
+    game_menu_sound(SND_SELECT);
+    focus = 0;
+    combine_from = -1;
+}
+
 static void command(int k)
 {
-    InvSlot *s = &inventory[sel];
+    InvSlot *s = slot_at(sel);
     if (!s->item) {
         game_menu_sound(SND_NO);
         return;
@@ -955,8 +1061,8 @@ static void command(int k)
         }
         break;
     case CMD_USE:
-        snprintf(info, sizeof(info), "%s: nothing happens here.", item_name(s->item));
-        break;
+        use_item(sel);
+        return;
     case CMD_CHECK:
         snprintf(info, sizeof(info), "%s.", item_name(s->item));
         menu_picture(s->item);
@@ -979,7 +1085,9 @@ static void combine_with(int slot)
 
 static int touched_slot(int tx, int ty)
 {
-    for (int i = 0; i < INV_SLOTS; i++) {
+    for (int i = 0; i <= INV_SLOTS; i++) {
+        if (i == SEL_SPECIAL && !special_item())
+            break;
         int x, y;
         slot_pos(i, &x, &y);
         if (tx >= x && tx < x + 48 && ty >= y && ty < y + 36)
@@ -1082,12 +1190,19 @@ int menu_frame(uint32_t down, int hp)
         if (down & (KEY_LEFT | KEY_RIGHT | KEY_UP | KEY_DOWN))
             game_menu_sound(SND_CURSOR);
         if (row == 0) {
-            if (down & KEY_LEFT)
+            // the slots in two rows of four, Leon's own item's box above
+            // them: up and down go round the three
+            int special = special_item() != 0;
+            if (sel == SEL_SPECIAL && !special)
+                sel = 0;
+            if (sel != SEL_SPECIAL && (down & KEY_LEFT))
                 sel = (sel + INV_SLOTS - 1) % INV_SLOTS;
-            if (down & KEY_RIGHT)
+            if (sel != SEL_SPECIAL && (down & KEY_RIGHT))
                 sel = (sel + 1) % INV_SLOTS;
-            if (down & (KEY_UP | KEY_DOWN))
-                sel ^= 4;
+            if (down & KEY_UP)
+                sel = sel == SEL_SPECIAL ? 6 : sel < 4 && special ? SEL_SPECIAL : sel ^ 4;
+            else if (down & KEY_DOWN)
+                sel = sel == SEL_SPECIAL ? 2 : sel >= 4 && special ? SEL_SPECIAL : sel ^ 4;
             if ((down & KEY_A) && combine_from >= 0) {
                 combine_with(sel);
                 keep_info = 1;
@@ -1118,7 +1233,7 @@ int menu_frame(uint32_t down, int hp)
         game_menu_sound(SND_SELECT);
     }
     // the game changes the inventory too (shots, pickups): redraw then
-    uint32_t inv = inventory_equipped;
+    uint32_t inv = inventory_equipped * 31 + special_item();
     for (int i = 0; i < INV_SLOTS; i++)
         inv = inv * 31 + (inventory[i].item << 16 | inventory[i].count);
     if (inv != last_inv)

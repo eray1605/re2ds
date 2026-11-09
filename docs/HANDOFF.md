@@ -379,7 +379,10 @@ This is why a missing character (e.g. the partner before this session) freezes s
 - Text: `text_wrapped` stops at `\f` (page) and `\v` (question); `draw_message` shows a page
   (4 lines; 3 + YES/NO for questions). Left/right selects; A confirms, B = no; the answer is
   written to flag 11:0x1F before the message closes (scripts check it right after).
-- Inventory: 8 slots, commands EQUIP/USE/CHECK/COMBINE, combining weapon + ammo and herbs.
+- Inventory: 8 slots and Leon's own item (the lighter, flag 3:0xa2) in a box beside the
+  condition; commands EQUIP/USE/CHECK/COMBINE, combining weapon + ammo and herbs. USE heals
+  (herbs, spray) or uses an item at an item AOT (type 6, flag 10:item -> variable 2), see
+  engine-notes.md section 1.
 - Item box: `menu_item_box`. Choice lists: `menu_choose` (save slots, files).
 
 ### 4.7 Map (`main.c`, section "map", data from `tools/map2ds.py`)
@@ -514,6 +517,7 @@ tools/build_assets.sh <extracted disc dir> [ROOM1000 ROOM1010 ...]
 | ROM icon | `icon2ds.py` | TIT_BG.TIM (eye) + TMOJI.TIM ("2") | `build/icon.bmp` (32x32, 16 colours) |
 | documents | `files2ds.py` | FILES.TIM | `files/*` |
 | YOU DIED | `die2ds.py` | DIED00.DIE | `die/died00.bin` |
+| ending | `ending2ds.py` | ENDING.BIN, END00.TIM, END10-14.TIM | `ending/pic0..4.bin`, `ending/text.bin` |
 | voices | `xa2ds.py` | STAGEn.BIN + VOICE0n.XAS.raw2352 | `voice/*` |
 | movies | `str2ds.py --fps` | *.STR.raw2352 | `movie/*.bin` (15 fps opening, 10 fps in-game, to fit 512 MB) |
 
@@ -556,7 +560,7 @@ DS screen; only host tests. **Host tests run the real engine C files with stubbe
 | Test | Build | Run / purpose |
 |---|---|---|
 | `script_host.c` | `cc -O1 -g -fsanitize=undefined -Isource tests/script_host.c -o build/script_host` | `build/script_host $(ls nitrofiles/room/room????.bin)` (not `room*0.bin`: that also matches the `_rbj_e0.bin` files, counted as "bad header") — runs every room's scripts, reports unknown opcodes, hangs, out-of-range access. `SHOW_SPAWNS=1` prints sce_em_set, `AOTS=1` every AOT (type, data bytes), `ITEMS=1` the item AOTs. |
-| `enemy_host.c` | `cc -O1 -g -fsanitize=undefined -Itests/stubs -Isource tests/enemy_host.c source/script.c source/enemy.c source/plc.c -o build/enemy_host -lm` | one room's enemies vs a fake Leon. Env: `TICKS` (default 100), `PX`/`PZ`/`PY` (Leon position), `NOISE` (from tick `NOISE_AT` on), `SHOOT` (Leon shoots every 15 ticks), `MASH` (button mashing when grabbed), `TRACE` (per-tick enemy dump with y and surface, sounds, blood), `ZONES=nitrofiles/room/room1020_blk.bin`, `WALLS` (use room collision; the lickers' wall crawl reads the boxes always), `EVENT=n` (start event function n at tick 5, e.g. `EVENT=3` lets the arms of room 205 out), `MEMBERS=tick:slot:member:value,...`, `LOOK=<Leon's facing>` (what his head turns to, every 45 ticks), `SPAWN=slot:type:flags:x:y:z:dir,...` (an enemy the script only sets behind flags, e.g. room 10A's wall licker `0:0x22:0x0101:-27000:-3000:-12400:1024`), `FLAGS=array:bit,...` (set after the room's init, e.g. `1:3` for the partner following), `PDIR` (Leon's facing, DS units), `PMOVE=from:to:vx:vz` (Leon walks that much a tick in those ticks, facing that way). |
+| `enemy_host.c` | `cc -O1 -g -fsanitize=undefined -Itests/stubs -Isource tests/enemy_host.c source/script.c source/enemy.c source/plc.c -o build/enemy_host -lm` | one room's enemies vs a fake Leon. Env: `TICKS` (default 100), `PX`/`PZ`/`PY` (Leon position), `NOISE` (from tick `NOISE_AT` on), `SHOOT` (Leon shoots every 15 ticks), `MASH` (button mashing when grabbed), `TRACE` (per-tick enemy dump with y and surface, sounds, blood), `ZONES=nitrofiles/room/room1020_blk.bin`, `WALLS` (use room collision; the lickers' wall crawl reads the boxes always), `EVENT=n` (start event function n at tick 5, e.g. `EVENT=3` lets the arms of room 205 out), `MEMBERS=tick:slot:member:value,...`, `LOOK=<Leon's facing>` (what his head turns to, every 45 ticks), `SPAWN=slot:type:flags:x:y:z:dir,...` (an enemy the script only sets behind flags, e.g. room 10A's wall licker `0:0x22:0x0101:-27000:-3000:-12400:1024`), `FLAGS=array:bit,...` (set after the room's init, e.g. `1:3` for the partner following), `PDIR` (Leon's facing, DS units), `PMOVE=from:to:vx:vz` (Leon walks that much a tick in those ticks, facing that way), `USE=tick:item[:aot]` (the item USEd at that tick: variable 2, and variable 0 = the AOT; e.g. `USE=20:0x2f:2` lights room 206's fireplace). |
 | `cutscene_host.c` | `cc -Itests/stubs -Isource tests/cutscene_host.c source/script.c source/enemy.c source/plc.c -o build/cutscene_host` | `./build/cutscene_host nitro:/room/room3010.bin <event> [ticks]` — runs a scene (plc, messages, cuts, voices, spawns); ends when no thread runs. Loads `_rbj_eN.bin` and `_rbj_p.bin`. `TRACE_MEMBERS=1` prints the script's enemy member sets (e.g. when room 201's event 4 signals its licker). |
 | `door_host.c` | `cc -Itests/stubs -Isource tests/door_host.c source/script.c -o build/door_host` | `build/door_host 0` — door program positions; `DOOR_DUMP=30,120` dumps frames. **Stale:** misses many `game_*` stubs and does not link. |
 | `music_host.c` | `cc -O1 -g -fsanitize=undefined -Itests/stubs -Isource tests/music_host.c -o build/music_host -lm` (`-DMAX_VOICES=n` to try other limits) | `./build/music_host <stage> <room hex> [seconds] [frame:id:op,...] [slow]` — plays a room's music: voices busy, notes that took a sounding voice (held / fading), DS channels missing (one-shots free theirs at their end), sound messages per frame, summed channel volume (peak/average; the DS clips past about 127, the music's limit is 160). |
@@ -674,13 +678,14 @@ confirm), icon (made from disc).
 
 Specific risks:
 1. Dog / crow / licker / spider / Mr X AIs are first versions: speeds and distances from the
-   PS1 code but state transitions simplified; may look jumpy. Mr X has no scripted
+   PS1 code but state transitions simplified; may look jumpy. Mr X (Leon B) has no scripted
    appearances logic beyond sce_em_set; his knockdown/stagger missing.
 2. SMG / flamethrower continuous fire: flamethrower has no flame effect sprite yet (only sound
-   and damage); SMG casing rate maybe too high.
-3. Map: unvisited rooms are always drawn dimmed (the PS1 hides them until the map is found;
-   flag 33 mechanism not understood). Page flipping by touch only.
-4. Terminal: only the door-lock service program; fingerprint program says "does not respond".
+   and damage); SMG casing rate maybe too high. The rocket launcher (Leon B) hits at once
+   (no flying rocket).
+3. Leon B: chosen at NEW GAME (the PS1 needs Claire A's clear data from disc 2); its start
+   from ENDING.BIN, the rest is the room scripts with flag 1:1 - not played through.
+4. Terminals: door lock service and the RODEM fingerprint registry (name board) ported.
 5. Message paging: question boxes use 3 text lines + YES/NO; long questions may be cut.
 6. Partner (slot 0xff): follows Leon while flag 1:3 is set and shoots zombies (PS1 routine
    `FUN_8005be50`, `docs/enemy-others.md` section 17); her shot's sound source and damage are
@@ -692,25 +697,28 @@ Specific risks:
    Moth spores, moth modes 2/6/7/9/12 and the larva spawners (room 614) are not ported.
 9. Lickers and spiders on walls and ceilings are ported (`docs/enemy-others.md` sections 4
    and 5) but not tested on the DS yet; the spiders' poison hits at once instead of flying.
-10. Grenade launcher, bowgun, rocket launcher not in `weapons[]`.
-11. Options menu, ending, ranking/results screen, Claire/B scenario: none.
+10. Grenade launcher, bowgun, spark shot (Claire's) not in `weapons[]`.
+11. Ending: the movie, the picture and the results (rank, time, saves) are ported
+    (`ending.c`, engine-notes section 8); the rewards, the clear data for the B scenario and
+    the extra modes are not. Options menu, Claire/B scenario: none.
 12. Ada model looks odd — confirmed identical to disc data; no change needed.
 
 ---
 
 ## 10. Next steps (suggested order)
 
-1. Wait for the user's test report of PR #20 content; fix what they find.
+Leon A has every system it needs (November 2026): puzzles by USE (item AOTs), desks, both
+terminals, water, damage areas, the partner, the ending with the rank. What is left:
+
+1. The user plays Leon A through on the DS; fix what turns up (state of the last PRs).
 2. Release: PR develop -> main, then delete develop (remote + local) and recreate from main.
-3. Alligator scene (room 40A0): RE the overlay of type 0x23, port the scripted sequence
-   (gas tank shot), flags 5:0a/0b.
-4. Partner AI rest: states 6-10, spiders, her real weapon (`obj[0] >> 29`) and shot sound.
-5. G-type enemies and plants/moths (stage 4-6): overlays, then AIs like the dog's.
-6. Remaining weapons (grenade launcher with ammo kinds, bowgun, rocket launcher) — PLW sets
-   exist (`leon_wNN.bin`); effects from CORE00.ESP.
-7. Map found flag (array 33) to hide unknown rooms; fingerprint terminal.
-8. Ending + ranking; options (sound volume, controls).
-9. Performance on real DS (polygon budget in rooms with many enemies; VERTEX_LIMIT).
+3. Leon B through (NEW GAME choice): Mr X's knockdown (overlay hit handler), his scripted
+   appearances, the flamethrower's flame sprite, a flying rocket.
+4. Ending rest: rewards (special weapons with endless rounds), clear data, extra modes.
+5. Partner AI rest: states 6-10, spiders, her real weapon (`obj[0] >> 29`) and shot sound.
+6. Polish: gore variants (head burst, torn upper body, lost arm), SPU reverb, the G forms'
+   and moths' real AIs, an options menu (volumes, controls).
+7. Performance on the real DS (polygon budget in rooms with many enemies; VERTEX_LIMIT).
 
 ---
 ## Appendix A. Functions per source file (generated)
