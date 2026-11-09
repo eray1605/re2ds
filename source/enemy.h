@@ -71,7 +71,7 @@ int enemy_hit(int32_t x, int32_t y, int32_t z, int16_t dir, int range, int weapo
 // room script access (work_set 3): member 7 = flags; 0 if unknown
 int enemy_member_get(int slot, int member, int *value);
 void enemy_member_set(int slot, int member, int value);
-// reserve_*: GX RAM still needed after the enemies (the masks)
+// reserve_*: GX RAM still needed after the enemies (the effects; the masks come first)
 void enemy_draw(int reserve_vertices, int reserve_polygons);
 int enemy_count(void);
 // player collision with enemies (walls are checked in main.c)

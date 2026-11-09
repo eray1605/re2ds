@@ -887,6 +887,8 @@ void script_room_enter(const Room *room)
     cur_room = room;
     vars[VAR_AOT_FRONT] = vars[VAR_AOT_HERE] = vars[VAR_ITEM_USED] = -1; // FUN_8004fb28
     memset(flags[FLAGS_ITEM_USABLE], 0, 16);
+    for (int c = 0; c < MASK_CAMERAS; c++) // FUN_8004f5a0: 256 bytes from 0x800cc524
+        memset(flags[FLAGS_MASKS + c], 0xFF, 16);
     memset(aots, 0, sizeof(aots));
     memset(threads, 0, sizeof(threads));
     for (int i = 0; i < 32; i++)

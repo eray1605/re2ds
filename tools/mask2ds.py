@@ -1,7 +1,8 @@
 """Convert a room's foreground masks to the DS format (source/formats.h, MaskHeader).
 
 Inputs: rdt2json output (cameras with "masks") and the mask TIMs written by
-bssmask.py. Each mask rectangle becomes a world-space quad at its PS1 depth;
+bssmask.py. Each mask rectangle becomes a world-space quad at its PS1 depth
+(one nearer than the DS near plane: its screen rectangle, see NEAR_DEPTH);
 the atlas becomes a 256 x 2^n 8 bpp texture whose index 0 is transparent
 (PS1: colour 0x0000 is transparent).
 
@@ -21,8 +22,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bg2ds  # noqa: E402
 import tim2png  # noqa: E402
 
-MASK_MAGIC = 0x314B4D52  # "RMK1"
+MASK_MAGIC = 0x324B4D52  # "RMK2"
 PS1_W, PS1_H = 320, 240
+# Masks nearer than the DS near plane (formats.h MASK_NEAR_DEPTH): the PS1
+# draws one of depth 0 over every model, the DS would cut it off (at depth 0
+# all four corners were the eye). They keep their screen rectangle instead.
+NEAR_DEPTH = 8
 
 
 def norm(v):
@@ -83,10 +88,15 @@ def main():
         for m in cam["masks"]:
             x0, y0 = m["dest"]
             x1, y1 = x0 + m["w"], y0 + m["h"]
-            dist = m["depth"] * 32
-            corners = [unproject(basis, x, y, dist) for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y1))]
-            quads += struct.pack("<BBHHH12i", m["src"][0], m["src"][1], m["w"], m["h"], m["depth"],
-                                 *[c for p in corners for c in p])
+            rect = ((x0, y0), (x1, y0), (x1, y1), (x0, y1))
+            if m["depth"] < NEAR_DEPTH:
+                # normalised device coordinates * 4096: x right, y up
+                corners = [[int(round((x - PS1_W / 2) * 4096 / (PS1_W / 2))),
+                            int(round((PS1_H / 2 - y) * 4096 / (PS1_H / 2))), 0] for x, y in rect]
+            else:
+                corners = [unproject(basis, x, y, m["depth"] * 32) for x, y in rect]
+            quads += struct.pack("<BBHHHB3x12i", m["src"][0], m["src"][1], m["w"], m["h"], m["depth"],
+                                 m["group"], *[c for p in corners for c in p])
 
         blob = struct.pack("<IHHHH", MASK_MAGIC, len(cam["masks"]), tex_h, tim["height"], 0)
         blob += struct.pack("<256H", *palette) + pixels + quads
