@@ -52,6 +52,8 @@ enum {
 #define FLAGS_ITEM_PICKED 8    // bit n set = item AOT with picked index n taken
 #define FLAGS_ITEM_USABLE 10   // bit n set = item n can be USEd here (SCE_FLAG_CHG, every frame)
 #define FLAGS_DRAWER 63        // DS: desks unlocked (the PS1 keeps them with the doors' locks, 0x800cc630)
+#define FLAGS_MASKS 13         // arrays 13-28: camera 0-15's mask groups shown (MaskQuad.group);
+#define MASK_CAMERAS 16        // all set on room entry (0x8004f6c4), the room scripts clear some
 
 typedef struct {
     uint8_t active;

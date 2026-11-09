@@ -445,7 +445,7 @@ picture reloads afterwards); the font is libnds' 8 x 8 squeezed to 6 columns. De
 | Magic | File | Content |
 |---|---|---|
 | RBG1 (`BgHeader`) | `bg/roomXXX_camNN.bin`, `files/*.bin`, `title/*.bin` | u32 magic, u16 palette[256], LZ77 8 bpp 256x256 (or 256x192) |
-| RMK1 (`MaskHeader`) | `mask/*.bin` | foreground mask atlas + quads |
+| RMK2 (`MaskHeader`) | `mask/*.bin` | foreground mask atlas + quads (with mask group) |
 | room (`RoomHeader`) | `room/roomSRR0.bin` | cameras, switches, boxes, doors, scripts, messages (ASCII + `\n \f \v`), floor sounds |
 | RMD1 (`ModelHeader`) | `model/*.bin`, `room/*_rbj*.bin` | bones, display lists, frames (offset, speed, rotations x8), animations (pool entries frame \| flags<<12) |
 | `_sets.bin` | `model/emXX_sets.bin` | u8 count, u16 first animation per set |
@@ -489,7 +489,7 @@ tools/build_assets.sh <extracted disc dir> [ROOM1000 ROOM1010 ...]
 |---|---|---|
 | decode BSS backgrounds (MDEC) | `bss2ppm` | `build/bg/roomsrr_camNN.ppm` |
 | room data to JSON | `rdt2json.py` | cameras, switches, collision, doors, scripts, messages (keeps `\f` page and `\v` question codes) |
-| foreground masks | `bssmask.py` + `mask2ds.py` | `mask/roomsrr_*.bin` (RMK1) |
+| foreground masks | `bssmask.py` + `mask2ds.py` | `mask/roomsrr_*.bin` (RMK2) |
 | backgrounds | `bg2ds.py` | `bg/roomsrr_camNN.bin` (RBG1, LZ77) |
 | room binary | `room2ds.py` | `room/roomsrr0.bin` (spawn camera argument: 2 for ROOM1000) |
 | room sound bank | `vab2ds.py --rdt` | `sound/roomsrr0.bin` |

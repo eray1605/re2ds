@@ -80,8 +80,7 @@ static const uint8_t rbj_move_keys[4] = { 50, 15, 20, 20 };
 
 #define PLAYER_RADIUS 400
 #define DOOR_REACH 600      // action button probe distance in front of Leon
-#define FADE_STEPS 8
-#define MASK_SCALE 4        // see draw_masks        // frames per fade (brightness 0 -> -16)
+#define FADE_STEPS 8        // frames per fade (brightness 0 -> -16)
 
 // The background bitmap is 256x256 at 8 bpp = 64 KB, exactly VRAM E. A new
 // camera's picture is unpacked into RAM and copied over in the vblank that
@@ -881,31 +880,89 @@ static void draw_player(void)
     glPopMatrix(1);
 }
 
+// Whether a mask's vertices relative to the eye are drawn at scale 1 (0) or 4
+// (1): VTX_16 holds +-32767 and some masks lie up to ~44000 units from the
+// eye; at scale 4 throughout, a mask a metre away was off by up to four
+// units, a pixel or two of its edge. -1: too far.
+static int mask_scale(const MaskQuad *q, const int32_t eye[3])
+{
+    int32_t most = 0;
+    for (int k = 0; k < 4; k++)
+        for (int j = 0; j < 3; j++) {
+            int32_t d = q->corner[k][j] - eye[j];
+            if (d < 0)
+                d = -d;
+            if (d > most)
+                most = d;
+        }
+    return most < 32000 ? 0 : most < 128000 ? 1 : -1;
+}
+
+static void mask_texcoord(const MaskQuad *q, int k)
+{
+    glTexCoord2t16(inttot16(k == 1 || k == 2 ? q->u + q->w : q->u), inttot16(k >= 2 ? q->v + q->h : q->v));
+}
+
+#define MASK_NEAR_Z (-4000) // the near masks' NDC z * 4096: just behind the near plane
+
+// the PS1 draws a mask only while the room script leaves its group on (0x8004655c)
+static int mask_shown(const MaskQuad *q)
+{
+    return cur_cam >= MASK_CAMERAS || flag_get(FLAGS_MASKS + cur_cam, q->group);
+}
+
 static void draw_masks(void)
 {
     if (!have_masks)
         return;
     const RoomCamera *c = &room.cameras[cur_cam];
     glBindTexture(0, mask_tex);
+    for (int s = 0; s < 2; s++) {
+        glPushMatrix();
+        glTranslatef32(c->from[0], c->from[1], c->from[2]);
+        if (s)
+            glScalef32(inttof32(4), inttof32(4), inttof32(4));
+        glBegin(GL_QUADS);
+        for (int i = 0; i < masks.header->num_quads; i++) {
+            const MaskQuad *q = &masks.quads[i];
+            if (q->depth < MASK_NEAR_DEPTH || mask_scale(q, c->from) != s || !mask_shown(q))
+                continue;
+            for (int k = 0; k < 4; k++) {
+                int32_t v[3];
+                for (int j = 0; j < 3; j++) {
+                    int32_t d = q->corner[k][j] - c->from[j];
+                    v[j] = s ? (d + 2) >> 2 : d;
+                }
+                mask_texcoord(q, k);
+                glVertex3v16(v[0], v[1], v[2]);
+            }
+        }
+        glEnd();
+        glPopMatrix(1);
+    }
+    // the masks in front of everything (depth < MASK_NEAR_DEPTH): their
+    // screen rectangles, without the camera
+    glMatrixMode(GL_PROJECTION);
     glPushMatrix();
-    // Vertices relative to the eye, divided by MASK_SCALE: VTX_16 holds
-    // +-32767 and some masks lie up to ~44000 units from the eye.
-    glTranslatef32(c->from[0], c->from[1], c->from[2]);
-    glScalef32(inttof32(MASK_SCALE), inttof32(MASK_SCALE), inttof32(MASK_SCALE));
+    glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
     glBegin(GL_QUADS);
     for (int i = 0; i < masks.header->num_quads; i++) {
         const MaskQuad *q = &masks.quads[i];
-        int uv[4][2] = { { q->u, q->v }, { q->u + q->w, q->v },
-                         { q->u + q->w, q->v + q->h }, { q->u, q->v + q->h } };
+        if (q->depth >= MASK_NEAR_DEPTH || !mask_shown(q))
+            continue;
         for (int k = 0; k < 4; k++) {
-            glTexCoord2t16(inttot16(uv[k][0]), inttot16(uv[k][1]));
-            glVertex3v16((q->corner[k][0] - c->from[0]) / MASK_SCALE,
-                         (q->corner[k][1] - c->from[1]) / MASK_SCALE,
-                         (q->corner[k][2] - c->from[2]) / MASK_SCALE);
+            mask_texcoord(q, k);
+            glVertex3v16(q->corner[k][0], q->corner[k][1], MASK_NEAR_Z);
         }
     }
     glEnd();
     glPopMatrix(1);
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix(1);
+    glMatrixMode(GL_MODELVIEW);
 }
 
 // RE2 models wind their faces so that (v1 - v0) x (v2 - v0) points into the
@@ -1137,21 +1194,23 @@ static void render_frame(void)
     setup_projection(cam);
     // Textures are modulated with the vertex colour: white but for the death.
     model_colour();
+    // The masks first: the depth test sorts them with the models all the
+    // same, and polygon RAM the models fill up can no longer leave them out.
+    if (die.step < DIE_ORBIT) {
+        glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(2));
+        draw_masks();
+    }
     glPolyFmt(POLY_ALPHA(31) | cull_models | POLY_ID(1));
     draw_player();
     draw_objects();
     int fx = effect_count() + roomfx_count();
-    enemy_draw((have_masks ? 4 * masks.header->num_quads : 0) + 4 * fx,
-               (have_masks ? masks.header->num_quads : 0) + fx);
+    enemy_draw(4 * fx, fx);
     // his shadow, translucent after the bodies like the enemies' (obj+0x16c)
     if (die.step < DIE_ORBIT && player.state != ST_FALL && player.state != ST_JUMP &&
         in_view_area(cur_cam, player.x, player.z))
         enemy_player_shadow(player.x, player.y, player.z, player.dir);
     effect_draw(cam->from, cam->to);
     roomfx_draw(cam->from, cam->to);
-    glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(2));
-    if (die.step < DIE_ORBIT)
-        draw_masks();
     while (GFX_BUSY)
         ;
     gx_vertices_last = GFX_VERTEX_RAM_USAGE;

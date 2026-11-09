@@ -135,6 +135,21 @@ addresses (`SLES_009.72`, disc 1, Europe). **observed** = in the code as written
 - The first record of a camera is its view area (`FUN_8002bbbc`, `0x800c5f78` on each cut);
   characters outside it are not drawn (`FUN_80026598`; parts flagged `0x9000`, the shotgun's
   standing legs, still are) - Leon too (he stood in the terminal's close-up).
+- **Masks** (observed, November 2026): on each cut `FUN_80046334` builds a sprite per mask
+  and a table of (on, group, depth); the PRI's offset groups are numbered from their count
+  down to 1. Every frame `FUN_800464c0` links a mask into the ordering table at index
+  **depth** (`0x800465c8`), but only while bit *group* of flag array **13 + camera** is set
+  (`0x8004655c`; arrays 13-28 are cameras 0-15, 16 bytes apart from `0x800cc524`). Room
+  entry (`FUN_8004f5a0`, `0x8004f6c4`) sets all 256 bytes; 211 `set`s in about 40 rooms
+  switch groups (room 109: two sets of masks taking turns). A model's triangle goes to index
+  OTZ / 8 (`0x80027190`), none below 1 (`0x8002716c` leaves out OTZ < 8), so a mask of
+  **depth 0 covers everything**: 921 masks in 34 cameras (room 108 camera 0: the railing in
+  front; room 204 camera 6: the wall around a window). The DS had put them at the eye (all
+  four corners the same point, never drawn) and showed Leon and the enemies through them.
+  **DS:** `mask2ds.py` keeps the screen rectangle of a mask nearer than its near plane
+  (`MASK_NEAR_DEPTH`), drawn without the camera in front of every model; `MaskQuad.group`,
+  `FLAGS_MASKS`; the masks are drawn before the models so a full polygon RAM drops models
+  rather than masks.
 - **Threads** (observed): at room entry `FUN_8004fb28` runs the init script's function 0 in
   thread 0 and starts the main script's function 0 in thread 1; `evt_exec ff` takes a free
   thread from 2 on. Every frame the main loop (`FUN_8004fbdc`) starts the main script's
