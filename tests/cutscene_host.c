@@ -84,6 +84,7 @@ void game_player_died(void) {}
 void game_player_hurt(int kind) { (void)kind; }
 void game_player_killed(void) {}
 void game_blood(int k, int32_t x, int32_t y, int32_t z, int16_t d, int sp, int32_t f) { (void)k; (void)x; (void)y; (void)z; (void)d; (void)sp; (void)f; }
+void game_partner_shot(int32_t x, int32_t y, int32_t z) { (void)x; (void)y; (void)z; }
 int game_sight_blocked(int32_t a, int32_t b, int32_t c, int32_t d, int32_t e, int32_t f) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; return 0; }
 int game_enemy_member(int s, int m, int *v) { return enemy_member_get(s, m, v); }
 void game_enemy_member_set(int s, int m, int v) { if (getenv("TRACE_MEMBERS")) printf("  member_set enemy %d member %#x = %d\n", s, m, v); enemy_member_set(s, m, v); }

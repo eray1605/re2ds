@@ -137,6 +137,8 @@ int flag_get(int array, int bit);
 static int easy(void) { return flag_get(0, 0x1a); }
 // blood sprite (effect.h kinds), sprayed toward dir (DS units)
 void game_blood(int kind, int32_t x, int32_t y, int32_t z, int16_t dir, int speed, int32_t floor_y);
+// the partner fires: flash and fire at the muzzle, the shot's sound (main.c)
+void game_partner_shot(int32_t x, int32_t y, int32_t z);
 
 // Turning while chasing from afar (0x8010c748): frames to keep a course, bit
 // 15 = turn away from Leon for that long. The zombies weave toward him.
@@ -231,6 +233,22 @@ typedef struct {
     int16_t fall_v;             // torn apart: the upper body's fall (obj+0x15a)
     uint8_t bounces;            // ... and its bounces left (obj+0x16a)
     uint8_t split_dead;         // the hit that tore it was deadly: a crawler with 10 HP
+    uint8_t following;          // partner: follows Leon (flag 1:3)
+    int16_t follow_x, follow_z; // ... the point by him she heads for (FUN_8005bb74)
+    uint8_t follow_stuck;       // ... ticks blocked (obj+0x224)
+    uint8_t follow_back;        // ... ticks turned about after that
+    int16_t follow_back_dir;    // ... the way then (obj+0x220)
+    int8_t follow_turn;         // ... stepping aside: +1 / -1 (obj+0x15a)
+    uint8_t follow_blocked;     // ... her last step ran into something (obj+0x110 & 1)
+    uint8_t follow_mode;        // ... the mode by the enemies she sees (obj+0x10e & 0xf)
+    uint8_t follow_mode_timer;  // ... picked again every 16 ticks (0x800a06c3)
+    uint8_t follow_kind;        // ... the point: 0 beside Leon, 2 behind him (obj+0x21c & 3)
+    uint8_t follow_new;         // ... the mode just changed (obj+0x21c & 0x8000)
+    int8_t follow_target;       // ... the enemy she shoots at (obj+0x1b4)
+    uint8_t follow_aim;         // ... at it: 0 straight, 1 down (obj+0x154: 0x4000 / 0x2000)
+    uint8_t follow_armed;       // ... the last shot hit (obj+0x21c & 0x4000)
+    uint8_t follow_cool;        // ... ticks before she raises the gun again (obj+0x22a)
+    uint8_t follow_delay;       // ... ticks before she shoots down (obj+0x14e)
     int16_t home_x, home_z, home_dir; // where it was set (the arms: obj+0x21c / 0x220 / 0x218)
     uint16_t kill_flag;         // array << 8 | bit set when it dies (sce_em_set's set flag, obj+0x1ce)
     uint16_t trigger;           // member 0x17 (obj+0x1d4): the room script's signal (the alligator)
@@ -4071,7 +4089,15 @@ static int is_arm(const Enemy *e) { return types[e->type].type == TYPE_ARM; }
 
 // World position of a part's joint from the shown pose (M = M_parent *
 // T(pos) * Rx * Ry * Rz, then the enemy's turn about y like glRotateYi).
+static void bone_point(const Enemy *e, int bone, const int32_t *local, int32_t *x, int32_t *y, int32_t *z);
+
 static void arm_bone(const Enemy *e, int bone, int32_t *x, int32_t *y, int32_t *z)
+{
+    bone_point(e, bone, NULL, x, y, z);
+}
+
+// ... or a point in the part's own frame (local, as the PS1's part matrices)
+static void bone_point(const Enemy *e, int bone, const int32_t *local, int32_t *x, int32_t *y, int32_t *z)
 {
     // fixed point (4096 = 1): the ARM9 has no FPU
     const Model *m = &types[e->type].model;
@@ -4086,7 +4112,7 @@ static void arm_bone(const Enemy *e, int bone, int32_t *x, int32_t *y, int32_t *
             p[j] = m->bones[b].parent < 0 ? e->pose_ofs[j] : m->bones[b].pos[j];
         for (int j = 0; j < 3; j++)
             t[j] += (r[j][0] * p[0] + r[j][1] * p[1] + r[j][2] * p[2]) >> 12;
-        if (c == 0)
+        if (c == 0 && !local)
             break; // the joint itself: its own turn does not move it
         const int16_t *rot = e->pose_rot[b < POSE_BONES ? b : 0];
         int32_t cx = cosLerp(rot[0]), sx = sinLerp(rot[0]), cy = cosLerp(rot[1]), sy = sinLerp(rot[1]);
@@ -4102,6 +4128,9 @@ static void arm_bone(const Enemy *e, int bone, int32_t *x, int32_t *y, int32_t *
             for (int j = 0; j < 3; j++)
                 nr[i][j] = (r[i][0] * q[0][j] + r[i][1] * q[1][j] + r[i][2] * q[2][j]) >> 12;
         memcpy(r, nr, sizeof(r));
+        if (c == 0)
+            for (int j = 0; j < 3; j++)
+                t[j] += (r[j][0] * local[0] + r[j][1] * local[1] + r[j][2] * local[2]) >> 12;
     }
     int32_t cd = cosLerp(e->dir), sd = sinLerp(e->dir);
     *x = e->x + ((cd * t[0] + sd * t[2]) >> 12);
@@ -6031,6 +6060,7 @@ int enemy_plc(int slot, const uint8_t *ins)
     enemy_body_back(e, &b);
     if (was && !e->plc.active) { // plc_ret: back to its own routine
         e->anim_set = NULL;
+        e->following = 0; // the partner starts her follow states afresh
         if (is_person(e))
             set_anim(e, SET_MAIN, 2, 0);
         else
@@ -6187,9 +6217,9 @@ static void path_goal(Enemy *e, int a, int b, int32_t tx, int32_t tz)
     e->has_goal = 1;
 }
 
-// FUN_80046fb0 (every 8 frames): Leon himself if the zombie may go straight
-// (status 0x1000, no zones, same zone), else the next edge on the way.
-static void update_goal(Enemy *e, const EnemyTarget *p)
+// FUN_80046fb0 (every 8 frames): the target itself if the enemy may go
+// straight (status 0x1000, no zones, same zone), else the next edge on the way.
+static void update_goal_at(Enemy *e, int32_t tx, int32_t tz)
 {
     if ((e->flags & 0x1000) || !zone_count) {
         e->has_goal = 0;
@@ -6197,14 +6227,442 @@ static void update_goal(Enemy *e, const EnemyTarget *p)
     }
     if (e->flags & EF_HOLD)
         return;
-    int a = zone_at(e->x, e->z), b = zone_at(p->x, p->z);
+    int a = zone_at(e->x, e->z), b = zone_at(tx, tz);
     if (a < 0 || b < 0)
         return; // keeps the last goal
     if (a == b) {
         e->has_goal = 0;
         return;
     }
-    path_goal(e, a, b, p->x, p->z);
+    path_goal(e, a, b, tx, tz);
+}
+
+static void update_goal(Enemy *e, const EnemyTarget *p) { update_goal_at(e, p->x, p->z); }
+
+// ---------------------------------------------------------------- partner
+// The partner following Leon while flag 1:3 is set (0x800c77d4 & 0x10000000;
+// room 304 sets it as Ada comes along): the people's routine 1 (0x8005bdac ->
+// FUN_8005be50). Every tick she heads for a point by Leon (FUN_8005bb74, table
+// 0x800a0674: 1000 from him at his facing +-1300, the nearer one; 800 at 1920,
+// behind him, while enemies threaten; Leon himself when it lies outside the
+// room's zones), by the zone paths like a zombie. States as obj+5: 0 stands
+// (set 1 animation 2), 1 walks (0) from 3000 away, 2 runs (1) from 5000 back
+// to walking under 3000, stopping under 300 to turn to Leon's facing (11; his
+// back while she is behind him); 3 steps aside when he walks at her within
+// 1000 or runs at her within 4000 (2000 while she walks): walks on turning
+// 0x80 a tick away to the side she stands on of his facing until she faces
+// his way; 4 turns to him when she has been bumping into things or close by
+// him for 60 ticks; 12 turns to her way first; 5 shoots. Blocked for 60 ticks
+// she turns about for 30 (running 15). See docs/enemy-others.md section 17.
+enum { PT_STAND, PT_WALK, PT_RUN, PT_ASIDE, PT_FACE, PT_ATTACK, PT_ALIGN = 11, PT_TURN = 12 };
+#define PA_WALK 0
+#define PA_RUN 1
+#define PA_STAND 2
+#define PA_RAISE 9              // the gun up; backwards: down (0x8005debc, 0x8005e44c)
+#define FOLLOW_FLAG_ARRAY 1
+#define FOLLOW_FLAG 3
+enum { PS_RAISE, PS_AIM, PS_FIRE, PS_LOWER }; // state 5's steps (obj+6, tables 0x800a09b8 / 0x800a09d0)
+static const uint8_t pa_aim[2] = { 11, 15 }, pa_fire[2] = { 10, 14 }; // straight / down (0x800115ec / 0x800115f8)
+static const uint16_t partner_damage[3] = { 16, 15, 14 }; // assumed: the VP70's
+#define PARTNER_WEAPON 0x02
+// the point by Leon per kind (obj+0x21c & 3) and the kind per mode (0x800a06b8)
+static const int16_t follow_points[3][3] = { { 1000, 1300, -1300 }, { 0, 0, 0 }, { 800, 1920, 1920 } };
+static const uint8_t mode_kind[11] = { 0, 0, 0, 2, 2, 0, 0, 2, 2, 2, 2 };
+
+static int alive(const Enemy *e);
+static int on_ground(const Enemy *e);
+
+// the three nearest enemies she sees (FUN_80060d18, every tick): alive, not
+// held by a script, not lying as if dead, in sight from her head
+static int seen[3], seen_n;
+static uint32_t seen_d[3];
+
+static void partner_look(const Enemy *e)
+{
+    seen_n = 0;
+    for (int j = 0; j < MAX_ENEMIES; j++) {
+        const Enemy *o = &enemies[j];
+        if (o == e || !alive(o) || o->hp < 0 || (o->flags & EF_HOLD) || o->plc.active)
+            continue;
+        if (game_sight_blocked(e->x, e->y + EYE_ENEMY, e->z, o->x, o->y + EYE_ENEMY, o->z))
+            continue;
+        float dx = (float)(o->x - e->x), dz = (float)(o->z - e->z);
+        uint32_t dd = (uint32_t)sqrtf(dx * dx + dz * dz);
+        int k = seen_n < 3 ? seen_n++ : 3;
+        while (k > 0 && seen_d[k - 1] > dd) {
+            if (k < 3) {
+                seen[k] = seen[k - 1];
+                seen_d[k] = seen_d[k - 1];
+            }
+            k--;
+        }
+        if (k < 3) {
+            seen[k] = j;
+            seen_d[k] = dd;
+        }
+    }
+}
+
+// Leon faces the point (FUN_80014fb4(Leon, x, z, 0x400) == 0)
+static int leon_cone(const EnemyTarget *p, int32_t x, int32_t z, int half)
+{
+    int a = (int)(atan2f((float)-(z - p->z), (float)(x - p->x)) * 32768.0f / 6.2831853f) & 32767;
+    return abs(((a - p->dir + 16384) & 32767) - 16384) < half * 8;
+}
+
+// FUN_80061090(obj, 3000), every 16 ticks: 0 no enemy seen; seen but none
+// within 3000: 2 / 4 Leon faces it or not, with more 6 / 8 / 10 he faces all
+// / none / some; within 3000: 1 / 3 she faces it or not, with more 5 / 7 / 9
+static int partner_mode(const Enemy *e, const EnemyTarget *p)
+{
+    unsigned low = 0, high = 0, near = 0;
+    for (int k = 0; k < seen_n; k++) {
+        const Enemy *o = &enemies[seen[k]];
+        if (seen_d[k] < 3000) {
+            high |= in_cone(e, o->x, o->z, 0x400) ? 0x10000 : 0x20000;
+            near++;
+        }
+        low |= leon_cone(p, o->x, o->z, 0x400) ? 1 : 2;
+    }
+    if (!seen_n)
+        return 0;
+    if (!high)
+        return seen_n < 2 ? low * 2 : low * 2 + 4;
+    return near > 1 ? (high >> 15) + 3 : (high >> 15) - 1;
+}
+
+static void partner_enter(Enemy *e, int state)
+{
+    e->state = state;
+    e->sub = 1;
+    e->timer = 60;              // obj+0x158
+    e->timer2 = 0;              // obj+0x16a
+    set_anim(e, SET_MAIN, state == PT_STAND ? PA_STAND : state == PT_RUN ? PA_RUN : PA_WALK, 0);
+}
+
+// 0x501: she raises the gun at the enemy (0x8005debc step 0)
+static void partner_attack_on(Enemy *e, int target, int down)
+{
+    e->state = PT_ATTACK;
+    e->sub = PS_RAISE;
+    e->follow_target = (int8_t)target;
+    e->follow_aim = (uint8_t)down;
+    e->follow_armed = 1;
+    set_anim(e, SET_MAIN, PA_RAISE, 0);
+}
+
+// the zombies' reactions (table 0x800a0954 by type: 0 for all but the spiders).
+// Standing she shoots the nearest standing one; one crawling she shoots down
+// at, but a standing one within 3000 behind it comes first (0x8005c608).
+static void react_stand(Enemy *e)
+{
+    const Enemy *o = &enemies[seen[0]];
+    if (!on_ground(o)) {
+        partner_attack_on(e, seen[0], 0);
+        return;
+    }
+    if (is_crawler(o))
+        partner_attack_on(e, seen[0], 1);
+    if (seen_n > 1 && !on_ground(&enemies[seen[1]]) && seen_d[1] < 3000)
+        partner_attack_on(e, seen[1], 0);
+}
+
+// ... when Leon fires (0x8005c4fc, modes 0 and the even ones)
+static void react_fire(Enemy *e)
+{
+    const Enemy *o = &enemies[seen[0]];
+    if (!on_ground(o))
+        partner_attack_on(e, seen[0], 0);
+    else if (is_crawler(o))
+        partner_attack_on(e, seen[0], 1);
+}
+
+// ... walking (0x8005cd94): the nearest standing within 2500, or crawling
+static void react_walk(Enemy *e)
+{
+    const Enemy *o = &enemies[seen[0]];
+    if (!on_ground(o) && seen_d[0] < 2500)
+        partner_attack_on(e, seen[0], 0);
+    else if (is_crawler(o))
+        partner_attack_on(e, seen[0], 1);
+}
+
+static void turn_to_dir(Enemy *e, int16_t dir, int rate)
+{
+    int diff = ((dir - e->dir + 16384) & 32767) - 16384, max = rate * 8;
+    e->dir = (int16_t)((e->dir + (diff > max ? max : diff < -max ? -max : diff)) & 32767);
+}
+
+static int facing_like(const Enemy *e, int16_t dir, int half)
+{
+    return abs(((dir - e->dir + 16384) & 32767) - 16384) < half * 8;
+}
+
+// the way from Leon to her
+static int from_leon(const Enemy *e, const EnemyTarget *p)
+{
+    return (int)(atan2f((float)-(e->z - p->z), (float)(e->x - p->x)) * 32768.0f / 6.2831853f) & 32767;
+}
+
+// Leon does not face away from her (FUN_800152d0 == 0)
+static int leon_faces(const Enemy *e, const EnemyTarget *p)
+{
+    return abs(((from_leon(e, p) - p->dir + 16384) & 32767) - 16384) <= 0x400 * 8;
+}
+
+// 0x8005da48 step 0: the side of Leon's facing she stands on (FUN_80014fb4)
+static void partner_aside(Enemy *e, const EnemyTarget *p)
+{
+    partner_enter(e, PT_ASIDE);
+    int rel = (from_leon(e, p) - p->dir) & 32767;
+    e->follow_turn = rel > 16384 && rel < 32768 - 8 ? -1 : 1;
+}
+
+static void partner_point(Enemy *e, const EnemyTarget *p)
+{
+    const int16_t *pt = follow_points[e->follow_kind < 3 ? e->follow_kind : 0];
+    int64_t best = INT64_MAX;
+    for (int k = 0; k < 2; k++) {
+        int16_t a = (int16_t)(p->dir + pt[1 + k] * 8);
+        int32_t x = p->x + ((pt[0] * cosLerp(a)) >> 12), z = p->z - ((pt[0] * sinLerp(a)) >> 12);
+        int64_t dx = x - e->x, dz = z - e->z;
+        if (dx * dx + dz * dz < best) {
+            best = dx * dx + dz * dz;
+            e->follow_x = (int16_t)x;
+            e->follow_z = (int16_t)z;
+        }
+    }
+    if (zone_count && zone_at(e->follow_x, e->follow_z) < 0) {
+        e->follow_x = (int16_t)p->x;
+        e->follow_z = (int16_t)p->z;
+    }
+}
+
+// State 5 (0x8005dddc / 0x8005de18): up (animation 9, turning to the enemy
+// at 0xd8), aim (11 / 15 down) up to 30 ticks, fire (10 / 14) while her shots
+// hit and it stands - or crawls, while it is near - down again (9 backwards
+// from key 1), then 30 ticks before she raises it again.
+static void partner_lower(Enemy *e)
+{
+    e->sub = PS_LOWER;
+    set_anim(e, SET_MAIN, PA_RAISE, 0);
+    int count = anim_model(e)->anims[e->anim].count;
+    e->key = count > 1 ? count - 2 : 0;
+}
+
+static void partner_fire(Enemy *e)
+{
+    e->sub = PS_FIRE;
+    set_anim(e, SET_MAIN, pa_fire[e->follow_aim], 0);
+    int32_t x, y, z;
+    static const int32_t muzzle[3] = { 138, 615, 8 }; // from the hand, part 11 (0x8005e228)
+    if (e->pose_valid) {
+        bone_point(e, 11, muzzle, &x, &y, &z);
+    } else {
+        x = e->x + ((600 * cosLerp(e->dir)) >> 12);
+        y = e->y - 1400;
+        z = e->z - ((600 * sinLerp(e->dir)) >> 12);
+    }
+    game_partner_shot(x, y, z);
+    e->follow_armed = enemy_hit(e->x, e->y, e->z, e->dir, 0, PARTNER_WEAPON, partner_damage,
+                                e->follow_aim ? AIM_DOWN : AIM_STRAIGHT) >= 0;
+}
+
+static void partner_attack(Enemy *e)
+{
+    const Enemy *t = e->follow_target >= 0 && e->follow_target < MAX_ENEMIES ? &enemies[e->follow_target] : NULL;
+    if (e->follow_delay)
+        e->follow_delay--;
+    switch (e->sub) {
+    case PS_RAISE:
+        if (t)
+            turn_toward(e, t->x, t->z, 0xd8);
+        if (anim_step(e, NULL)) {
+            e->sub = PS_AIM;
+            e->timer = 0;
+            e->follow_delay = 7;
+        }
+        break;
+    case PS_AIM: // 0x8005e0c4 then 0x8005e154; the zombies' check 0x8005dfdc
+        if (!e->follow_armed) {
+            partner_lower(e);
+            break;
+        }
+        if (!e->follow_aim || !e->follow_delay) {
+            if (!t || !alive(t) || t->hp < 0 || t->hit_lock) {
+                partner_lower(e);
+                break;
+            }
+            if (!on_ground(t) || ((e->follow_mode & 1) && e->follow_aim)) {
+                partner_fire(e);
+                break;
+            }
+            partner_lower(e);
+            break;
+        }
+        if (!e->timer) {
+            set_anim(e, SET_MAIN, pa_aim[e->follow_aim], 0);
+            e->timer = 30;
+        }
+        anim_step(e, NULL);
+        if (--e->timer <= 0)
+            partner_lower(e);
+        break;
+    case PS_FIRE: // 0x8005e228
+        if (anim_step(e, NULL)) {
+            e->sub = PS_AIM;
+            e->timer = 0;
+        }
+        break;
+    default: // 0x8005e44c
+        if (e->key > 0) {
+            e->key--;
+        } else {
+            partner_enter(e, PT_STAND);
+            e->follow_cool = 30;
+        }
+        break;
+    }
+}
+
+static void partner_follow(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
+{
+    if (!e->following) {
+        e->following = 1;
+        e->anim_set = NULL; // her own animations, not the room's
+        e->follow_mode = e->follow_kind = e->follow_new = 0;
+        e->follow_mode_timer = 0;
+        e->follow_cool = 0;
+        e->follow_target = -1;
+        partner_enter(e, PT_STAND);
+    }
+    partner_look(e);
+    if (e->follow_mode_timer-- == 0) { // FUN_8005be50
+        e->follow_mode_timer = 15;
+        int mode = partner_mode(e, p);
+        e->follow_new = 0;
+        if (mode != e->follow_mode) {
+            e->follow_kind = mode_kind[mode];
+            e->follow_new = 1;
+        }
+        e->follow_mode = (uint8_t)mode;
+    }
+    if (e->follow_cool)
+        e->follow_cool--;
+    int mode = e->follow_mode, odd = mode & 1;
+    partner_point(e, p);
+    float gx = (float)(e->follow_x - e->x), gz = (float)(e->follow_z - e->z);
+    uint32_t dist = (uint32_t)sqrtf(gx * gx + gz * gz); // obj+0x21e
+    int32_t wx = e->has_goal ? e->goal_x : e->follow_x, wz = e->has_goal ? e->goal_z : e->follow_z;
+    int walking = (p->noise & NOISE_WALK) != 0, running = (p->noise & NOISE_RUN) != 0;
+    const Enemy *near = seen_n ? &enemies[seen[0]] : NULL;
+    int32_t fwd;
+    switch (e->state) {
+    case PT_STAND: // 0x8005c950; with an enemy near 0x8005cbc0
+        anim_step(e, NULL);
+        if (odd) {
+            if (near && !e->follow_cool)
+                react_stand(e);
+            if (dist > 3000)
+                partner_enter(e, in_cone(e, wx, wz, 0x400) ? PT_WALK : PT_TURN);
+            break;
+        }
+        if (near && (p->noise & NOISE_SHOT) && !e->follow_cool)
+            react_fire(e);
+        if (e->follow_new || (mode == 10 && dist > 500) || dist > 3000)
+            partner_enter(e, in_cone(e, wx, wz, 0x400) ? PT_WALK : PT_TURN);
+        else if (leon_faces(e, p) && in_cone(e, p->x, p->z, 0x200) && ((running && d < 4000) || (walking && d < 1000)))
+            partner_aside(e, p);
+        break;
+    case PT_WALK: // 0x8005d1e4 / 0x8005d3bc (enemies: 0x8005cf14), running 0x8005d768 / 0x8005d8ec
+    case PT_RUN:  // (0x8005d590), turning first 0x8005f2bc
+    case PT_TURN: {
+        int run = e->state == PT_RUN;
+        if (mode && near && !run && e->state != PT_TURN && !e->follow_back && !e->follow_cool &&
+            seen_d[0] < 2000 && seen_d[0] < d)
+            react_walk(e);
+        if (e->state == PT_ATTACK)
+            break;
+        anim_step(e, &fwd);
+        if (e->follow_back) {
+            turn_to_dir(e, e->follow_back_dir, mode && run ? 0x50 : 0x28);
+            e->follow_back--;
+        } else if (mode && near && !e->follow_blocked && e->state != PT_TURN &&
+                   seen_d[0] < (run ? 2000u : 1500u) && in_cone(e, near->x, near->z, run ? 0x400 : 0x4b0)) {
+            turn_toward(e, near->x, near->z, run ? -0x38 : -0x28); // keeps away from it
+        } else {
+            turn_toward(e, wx, wz, e->state == PT_TURN ? 0x30 : run ? 0x38 : 0x28);
+        }
+        int32_t x0 = e->x, z0 = e->z;
+        walk(e, i, fwd);
+        int blocked = fwd > 8 && abs(e->x - x0) + abs(e->z - z0) < fwd / 2; // obj+0x110 & 1
+        e->follow_blocked = (uint8_t)blocked;
+        if (!blocked) {
+            e->follow_stuck = 0;
+        } else if (!e->follow_back && ++e->follow_stuck > 60) { // turns about
+            e->follow_stuck = 0;
+            e->follow_back = run ? 15 : 30;
+            e->follow_back_dir = (int16_t)((e->dir + (0x880 - (rnd() & 1) * 0x100) * 8) & 32767);
+        }
+        if (run) {
+            if (dist < 3000)
+                partner_enter(e, PT_WALK);
+            break;
+        }
+        if (dist < 300) {
+            partner_enter(e, PT_ALIGN);
+            break;
+        }
+        if (e->state == PT_TURN) {
+            if (in_cone(e, wx, wz, 0x400))
+                e->state = PT_WALK;
+            break;
+        }
+        if (dist > 5000) {
+            partner_enter(e, PT_RUN);
+        } else if (dist < 2000 && running && leon_faces(e, p)) {
+            partner_aside(e, p);
+        } else if (!mode && ((dist < 1500 && blocked) || d < 1500)) {
+            if (--e->timer <= 0)
+                partner_enter(e, PT_FACE);
+        } else {
+            e->timer = 60;
+        }
+        break;
+    }
+    case PT_ASIDE: // 0x8005da48 / 0x8005db18: walks on turning till she faces Leon's way
+        if ((facing_like(e, p->dir, 0x200) && e->timer2 > 5) || e->timer2 > 120) {
+            partner_enter(e, PT_STAND);
+            break;
+        }
+        e->dir = (int16_t)((e->dir + e->follow_turn * (e->timer2 ? 0x80 : 0x60) * 8) & 32767);
+        anim_step(e, &fwd);
+        walk(e, i, fwd);
+        e->timer2++;
+        break;
+    case PT_FACE: // 0x8005dc90: on the spot to Leon
+        anim_step(e, NULL);
+        if (in_cone(e, p->x, p->z, 0x50))
+            partner_enter(e, PT_STAND);
+        else
+            turn_toward(e, p->x, p->z, 0x50);
+        break;
+    case PT_ATTACK:
+        partner_attack(e);
+        break;
+    case PT_ALIGN: { // 0x8005f0d0: on the spot to Leon's facing; behind him to his back (0x8005f130)
+        int16_t want = (int16_t)((p->dir + (e->follow_kind == 2 ? 16384 : 0)) & 32767);
+        anim_step(e, NULL);
+        if (facing_like(e, want, 0x50))
+            partner_enter(e, PT_STAND);
+        else
+            turn_to_dir(e, want, 0xa0);
+        break;
+    }
+    default:
+        partner_enter(e, PT_STAND);
+        break;
+    }
 }
 
 // The room's start (FUN_80046e3c, after its scripts set the objects): an
@@ -6316,7 +6774,10 @@ void enemy_tick(const EnemyTarget *p)
         if (e->sight_timer-- == 0) {
             e->sight_timer = 7;
             e->sees = !game_sight_blocked(e->x, e->y + EYE_ENEMY, e->z, p->x, p->y + EYE_PLAYER, p->z);
-            update_goal(e, p);
+            if (e->following)
+                update_goal_at(e, e->follow_x, e->follow_z);
+            else
+                update_goal(e, p);
         }
         if (e->push > 0) // thrown back / heavy recoil (0x80109550, 0x80105b00)
             push_tick(e, i);
@@ -6344,8 +6805,16 @@ void enemy_tick(const EnemyTarget *p)
                 game_blood(0, e->x, e->y - 300, e->z, rnd() << 7, 8, e->y);
             continue;
         }
-        if (is_person(e)) { // stands (routine 1 of the people is not ported)
-            anim_step(e, NULL);
+        if (is_person(e)) { // the partner follows Leon; the others stand (their routine 1 is not ported)
+            if (i == PARTNER_SLOT && flag_get(FOLLOW_FLAG_ARRAY, FOLLOW_FLAG)) {
+                partner_follow(e, i, p, d);
+            } else {
+                if (e->following) {
+                    e->following = 0;
+                    set_anim(e, SET_MAIN, PA_STAND, 0);
+                }
+                anim_step(e, NULL);
+            }
             continue;
         }
         if (e->routine == 8) {

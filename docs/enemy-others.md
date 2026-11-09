@@ -38,7 +38,8 @@ damage, hits) in [enemy-zombie.md](enemy-zombie.md) and [damage.md](damage.md).
 `tools/research/overlay_symbols.py` prints the complete list.
 
 People (types `0x40` and up, e.g. Kendo `0x48`) are not enemies: the room scripts move them
-(routine 4, `plc_*`), see [engine-notes.md](engine-notes.md).
+(routine 4, `plc_*`), see [engine-notes.md](engine-notes.md). The partner following Leon is in
+section 17.
 
 ### Entry (observed)
 
@@ -611,7 +612,76 @@ an answer from them (no `member_cmp 17`), so the scenes run through.
   HP from their inits (`sh 0x156`): embryo 1, G adult 450, tyrant 10000, G1 400, `0x33` 750,
   `0x36` 400, `0x37` −1 (cannot be hurt). Damage values are guesses.
 
-## 17. Open points
+## 17. The partner following Leon (Ada `0x41`)
+
+The people's routines are in the main executable, not in an overlay: table `0x800a0408`,
+routine 1 `0x8005bdac` -> `FUN_8005be50`. Every 16 frames `FUN_80061090(obj, 3000)` picks a
+mode (enemies near, ...; table `0x800a068c`); each mode runs a decision table, then the action
+table `0x800a06fc`, both by state `obj+5` (mode 0's decisions at `0x800a06c4`, modes 1–10 at
+`0x800a0734 + 0x38 · (mode − 1)`). Ported as `partner_follow` in `enemy.c`; the DS takes it
+while flag 1:3 is set (`0x800c77d4 & 0x10000000`, room 304 sets it as Ada comes along) for the
+slot `0xff` object.
+
+**Enemies** (`FUN_80060d18`, every frame): the three nearest she sees (alive, no `0xc000` in
+`obj+0x10e`, line of sight between the heads) with their distances (`0x800cf198..`,
+`0x800d7588..`). **Mode** (`FUN_80061090(obj, 3000)`, every 16 frames, `0x800a06c3`): 0 none
+seen; none within 3000: 2 / 4 Leon faces the one (±0x400) or not, with more 6 / 8 / 10 he
+faces all / none / some; within 3000: 1 / 3 she faces it or not, with more 5 / 7 / 9 (all /
+none / some). A new mode sets the goal kind (`0x800a06b8`: 2 for modes 3, 4, 7–10, else 0) and
+bit `0x8000` of `obj+0x21c` for the next 16 frames.
+
+**Goal** (`FUN_8005bb74`, every frame): kind 0 a point 1000 from Leon at his facing ±1300,
+kind 2 800 at +1920 (behind him; table `0x800a0674`, Sherry's types `0x45`/`0x4f` have their
+own row: 700 / ±1100, 600 / 2176, 1920), the nearer of the two (`FUN_80060b24`); Leon himself
+when it lies outside the room's zones. `obj+0x218/0x21a` holds it, `obj+0x21e` the distance to
+it; the way there goes by the zone paths (`FUN_80046fb0`, as the zombies do).
+
+| State | Decision / action | What |
+|-------|-------------------|------|
+| 0 stand | `0x8005c950` / `0x8005ccf8` | goal more than 3000 away, or the mode just changed, or mode 10 and over 500: walk (1), or 12 when the way is not within ±0x400; else step aside (3) when Leon runs (`obj+5` 2) at her within 4000 or walks (1) at her within 1000 — he does not face away (`FUN_800152d0`: ±0x400) and she faces him (±0x200). When Leon fires (`0x800c77f2 & 1`, the DS's `NOISE_SHOT`) and she sees an enemy: 5 (`0x8005c4fc`) |
+| 0 stand, odd modes | `0x8005cbc0` | an enemy seen and no pause: 5 (`0x8005c608`); goal more than 3000 away: walk / 12; nothing else |
+| 1 walk | `0x8005d1e4` / `0x8005d3bc` | goal under 300: 11; over 5000: run; under 2000 with Leon running at her: 3; turns to the way at 0x28 a frame. 60 frames close to Leon (1500) or blocked close to the goal: 4 |
+| 1 walk, modes 1–10 | `0x8005cf14` | the nearest enemy under 2000 and nearer than Leon: 5 (`0x8005cd94`); under 1500 and within ±0x4b0 of her facing: turns away from it at 0x28; no state 4 |
+| 2 run | `0x8005d768` / `0x8005d8ec` | back to walking under 3000; turns at 0x38 (modes 1–10, `0x8005d590`: away from an enemy under 2000 within ±0x400; turning about at 0x50) |
+| 5 shoot | `0x8005dddc` / `0x8005de18` | steps below |
+| 3 step aside | `0x8005da48` / `0x8005db18` | walks on, turning 0x80 a frame (0x60 the first) to the side of Leon's facing she stands on (`FUN_80014fb4`), until she faces his way (±0x200) after 5 frames, or 120 frames |
+| 4 face Leon | `0x8005dc90` | turns on the spot to him at 0x50 |
+| 11 align | `0x8005f0d0` | turns on the spot to Leon's facing at 0xa0 (modes 3, 4, 7–10, `0x8005f130`: to his back) |
+| 12 turn first | `0x8005f2bc` | walks turning to the way at 0x30 until it is within ±0x400; goal under 300: 11 |
+
+Blocked (`obj+0x110 & 1`) for 60 frames (`obj+0x224`), she turns about for 30 frames to her
+facing + 0x880 − 0 or 0x100 by random (`obj+0x220`, bit 0x1000 of `obj+0x21c`); running, 15.
+
+Animations of her own set 1 by her health (`obj+0x151`: HP ×4096 / max under 2000 caution,
+under 800 danger): stand 2 / 5 / 8 (`0x800115d4`), walk 0 / 3 / 6, run 1 / 4 / 7, step aside
+0 / 9 / 9 (`0x800115e8`). The DS has no maximum HP for people and keeps the first column.
+
+**Shooting** (state 5, steps `obj+6` by tables `0x800a09b8` / `0x800a09d0`). The reactions
+go by the enemy's type (`0x800a0954`: 0 for all but the spiders `0x25` / `0x26`): a standing
+one is shot straight (`obj+0x154` `0x4000`), a crawling one (variant bit 0, `*obj &
+0x4000000`) down (`0x2000`); one lying otherwise is left alone. Standing she takes the nearest,
+but a standing second within 3000 before a crawling first; walking only a standing one within
+2500 (or one crawling). `obj+0x1b4` = the target. Her animations: set 1 number 9 up, 11 / 15
+aim straight / down, 10 / 14 fire (`0x800115ec`, `0x800115f8`; 13 / 12 up for `0x8000`).
+
+| Step | Action | What |
+|------|--------|------|
+| 0 up | `0x8005debc` | 9 forward, turning to the target at 0xd8; sets "armed" (`obj+0x21c & 0x4000`) and a delay of 7 (`obj+0x14e`) |
+| 1 aim | `0x8005e0c4` / `0x8005e154` | not armed: 3. Straight, or down once the delay is over (`0x8005dfdc`): the target hit-locked (`+0x1d3`) or dead: 3; standing: fire; crawling: fire in the odd modes, else 3. The aim animation up to 30 frames, then 3 |
+| 2 fire | `0x8005e228` | the shot (`FUN_8003dd58` / `FUN_8003dd8c` with `obj[0] >> 29` as the weapon), fire and flash at her hand (`0x030a0e00`, `0x01000e00` at 138 / 615 / 8, part 11); armed again only when it hit; at the end 1 |
+| 3 down | `0x8005e44c` | 9 backwards from key 1 (`FUN_800289d4` flags `0x10000`), then state 0 and 30 frames (`obj+0x22a`) before she raises it again |
+
+So she fires every 16 frames at a standing zombie while her shots hit, and stops when it goes
+down. The DS uses the VP70's damage (16 / 15 / 14) and its shot sound (ARMS02, loaded at her
+first shot); the partner's routines call no sound function, so where the PS1 takes hers from
+is not known. Steps 4 (animation 16) and 5 (re-aim, 9 from key 3) are not reached from the
+zombies' code.
+
+Not ported: the health columns, state 12 of modes 1–10 (`0x8005f1a0`, with 13 `0x8005f394`),
+states 6–10 (being hit and the like), the spiders' reactions (`0x8005c6e4` …), mode 10's pick
+of Leon's own target (`FUN_8006120c`).
+
+## 18. Open points
 
 - The licker climbing from the floor onto a wall (state 1), type `0x24`'s own overlay, two
   spiders meeting on the ceiling (state 11) and the spiders' poison as a flying effect; the

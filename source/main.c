@@ -181,6 +181,7 @@ static int health_level(void) { return player.hp < 21 ? 2 : player.hp < 101 ? 1 
 
 static void *voice_bank;            // Leon's voice (CORE00, PS1 bank 4)
 static void *enemy_bank;            // the room's enemy sounds (ENEMSE set, bank 3)
+static void *partner_bank;          // ARMS02 for the partner's shots, loaded at her first
 static uint8_t *enemy_pairs;        // voice kind pairs per set (enemse2ds.py)
 // Leon's death (COMMON/BIN/DIEDEMO.BIN, loaded at 0x80190000; its states are
 // in table 0x80193560 and run once per game tick):
@@ -559,6 +560,8 @@ static int load_room(int stage, int id)
     scripted_boxes = 0;
     enemy_room_reset(); // the new room's scripts spawn its enemies
     effect_clear();
+    sound_bank_free(partner_bank);
+    partner_bank = NULL;
     // room sound bank (the previous one may still play a short step: free it
     // only after the new one is loaded)
     void *old_bank = room_bank;
@@ -3625,6 +3628,21 @@ static void shot_effects(const Weapon *w)
         else
             roomfx_spawn(f->id, f->sub, p[0], p[1], p[2], GUN_FX(f->size), 0);
     }
+}
+
+// The partner's shot (0x8005e228): the VP70's fire and flash at her muzzle
+// (0x030a0e00, 0x01000e00 at 138 / 615 / 8 from her hand). Her shot's sound
+// is not in that code (no FUN_80057364 call in the partner's routines); the DS
+// plays the VP70's shot, by distance like the enemies' sounds.
+void game_partner_shot(int32_t x, int32_t y, int32_t z)
+{
+    roomfx_spawn(3, 0x0A, x, y, z, GUN_FX(0x0E), 0);
+    roomfx_spawn(1, 0x00, x, y, z, GUN_FX(0x0E), 0);
+    if (!partner_bank)
+        partner_bank = sound_bank_load("nitro:/sound/arms02.bin");
+    float dx = (float)(x - player.x), dz = (float)(z - player.z);
+    int d = (int)sqrtf(dx * dx + dz * dz);
+    sound_play(partner_bank, 0, d >= 20000 ? 30 : 127 - d * 97 / 20000, 64);
 }
 
 // phase 4 (0x8004237c): plays move 16, sounds and loading on its keyframes;

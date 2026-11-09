@@ -84,6 +84,7 @@ void game_player_died(void) { host_dead = 1; printf("  died\n"); }
 void game_player_hurt(int kind) { printf("  hurt %d\n", kind); }
 void game_player_killed(void) { host_dead = 1; printf("  killed\n"); }
 void game_blood(int k, int32_t x, int32_t y, int32_t z, int16_t d, int sp, int32_t f) { (void)x; (void)z; (void)d; (void)sp; (void)f; if (getenv("TRACE")) printf("  blood %d at y %d\n", k, (int)y); }
+void game_partner_shot(int32_t x, int32_t y, int32_t z) { if (getenv("TRACE")) printf("  partner shot at %d %d %d\n", (int)x, (int)y, (int)z); }
 int game_enemy_member(int s, int m, int *v) { return enemy_member_get(s, m, v); }
 int game_player_member(int m, int *v) { (void)m; (void)v; return 0; }
 void game_player_member_set(int m, int v) { (void)m; (void)v; }
@@ -128,6 +129,15 @@ int main(int argc, char **argv)
     if (getenv("ZONES")) // e.g. nitrofiles/room/room1020_blk.bin
         enemy_set_zones(asset_load(getenv("ZONES"), NULL));
     script_room_enter(&room);
+    if (getenv("FLAGS")) { // array:bit,... e.g. 1:3 (the partner follows)
+        char buf[256], *save = NULL;
+        snprintf(buf, sizeof(buf), "%s", getenv("FLAGS"));
+        for (char *it = strtok_r(buf, ",", &save); it; it = strtok_r(NULL, ",", &save)) {
+            int array, bit;
+            if (sscanf(it, "%i:%i", &array, &bit) == 2)
+                flag_set(array, bit, 1);
+        }
+    }
     if (getenv("SPAWN")) { // slot:type:flags:x:y:z:dir,... (dir in RE2 units), e.g. 0:0x22:0x0101:-27000:-3000:-12400:1024
         char buf[256], *save = NULL;
         snprintf(buf, sizeof(buf), "%s", getenv("SPAWN"));
@@ -139,7 +149,15 @@ int main(int argc, char **argv)
     }
     int ticks = getenv("TICKS") ? atoi(getenv("TICKS")) : 100;
     int noise_at = getenv("NOISE_AT") ? atoi(getenv("NOISE_AT")) : 0; // NOISE only from this tick on
+    // PMOVE=from:to:vx:vz - Leon walks vx / vz a tick in those ticks (facing that way)
+    int move_from = 0, move_to = 0, move_vx = 0, move_vz = 0, moved_x = 0, moved_z = 0;
+    if (getenv("PMOVE"))
+        sscanf(getenv("PMOVE"), "%i:%i:%i:%i", &move_from, &move_to, &move_vx, &move_vz);
     for (int t = 0; t < ticks; t++) {
+        if (t >= move_from && t < move_to) {
+            moved_x += move_vx;
+            moved_z += move_vz;
+        }
         int before = enemy_spawn_calls;
         if (getenv("MEMBERS")) { // tick:slot:member:value,... e.g. 5:0:0x17:1
             char buf[256], *save = NULL;
@@ -153,8 +171,10 @@ int main(int argc, char **argv)
         if (getenv("EVENT") && t == 5) // e.g. EVENT=3: the room's event function 3
             script_start_event((int)strtol(getenv("EVENT"), NULL, 0));
         script_tick();
-        EnemyTarget p = { .x = host_held ? host_px : (getenv("PX") ? atoi(getenv("PX")) : 5899),
-                          .z = host_held ? host_pz : (getenv("PZ") ? atoi(getenv("PZ")) : 0), .y = getenv("PY") ? atoi(getenv("PY")) : 0, .hp = 200, .noise = getenv("NOISE") && t >= noise_at ? atoi(getenv("NOISE")) : 0, .can_grab = !host_held && !host_dead,
+        EnemyTarget p = { .x = host_held ? host_px : (getenv("PX") ? atoi(getenv("PX")) : 5899) + moved_x,
+                          .z = host_held ? host_pz : (getenv("PZ") ? atoi(getenv("PZ")) : 0) + moved_z,
+                          .dir = move_vx || move_vz ? (int16_t)((int)(atan2f((float)-move_vz, (float)move_vx) * 32768.0f / 6.2831853f) & 32767)
+                                                    : (int16_t)(getenv("PDIR") ? atoi(getenv("PDIR")) : 0), .y = getenv("PY") ? atoi(getenv("PY")) : 0, .hp = 200, .noise = getenv("NOISE") && t >= noise_at ? atoi(getenv("NOISE")) : 0, .can_grab = !host_held && !host_dead,
                           .pressed = getenv("MASH") && (t & 1), .dead = host_dead };
         enemy_tick(&p);
         // Leon shoots the nearest zombie; MULTI: the shotgun's later checks 2 and 4 ticks on
