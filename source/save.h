@@ -36,6 +36,8 @@ typedef struct {
     // version 5: for the ending's rank: play time (1/60 s), first aid sprays used
     uint32_t play_frames;
     uint16_t sprays;
+    // version 6: poisoned
+    uint8_t poison;
 } SaveSlot;
 
 int save_init(void);                     // mounts the SD card; 0 if there is none

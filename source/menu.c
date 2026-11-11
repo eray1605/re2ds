@@ -247,11 +247,15 @@ static int ecg_wave(int t)
 #define ECG_W 88                // Leon's own item's box beside it
 #define ECG_BASE 40
 
+int game_player_poisoned(void); // main.c
+
 static void draw_condition(int hp)
 {
     int c = hp < 21 ? C_RED : hp < 101 ? C_YELLOW : C_GREEN;
     int dim = hp < 21 ? C_DIM_RED : hp < 101 ? C_DIM_YELLOW : C_DIM_GREEN;
     const char *s = hp < 21 ? "DANGER " : hp < 101 ? "CAUTION" : "FINE   ";
+    if (game_player_poisoned()) // 0x80064a28: Poison comes before the rest
+        s = "POISON ";
     fill(52, 2, 92, 52, C_BLACK);
     text(54, 5, "CONDITION", C_GREY);
     text(54, 17, s, c);
@@ -1000,7 +1004,7 @@ static int combine(int a, int b)
 // USE (status screen 0x800665a4): weapons, ammunition and ribbons (items
 // under 30) only buzz; the spray and the herbs heal by a part of the maximum
 // (0x800117f0: spray, G+R, G+G+G all, G+G and G+G+B half, G and G+B a
-// quarter; blue cures poison - the DS has none); anything else only where
+// quarter; blue and its mixes cure poison); anything else only where
 // an item AOT set flag 10:item this frame: then it goes to variable 2 and
 // the screen closes (0x80066790), else the buzz.
 static int heal_part(int item)

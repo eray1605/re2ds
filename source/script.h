@@ -92,6 +92,20 @@ void game_play_sound(int bank, int sound);
 void game_bgm_control(int id, int op, int type, int left, int right);
 void game_bgmtbl_set(int stage, int room, int main, int sub); // a room's music from now on
 void game_item_get(int item, int count);  // sce_item_get: into the inventory, else the item box
+int game_keys(int pressed);               // PS1 action bits held (0) / newly pressed (1): 0x01 up, 0x02 right,
+                                          // 0x04 down, 0x08 left, 0x10 / 0x20 aim up / down, 0x40 fire, 0x80
+                                          // action, 0x100 aim, 0x200 run, 0x1000 confirm, 0x2000 cancel
+void game_object_super(int n, int parent, int part, const int16_t pos[3], const int16_t dir[3]); // super_set
+void game_object_super_reset(int n, const int16_t dir[3]);                                        // super_reset
+void game_espr_on2(const uint8_t *ins, int is_3d);   // sce_espr_on2 / sce_espr3d_on2
+void game_espr_kill2(int handle);                // sce_espr_kill2
+int game_player_poisoned(void);                  // poison_ck
+void game_player_cure(void);                     // poison_clr
+int game_sight_blocked(int32_t x0, int32_t y0, int32_t z0, int32_t x1, int32_t y1, int32_t z1); // a room box between
+void game_shake(int x, int y);                   // sce_shake_on
+void game_fade_set(int n, int kind, int step);   // sce_fade_set
+void game_fade_adjust(int n, int level);         // sce_fade_adjust
+void game_player_heal(int item, int amount);     // plc_heal (and the status screen's herbs)
 void game_movie(int n);                     // movie_on: plays movie table entry n
 // sce_em_set: enemy / character in slot `slot` (enemy.c)
 // voice: kind of voice (byte 7), picks the enemy sound set of the room

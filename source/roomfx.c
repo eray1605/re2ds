@@ -68,6 +68,7 @@ typedef struct {
 typedef struct {
     uint8_t active, effect, type, frame, timer, flags, row, first;
     uint8_t id;
+    uint8_t handle;               // sce_espr_on2's number for sce_espr_kill2, 0 none
     int32_t x, y, z;
     int32_t vx, vy, vz;           // falling sprites
     int32_t floor;                // thrown: lands here
@@ -109,6 +110,7 @@ static int parse(uint8_t *blob, uint32_t size, Effect *out, int max)
     return n;
 }
 static Instance inst[MAX_INSTANCES];
+static uint8_t next_handle;      // the number the next instance gets (roomfx_on2)
 
 void roomfx_load(int stage, int room)
 {
@@ -228,6 +230,7 @@ void roomfx_spawn(int id, int type, int32_t x, int32_t y, int32_t z, int size, i
             continue;
         memset(n, 0, sizeof(*n));
         n->active = 1;
+        n->handle = next_handle;
         n->id = id;
         n->effect = f - effects;
         n->type = type;
@@ -262,6 +265,7 @@ void roomfx_throw(int id, int first, int row, int32_t x, int32_t y, int32_t z, i
             continue;
         memset(n, 0, sizeof(*n));
         n->active = 1;
+        n->handle = next_handle;
         n->id = id;
         n->effect = f - effects;
         n->type = row << 3;
@@ -294,6 +298,26 @@ void roomfx_on(const uint8_t *ins)
     // s16 x, y, z, direction; the parameter's high byte looks like a size
     // (0x24..0x40 for the fires of room 100)
     roomfx_spawn(ins[2], ins[3], rd16(ins + 8), rd16(ins + 10), rd16(ins + 12), ins[7], rd16(ins + 14));
+}
+
+// sce_espr_on2 / sce_espr3d_on2 (scd_op_64 0x800529c0, scd_op_75
+// 0x80052b30): as sce_espr_on / sce_espr3d_on, with a number in byte 1 that
+// sce_espr_kill2 (scd_op_65) ends the effect by - room 20D's three flames.
+void roomfx_on2(const uint8_t *ins, int is_3d)
+{
+    next_handle = ins[1];
+    if (is_3d)
+        roomfx_3d_on(ins);
+    else
+        roomfx_on(ins);
+    next_handle = 0;
+}
+
+void roomfx_kill2(int handle)
+{
+    for (int i = 0; i < MAX_INSTANCES; i++)
+        if (inst[i].active && handle && inst[i].handle == handle)
+            inst[i].active = 0;
 }
 
 void roomfx_kill(int id, int type)

@@ -17,6 +17,8 @@ void roomfx_3d_on(const uint8_t *ins); // sce_espr3d_on
 // effect id (the room's, else CORE00.ESP's), sub effect | palette row << 3,
 // size = the sce_espr_on parameter's high byte (0 = 1:1)
 void roomfx_spawn(int id, int type, int32_t x, int32_t y, int32_t z, int size, int dir_re2);
+void roomfx_on2(const uint8_t *ins, int is_3d);   // sce_espr_on2 / sce_espr3d_on2: byte 1 = its number
+void roomfx_kill2(int handle);                    // sce_espr_kill2
 // a sprite thrown from (x, y, z) with a speed per tick, falling until floor_y,
 // where it lies a moment; plays the effect's frames from first (casings).
 // Its first floor contact calls game_casing_sound(sound).

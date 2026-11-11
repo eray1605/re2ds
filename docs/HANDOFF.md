@@ -708,7 +708,9 @@ Specific risks:
 ## 10. Next steps (suggested order)
 
 Leon A has every system it needs (November 2026): puzzles by USE (item AOTs), desks, both
-terminals, water, damage areas, the partner, the ending with the rank. What is left:
+terminals, water, damage areas, the partner, the ending with the rank, pushing statues and
+crates (room 10C's red jewel needs it), poison, the scripts' fades and shakes, objects held
+in scenes. What is left:
 
 1. The user plays Leon A through on the DS; fix what turns up (state of the last PRs).
 2. Release: PR develop -> main, then delete develop (remote + local) and recreate from main.
@@ -717,7 +719,8 @@ terminals, water, damage areas, the partner, the ending with the rank. What is l
 4. Ending rest: rewards (special weapons with endless rounds), clear data, extra modes.
 5. Partner AI rest: states 6-10, spiders, her real weapon (`obj[0] >> 29`) and shot sound.
 6. Polish: gore variants (head burst, torn upper body, lost arm), SPU reverb, the G forms'
-   and moths' real AIs, an options menu (volumes, controls).
+   and moths' real AIs, an options menu (volumes, controls); the opcodes still skipped
+   (engine-notes section 1, "More opcodes": `plc_neck`, `parts_set`, the lights ...).
 7. Performance on the real DS (polygon budget in rooms with many enemies; VERTEX_LIMIT).
 
 ---

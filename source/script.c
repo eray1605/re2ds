@@ -1,5 +1,6 @@
 // re2ds - interpreter for the RE2 room scripts (see script.h).
 #include <stdlib.h>
+#include <math.h>
 #include <string.h>
 
 #include "script.h"
@@ -49,6 +50,10 @@ enum {
     OP_ITEM_AOT_SET_4P = 105, OP_PLC_MOTION = 63, OP_PLC_DEST = 64, OP_PLC_RET = 66, OP_PLC_ROT = 88,
     OP_PLC_CNT = 91, OP_PLC_STOP = 102, OP_XA_ON = 89, OP_MOVIE_ON = 111, OP_SCE_BGMTBL_SET = 87,
     OP_KAGE_SET = 96, OP_CUT_BE_SET = 97, OP_SCE_ESPR3D_ON = 84,
+    OP_SUPER_SET = 72, OP_SUPER_RESET = 73, OP_SCE_SHAKE_ON = 92, OP_SCE_EM_POS_CK = 133,
+    OP_SCE_ESPR_ON2 = 100, OP_SCE_ESPR_KILL2 = 101, OP_SCE_ESPR3D_ON2 = 117,
+    OP_SCE_KEY_CK = 79, OP_SCE_FADE_SET = 83, OP_WEAPON_CHG = 90, OP_SCE_FADE_ADJUST = 116,
+    OP_SCE_AMMO_CMP = 129, OP_PLC_HEAL = 131, OP_POISON_CK = 134, OP_POISON_CLR = 135, OP_SCE_ITEM_LOST2 = 136,
 };
 
 enum { B_IF, B_FOR, B_WHILE, B_DO, B_DOCOND, B_SWITCH };
@@ -287,6 +292,12 @@ static int work_member(const Thread *t, int member, int *value)
     case 4: return game_object_member(t->work_index, member, value);
     }
     return 0;
+}
+
+static int character_member(int k, int member, int *value)
+{
+    return k == 0 ? game_player_member(member, value)
+                  : game_enemy_member(k == 1 ? PARTNER_SLOT : k - 2, member, value);
 }
 
 static void work_member_set(const Thread *t, int member, int value)
@@ -645,9 +656,74 @@ static void run_thread(Thread *t)
                 cond = !work_member(t, ins[2], &value) || compare((int16_t)value, ins[3], rd16(ins + 4));
             break;
         }
-        case OP_DIR_CK:
+        case OP_DIR_CK: { // scd_op_39 (0x80052764, FUN_80014fb4): pad, s16 x, z, angle -
+                          // the point lies within the angle to either side of the work object's facing
+            int x, z, dir;
+            cond = 1;
+            if (work_member(t, 0x0B, &x) && work_member(t, 0x0D, &z) && work_member(t, 0x0F, &dir)) {
+                int w = rd16(ins + 6);
+                int to = (int)(atan2f((float)-(rd16(ins + 4) - z), (float)(rd16(ins + 2) - x)) * 4096.0f / 6.2831853f);
+                cond = ((w + to - dir) & 0xFFF) < 2 * w;
+            }
+            break;
+        }
+        case OP_SCE_EM_POS_CK: { // scd_op_85 (0x80054f0c, FUN_8004d000): two characters (0 Leon, 1 the
+                                 // partner, 2 + slot an enemy) with no room box between them
+            int a[3], b[3], ok = 1;
+            for (int k = 0; k < 3; k++) {
+                ok &= character_member(ins[1], 0x0B + k, &a[k]);
+                ok &= character_member(ins[2], 0x0B + k, &b[k]);
+            }
+            cond = !ok || !game_sight_blocked(a[0], a[1] - 1000, a[2], b[0], b[1] - 1000, b[2]);
+            break;
+        }
+        // scd_op_4f / 50 (0x80053a90 / 0x80053acc): wanted result, u16 action
+        // bits - held (0x800c5f4c) / newly pressed (0x800c5f50)
+        case OP_SCE_KEY_CK:
         case OP_SCE_TRG_CK:
-            cond = 1; // needs object state the engine does not have yet
+            cond = ((game_keys(op == OP_SCE_TRG_CK) & ru16(ins + 2)) != 0) == (ins[1] != 0);
+            break;
+        // scd_op_53 (0x80053bd8): fade number, kind (2 darkens, 1 brightens),
+        // colours, s16 step a frame of 0x8000: > 0 from nothing up, < 0 from
+        // full down. scd_op_74 (0x80053cb8): number, s16 level.
+        case OP_SCE_FADE_SET:
+            game_fade_set(ins[1], ins[2], rd16(ins + 4));
+            break;
+        case OP_SCE_FADE_ADJUST:
+            game_fade_adjust(ins[1], rd16(ins + 2));
+            break;
+        case OP_WEAPON_CHG: { // scd_op_5a (0x800543e4): the weapon in hand, 0 = none
+            inventory_equipped = -1;
+            for (int i = 0; ins[1] && i < INV_SLOTS; i++)
+                if (inventory[i].item == ins[1]) {
+                    inventory_equipped = i;
+                    break;
+                }
+            break;
+        }
+        case OP_SCE_AMMO_CMP: { // scd_op_81 (0x80054208): the rounds in the weapon in hand, compare op, value
+            int rounds = inventory_equipped >= 0 ? inventory[inventory_equipped].count : 0;
+            cond = compare((int16_t)rounds, ins[1], ins[2]);
+            break;
+        }
+        case OP_SCE_ITEM_LOST2: // scd_op_88 (0x80054340): item, count taken off it; gone at 0
+            for (int i = 0; i < INV_SLOTS; i++)
+                if (inventory[i].item && inventory[i].item == ins[1]) {
+                    if (inventory[i].count > ins[2])
+                        inventory[i].count -= ins[2];
+                    else
+                        inventory_remove(ins[1]);
+                    break;
+                }
+            break;
+        case OP_PLC_HEAL: // scd_op_83 (0x80054e6c): full health, the poison gone
+            game_player_heal(0, 0x7FFF);
+            break;
+        case OP_POISON_CK: // scd_op_86 (0x80054fd8): poisoned?
+            cond = game_player_poisoned();
+            break;
+        case OP_POISON_CLR: // scd_op_87 (0x80054ff8)
+            game_player_cure();
             break;
 
         case OP_CUT_CHG: // scd_op_29: also stops the automatic cuts until cut_auto 1
@@ -709,6 +785,16 @@ static void run_thread(Thread *t)
                                // u16 parameter, s16 x y z, s16 vector[3], s16 dir
             if (!ins[4])
                 game_espr3d_on(ins);
+            break;
+        case OP_SCE_ESPR_ON2: // scd_op_64: as sce_espr_on, byte 1 its number
+            game_espr_on2(ins, 0);
+            break;
+        case OP_SCE_ESPR3D_ON2: // scd_op_75
+            if (!ins[4])
+                game_espr_on2(ins, 1);
+            break;
+        case OP_SCE_ESPR_KILL2: // scd_op_65: the number
+            game_espr_kill2(ins[1]);
             break;
         case OP_SCE_ESPR_KILL: // scd_op_4c: id, type, object
             game_espr_kill(ins[1], ins[2]);
@@ -819,10 +905,33 @@ static void run_thread(Thread *t)
             }
             break;
         case OP_DIR_SET:
-            if (t->work_type == 1)
+            if (t->work_type == 1) {
                 game_set_player_dir(rd16(ins + 4));
-            else
-                work_member_set(t, 0x0F, rd16(ins + 4));
+            } else { // members 0x0E-0x10 (the enemies keep only their facing)
+                for (int k = 0; k < 3; k++)
+                    work_member_set(t, 0x0E + k, rd16(ins + 2 + 2 * k));
+            }
+            break;
+        case OP_SCE_SHAKE_ON: // scd_op_5c: s8 x, s8 y - the picture's offset
+            game_shake((int8_t)ins[1], (int8_t)ins[2]);
+            break;
+        case OP_SUPER_SET: // pad, parent, part, s16 place x y z, s16 turn x y z
+            if (t->work_type == 4) {
+                int16_t pos[3], dir[3];
+                for (int k = 0; k < 3; k++) {
+                    pos[k] = rd16(ins + 4 + 2 * k);
+                    dir[k] = rd16(ins + 10 + 2 * k);
+                }
+                game_object_super(t->work_index, ins[2], ins[3], pos, dir);
+            }
+            break;
+        case OP_SUPER_RESET: // pad, s16 turn x y z
+            if (t->work_type == 4) {
+                int16_t dir[3];
+                for (int k = 0; k < 3; k++)
+                    dir[k] = rd16(ins + 2 + 2 * k);
+                game_object_super_reset(t->work_index, dir);
+            }
             break;
         default:
             break; // not implemented yet: skipped
