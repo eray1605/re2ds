@@ -89,7 +89,7 @@ static const uint8_t rbj_move_keys[4] = { 50, 15, 20, 20 };
 static uint8_t bg_ram[BG_BYTES] __attribute__((aligned(32)));
 
 typedef enum { ST_IDLE, ST_WALK, ST_RUN, ST_BACK, ST_TURN, ST_AIM, ST_FIRE, ST_RELOAD, ST_CLIMB, ST_JUMP, ST_FALL, ST_LAND,
-               ST_PICKUP,
+               ST_PICKUP, ST_PUSH,
                ST_HURT, ST_SCRIPT, ST_GRABBED, ST_DEAD } PlayerState; // script: plc.c; held / killed: enemy.c
 
 typedef struct {
@@ -119,10 +119,30 @@ static int obj_tex_used;              // bytes uploaded in this room
 static int objects_ready;             // the room's init scripts have run
 static struct {
     uint8_t placed, hidden;
-    uint8_t type;      // obj_model_set ins[2]
-    uint16_t flags;    // ins[10] | 1 (0x10: drawn in every camera)
+    uint8_t type;      // obj_model_set ins[2]: 2 = a crate that falls off ledges
+    uint16_t flags;    // ins[10] | 1 (obj[0]): OBJ_*; 0x10: drawn in every camera
+    uint16_t attr;     // ins[12] (obj+0x10)
     int16_t pos[3], dir[3];
+    int16_t box_ofs[3];     // its collision box: the middle from pos (x, y, z; ins[26], [28], [30])
+    uint16_t box_half[3];   // ... and half its size (x, y, z; ins[32], [34], [36])
+    uint8_t parent;    // what it hangs on (obj+0x80; obj_model_set ins[7], super_set): 0 the room,
+                       // 0x40 Leon, 0x80 | k a character (0 Leon, 1 the partner, 2 + slot an
+                       // enemy), 0xc0 | n room object n
+    uint8_t part;      // 0x80 | that character's part, else the whole of it
+    uint8_t aot;       // the AOT it is in (obj+0x0b, member 9)
+    uint8_t push;      // ticks Leon has walked against it (obj+0x144)
+    uint8_t fall;      // type 2: 0 rests, 1 starts, 2 tips over the edge, 3 / 4 the bounce (obj+4)
+    uint8_t fall_t;
+    int8_t fall_dx, fall_dz;
+    int16_t fall_speed, fall_accel, fall_turn, fall_angle, fall_y, fall_ground;
+    int16_t tilt[2];   // drawn turned about x / z by the fall (RE2 units)
 } objects[MAX_OBJECTS];
+// obj[0] of a room object (obj_model_set's be_flg | 1)
+#define OBJ_ON 0x0001
+#define OBJ_NO_BOX 0x0002       // nothing collides with it (FUN_80034a78)
+#define OBJ_NO_WALLS 0x0008     // the room's boxes do not stop it (FUN_80048e00)
+#define OBJ_PUSHABLE 0x0080     // Leon pushes it (FUN_80033b10)
+#define OBJ_CLIMBABLE 0x0100    // he climbs onto it (FUN_80035a2c)
 static Model rbj_enemy[MAX_ENEMIES];  // the room's animations per enemy slot (Kendo in 101)
 static Masks masks;
 static int have_masks;
@@ -187,12 +207,18 @@ static struct {
     uint8_t hurt_angled;      // ... or away from a damage area (SCE_DAMAGE), at hurt_angle
     int16_t hurt_angle;
     int16_t water;            // the surface of the water he stands in (SCE_WATER), 0 none
+    int32_t prev_x, prev_z;   // where he stood a tick ago (obj+0x4a / 0x4e: the side he meets an object from)
+    uint8_t poison;           // poisoned (0x800c7a0c) ...
+    uint8_t poison_tick;      // ... ticks to the next HP lost (0x800c7a0e)
+    int8_t on_object;         // the crate he stands on (0x800c79d8), -1 none
+    uint8_t push_step;        // ST_PUSH (pl_move_0a): obj+6
+    uint8_t pushing;          // an object gave way this tick (0x800c77d4 & 0x2000)
     Plc plc;                  // the room script moves him (ST_SCRIPT)
 } player;
 #define PLAYER_HP 200
 
-// Fine / Caution / Danger as the PS1 works it out (hp < 101, hp < 21)
-static int health_level(void) { return player.hp < 21 ? 2 : player.hp < 101 ? 1 : 0; }
+// Fine / Caution / Danger as the PS1 works it out (hp < 101 or poisoned, hp < 21: 0x8003979c)
+static int health_level(void) { return player.hp < 21 ? 2 : player.hp < 101 || player.poison ? 1 : 0; }
 
 static void *voice_bank;            // Leon's voice (CORE00, PS1 bank 4)
 static void *enemy_bank;            // the room's enemy sounds (ENEMSE set, bank 3)
@@ -233,6 +259,7 @@ static void render_frame(void);
 static int floor_sound(void);
 static void check_camera_switch(void);
 static void move_forward(int32_t dist);
+static int object_blocks(int32_t from_x, int32_t from_z, int32_t x, int32_t z, int32_t y);
 static void update_height(void);
 
 // ---------------------------------------------------------------- loading
@@ -458,12 +485,20 @@ void game_object_set(const uint8_t *ins)
     int n = ins[1];
     if (n >= MAX_OBJECTS)
         return; // 255: no model
+    int hidden = objects[n].hidden; // an item taken before (item_aot_set comes first in some rooms)
+    memset(&objects[n], 0, sizeof(objects[n]));
+    objects[n].hidden = hidden;
     objects[n].placed = 1;
     objects[n].type = ins[2];
-    objects[n].flags = (ins[10] | ins[11] << 8) | 1;
+    objects[n].flags = (ins[10] | ins[11] << 8) | OBJ_ON;
+    objects[n].attr = ins[12] | ins[13] << 8;
+    objects[n].parent = ins[7]; // 0x800516fc: the room, Leon, a character or an object
+    objects[n].aot = 0xFF;
     for (int k = 0; k < 3; k++) {
         objects[n].pos[k] = (int16_t)(ins[14 + 2 * k] | ins[15 + 2 * k] << 8);
         objects[n].dir[k] = (int16_t)(ins[20 + 2 * k] | ins[21 + 2 * k] << 8);
+        objects[n].box_ofs[k] = (int16_t)(ins[26 + 2 * k] | ins[27 + 2 * k] << 8);
+        objects[n].box_half[k] = ins[32 + 2 * k] | ins[33 + 2 * k] << 8;
     }
     upload_objects(); // placed later by an event
 }
@@ -471,6 +506,8 @@ void game_object_set(const uint8_t *ins)
 void game_espr_on(const uint8_t *ins) { roomfx_on(ins); }
 void game_espr3d_on(const uint8_t *ins) { roomfx_3d_on(ins); }
 void game_espr_kill(int id, int type) { roomfx_kill(id, type); }
+void game_espr_on2(const uint8_t *ins, int is_3d) { roomfx_on2(ins, is_3d); }
+void game_espr_kill2(int handle) { roomfx_kill2(handle); }
 
 void game_floor_sound_set(int n, int on)
 {
@@ -486,14 +523,42 @@ void game_object_hide(int model)
         objects[model].hidden = 1;
 }
 
+// The members of a room object (work_set 4; table 0x80010f00 of offsets into
+// the PS1 object): 0 its flags (OBJ_*: room 10C takes OBJ_PUSHABLE off a
+// statue that stands in its place), 6 the type, 9 the AOT it is in, 0x0a the
+// attribute, 0x0b-0x0d the position, 0x0e-0x10 the rotation, 0x11 the floor,
+// 0x1b the push counter, 0x20-0x25 the collision box (offset x, y, z, half
+// size x, y, z).
+static int object_floor(int n)
+{
+    int f = objects[n].pos[1] / FLOOR_HEIGHT; // obj+0x106 = y / -1800 (FUN_80033b10)
+    return f < 0 ? 0 : f > 31 ? 31 : f;
+}
+
 int game_object_member(int n, int member, int *value)
 {
     if (n >= MAX_OBJECTS)
         return 0;
-    if (member >= 0x0B && member <= 0x0D)
+    if (member == 0x00)
+        *value = objects[n].flags;
+    else if (member == 0x06)
+        *value = objects[n].type;
+    else if (member == 0x09)
+        *value = objects[n].aot;
+    else if (member == 0x0A)
+        *value = objects[n].attr;
+    else if (member >= 0x0B && member <= 0x0D)
         *value = objects[n].pos[member - 0x0B];
-    else if (member == 0x0F)
-        *value = objects[n].dir[1];
+    else if (member >= 0x0E && member <= 0x10)
+        *value = objects[n].dir[member - 0x0E];
+    else if (member == 0x11)
+        *value = object_floor(n);
+    else if (member == 0x1B)
+        *value = objects[n].push;
+    else if (member >= 0x20 && member <= 0x22)
+        *value = objects[n].box_ofs[member - 0x20];
+    else if (member >= 0x23 && member <= 0x25)
+        *value = objects[n].box_half[member - 0x23];
     else
         return 0;
     return 1;
@@ -503,10 +568,24 @@ void game_object_member_set(int n, int member, int value)
 {
     if (n >= MAX_OBJECTS)
         return;
-    if (member >= 0x0B && member <= 0x0D)
+    if (member == 0x00)
+        objects[n].flags = (uint16_t)value;
+    else if (member == 0x06)
+        objects[n].type = (uint8_t)value;
+    else if (member == 0x09)
+        objects[n].aot = (uint8_t)value;
+    else if (member == 0x0A)
+        objects[n].attr = (uint16_t)value;
+    else if (member >= 0x0B && member <= 0x0D)
         objects[n].pos[member - 0x0B] = (int16_t)value;
-    else if (member == 0x0F)
-        objects[n].dir[1] = (int16_t)value;
+    else if (member >= 0x0E && member <= 0x10)
+        objects[n].dir[member - 0x0E] = (int16_t)value;
+    else if (member == 0x1B)
+        objects[n].push = (uint8_t)value;
+    else if (member >= 0x20 && member <= 0x22)
+        objects[n].box_ofs[member - 0x20] = (int16_t)value;
+    else if (member >= 0x23 && member <= 0x25)
+        objects[n].box_half[member - 0x23] = (uint16_t)value;
 }
 
 // FUN_8002bc00: (x, z) inside a camera's view area (the first switch zone
@@ -527,6 +606,64 @@ static int in_view_area(int cam, int x, int z)
     return 1; // no zone for this camera
 }
 
+// its own place and turn
+static void object_local_matrix(int n)
+{
+    // a crate (type 2) has its middle 900 above its place (0x8003400c)
+    glTranslatef32(objects[n].pos[0], objects[n].pos[1] - (objects[n].type == 2 ? 900 : 0), objects[n].pos[2]);
+    if (objects[n].tilt[0])
+        glRotateXi(objects[n].tilt[0] * 8); // tipped over an edge (objects_tick)
+    if (objects[n].tilt[1])
+        glRotateZi(objects[n].tilt[1] * 8);
+    glRotateXi(objects[n].dir[0] * 8);
+    glRotateYi(objects[n].dir[1] * 8);
+    glRotateZi(objects[n].dir[2] * 8);
+}
+
+static int object_on_part(int n)
+{
+    int kind = objects[n].parent & 0xC0;
+    return (kind == 0x40 || kind == 0x80) && (objects[n].part & 0x80);
+}
+
+// A character's place and facing (k: 0 Leon, 1 the partner, 2 + slot an enemy)
+static int character_place(int k, int32_t pos[3], int *dir)
+{
+    if (k == 0) {
+        pos[0] = player.x;
+        pos[1] = player.y;
+        pos[2] = player.z;
+        *dir = player.dir;
+        return 1;
+    }
+    int slot = k == 1 ? PARTNER_SLOT : k - 2, v[4];
+    if (!game_enemy_member(slot, 0, &v[0]) || !v[0])
+        return 0; // nobody there
+    for (int j = 0; j < 4; j++)
+        if (!game_enemy_member(slot, j == 3 ? 0x0F : 0x0B + j, &v[j]))
+            return 0;
+    pos[0] = v[0];
+    pos[1] = v[1];
+    pos[2] = v[2];
+    *dir = (v[3] * 8) & 32767;
+    return 1;
+}
+
+// The matrix of object n under what it hangs on (not a part: draw_attached)
+static void object_matrix(int n, int depth)
+{
+    int kind = objects[n].parent & 0xC0, k = objects[n].parent & 0x3F;
+    int32_t pos[3];
+    int dir;
+    if (kind == 0xC0 && k < MAX_OBJECTS && k != n && depth < 4 && objects[k].placed) {
+        object_matrix(k, depth + 1);
+    } else if ((kind == 0x40 || kind == 0x80) && character_place(kind == 0x40 ? 0 : k, pos, &dir)) {
+        glTranslatef32(pos[0], pos[1], pos[2]);
+        glRotateYi(dir);
+    }
+    object_local_matrix(n);
+}
+
 static void draw_objects(void)
 {
     if (!obj_data)
@@ -535,19 +672,46 @@ static void draw_objects(void)
         const uint8_t *m = object_entry(n);
         uint32_t list = rd32(m + 4);
         int tex = m[0] | m[1] << 8;
-        if (!objects[n].placed || objects[n].hidden || !list || tex >= obj_tex_count || obj_tex_state[tex] != 1)
+        if (!objects[n].placed || objects[n].hidden || !(objects[n].flags & OBJ_ON) || !list ||
+            tex >= obj_tex_count || obj_tex_state[tex] != 1)
             continue;
         // the PS1 (FUN_80033f70) draws a room object only while it stands in
         // the view area of the shown camera, unless flag 0x10 is set: things
         // behind a wall in another part of the room stay hidden
-        if (objects[n].type != 1 && !(objects[n].flags & 0x10) &&
+        if (objects[n].type != 1 && !(objects[n].flags & 0x10) && !objects[n].parent &&
             !in_view_area(cur_cam, objects[n].pos[0], objects[n].pos[2]))
             continue;
+        if (object_on_part(n))
+            continue; // drawn with that part (draw_attached)
         glPushMatrix();
-        glTranslatef32(objects[n].pos[0], objects[n].pos[1], objects[n].pos[2]);
-        glRotateXi(objects[n].dir[0] * 8);
-        glRotateYi(objects[n].dir[1] * 8);
-        glRotateZi(objects[n].dir[2] * 8);
+        object_matrix(n, 0);
+        glBindTexture(0, obj_tex[tex]);
+        glCallList((const u32 *)(obj_data + list));
+        glPopMatrix(1);
+    }
+}
+
+// The objects a character's part carries (super_set with a part: what
+// someone holds in a scene), drawn while that part's matrix is set.
+// who: 0 Leon, 1 the partner, 2 + slot an enemy.
+void game_draw_attached(int who, int bone)
+{
+    if (!obj_data)
+        return;
+    for (int n = 0; n < obj_count; n++) {
+        if (!objects[n].placed || objects[n].hidden || !(objects[n].flags & OBJ_ON) || !object_on_part(n) ||
+            (objects[n].part & 0x7F) != bone)
+            continue;
+        int k = (objects[n].parent & 0xC0) == 0x40 ? 0 : objects[n].parent & 0x3F;
+        if (k != who)
+            continue;
+        const uint8_t *m = object_entry(n);
+        uint32_t list = rd32(m + 4);
+        int tex = m[0] | m[1] << 8;
+        if (!list || tex >= obj_tex_count || obj_tex_state[tex] != 1)
+            continue;
+        glPushMatrix();
+        object_local_matrix(n);
         glBindTexture(0, obj_tex[tex]);
         glCallList((const u32 *)(obj_data + list));
         glPopMatrix(1);
@@ -653,11 +817,26 @@ static void build_hierarchy(void)
 // 320x240 screen at distance `screen`, same vertical field of view on 256x192.
 // gluLookAtf32 in float: the fixed-point version breaks down for cameras that
 // look almost straight down (room 102, camera 4).
+// sce_shake_on (scd_op_5c, 0x80053e44): the picture moved by (x, y) PS1
+// pixels - the room scripts give a new offset every frame while something
+// shakes (the train, the lift) and 0 0 at the end. The background layer is
+// scrolled and the 3D layer moved the same way after its projection.
+static int shake_x, shake_y;        // DS pixels
+void game_shake(int x, int y)
+{
+    shake_x = x * 4 / 5;
+    shake_y = y * 4 / 5;
+    REG_BG3X = -shake_x << 8;       // the bitmap layer's reference point, 24.8
+    REG_BG3Y = -shake_y << 8;
+}
+
 void setup_camera(const int32_t from[3], const int32_t to[3], int screen)
 {
     float fovy = 2.0f * atanf(120.0f / (float)screen) * 180.0f / 3.14159265f;
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
+    if (shake_x || shake_y)         // 2 / 256 and 2 / 192 of the screen per pixel
+        glTranslatef32(shake_x * 32, -shake_y * 128 / 3, 0);
     gluPerspective(fovy, 256.0f / 192.0f, 0.05f, 16.0f);
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
@@ -857,6 +1036,7 @@ static void draw_bone(int bone)
             glCallList((const u32 *)((const uint8_t *)leon.data + off));
         }
     }
+    game_draw_attached(0, bone);
     for (int c = first_child[bone]; c >= 0; c = next_sibling[c])
         draw_bone(c);
     glPopMatrix(1);
@@ -1545,6 +1725,9 @@ static void place_player(int32_t x, int32_t y, int32_t z, int16_t dir, int cam)
     player.z = z;
     player.dir = dir;
     player.slope = -1;
+    player.on_object = -1;
+    player.prev_x = x;
+    player.prev_z = z;
     player.anim = -1;
     set_anim(ANIM_IDLE);
     pose_anim = -1;
@@ -2363,6 +2546,74 @@ void game_bgmtbl_set(int stage, int room, int main, int sub)
     music_table_set(stage, room, main, sub);
 }
 
+// The room scripts' fades (sce_fade_set, 0x80053bd8: three of them, a level
+// of 0..0x7fff that moves by the step every frame; table 0x800d76cc). Kind
+// 2 takes the colours away (to black, what nearly all rooms use), 1 adds
+// them (to white). The DS has one master brightness: the deepest fade shows.
+static struct {
+    int16_t level, step;
+    uint8_t kind;
+} script_fades[3];
+static uint8_t script_fade_shown;
+
+void game_fade_set(int n, int kind, int step)
+{
+    if (n < 0 || n >= 3)
+        return;
+    script_fades[n].kind = kind;
+    script_fades[n].step = step;
+    if (step > 0)
+        script_fades[n].level = 0;
+    else if (step < 0)
+        script_fades[n].level = (int16_t)(step + 0x8000);
+}
+
+void game_fade_adjust(int n, int level)
+{
+    if (n < 0 || n >= 3)
+        return;
+    script_fades[n].level = level < 0 ? 0 : level;
+    script_fades[n].step = 0;
+}
+
+static void script_fade_tick(void)
+{
+    int most = 0, kind = 2;
+    for (int n = 0; n < 3; n++) {
+        int level = script_fades[n].level + script_fades[n].step;
+        if (level >= 0x7FFF) {
+            level = 0x7FFF;
+            script_fades[n].step = 0;
+        } else if (level <= 0) {
+            level = 0;
+            script_fades[n].step = 0;
+        }
+        script_fades[n].level = level;
+        if (level > most) {
+            most = level;
+            kind = script_fades[n].kind;
+        }
+    }
+    if (die.step != DIE_OFF)
+        return; // the death sequence fades by itself
+    if (most || script_fade_shown) {
+        int b = (most * 16 + 0x3FFF) / 0x7FFF;
+        setBrightness(1, kind == 1 ? b : -b);
+        script_fade_shown = most != 0;
+    }
+}
+
+// The pad as the PS1's action bits (0x800c5f4c held, 0x800c5f50 new) for
+// sce_key_ck / sce_trg_ck
+static uint32_t script_pressed;       // keys pressed since the last game tick
+int game_keys(int pressed)
+{
+    uint32_t k = pressed ? script_pressed : keysHeld();
+    return ((k & KEY_UP) ? 0x11 : 0) | ((k & KEY_RIGHT) ? 0x02 : 0) | ((k & KEY_DOWN) ? 0x24 : 0) |
+           ((k & KEY_LEFT) ? 0x08 : 0) | ((k & KEY_A) ? 0x10C0 : 0) | ((k & KEY_R) ? 0x100 : 0) |
+           ((k & KEY_B) ? 0x2200 : 0);
+}
+
 // status screen sounds (menu.c): CORE00, as the PS1's bank 4
 // USE on the status screen (menu.c): a herb or the spray (counted for the rank)
 void game_player_heal(int item, int amount)
@@ -2370,6 +2621,36 @@ void game_player_heal(int item, int amount)
     player.hp = player.hp + amount > PLAYER_HP ? PLAYER_HP : player.hp + amount;
     if (item == 0x23)
         sprays_used++;
+    // the blue herb and its mixes (0x800117f0), plc_heal (item 0)
+    if (item == 0 || item == 0x28 || item == 0x2B || item == 0x2D || item == 0x2E)
+        player.poison = 0;
+}
+
+// Poison: an effect with bit 8 of its byte 30 that hits Leon (the spiders'
+// spit, 0x8001fae8) sets 0x800c7a0c = 5400 and the counter 0x800c7a0e = 30.
+// While it is set his routine (0x80039294) counts down every frame and at 0
+// takes 1 HP - never the last - and starts again at 30; he walks as in
+// Caution and the status screen says Poison (0x80064a28). Nothing ends it
+// but a blue herb, plc_heal or poison_clr.
+void game_player_poison(void)
+{
+    if (!player.poison)
+        player.poison_tick = 30;
+    player.poison = 1;
+}
+
+int game_player_poisoned(void) { return player.poison; }
+void game_player_cure(void) { player.poison = 0; }
+
+static void poison_tick(void)
+{
+    if (!player.poison || player.state == ST_DEAD)
+        return;
+    if (player.poison_tick--)
+        return;
+    player.poison_tick = 30;
+    if (player.hp >= 2)
+        player.hp--;
 }
 
 // System flag 0:0x0a: the last room faded out (700 after R700L, 703): the
@@ -2540,7 +2821,7 @@ int game_blocked(int32_t from_x, int32_t from_z, int32_t x, int32_t z, int32_t y
     player.y = y; // player_floor() reads it
     int b = blocked_for(BOX_ENEMY, 1u << player_floor(), from_x, from_z, x, z);
     player.y = saved;
-    return b;
+    return b || object_blocks(from_x, from_z, x, z, y);
 }
 
 // the room's collision boxes (enemy.c: the lickers crawl along their sides)
@@ -2693,6 +2974,8 @@ static void enter_room(int stage, int id, int arrival_cam)
     music_room(stage, id);
     script_camera_changed(-1, arrival_cam);
     script_stage = stage - 1;
+    memset(script_fades, 0, sizeof(script_fades)); // a fade does not outlast its room
+    game_shake(0, 0);
     script_room_enter(&room);
 
     pick_enemy_bank();
@@ -3211,6 +3494,7 @@ static void use_typewriter(void)
     s->play_frames = play_frames();
     s->sprays = sprays_used;
     s->hp = player.hp;
+    s->poison = player.poison;
     s->x = player.x;
     s->y = player.y;
     s->z = player.z;
@@ -3272,6 +3556,8 @@ static void load_game(int n)
     last_slot = n;
     player.state = ST_IDLE;
     player.hp = s->hp;
+    player.poison = s->poison;
+    player.poison_tick = 30;
     player.saved_once = s->saved_once;
     player.aim_target = -1;
     enter_room(s->stage, s->room, -1);
@@ -3675,8 +3961,8 @@ static void trigger(Aot *a)
             game_show_message(m);
         break;
     }
-    case SCE_EVENT:
-        if (a->data[2] == 0x18) // gosub
+    case SCE_EVENT: // 0x8004e128: not while flag 2:6 is set
+        if (a->data[2] == 0x18 && !flag_get(2, 6)) // gosub
             script_start_event(a->data[3]);
         break;
     case SCE_SAVE:
@@ -3793,6 +4079,496 @@ static void move_forward(int32_t dist)
         !enemy_blocks_player(player.x, player.z, player.x, player.z + dz))
         player.z += dz;
     update_height();
+}
+
+
+// ---------------------------------------------------------------- room objects: collision, pushing
+// obj_model_set gives a room object a box (FUN_800349b0: its middle = the
+// position + the offset, x and z swapped when it is turned a quarter, obj+0x76
+// & 0x400). Every frame FUN_80033b10 (not with flag 2:4):
+//   - pushes the enemies out of the boxes (here: game_blocked stops them),
+//   - counts the objects Leon's box overlaps on his floor (FUN_80034a78 mode
+//     2) and, with exactly one that he faces square on (FUN_80034fd0) and
+//     that is OBJ_PUSHABLE, the ticks he walks against it (obj+0x144; only in
+//     states 1 and 10). From the 6th on the object is put before him (mode
+//     1): if it then touches a room box with flag 0x4000 on its floor
+//     (FUN_80048e00), an enemy or another object (FUN_80034dd8) it goes back
+//     and the count starts again; else 0x800c77d4 |= 0x2000, which takes
+//     Leon from walking into state 10,
+//   - a crate (type 2) that reaches a ledge - a box of shape 10 with flag
+//     0x4000 - tips over it away from Leon and drops a floor (FUN_80034290),
+//   - pushes Leon out of every box (mode 0), by the side he came from.
+// Leon's own box: 450 to each side (obj+0x9a), 1800 high.
+// State 10 (pl_move_0a 0x8003bf54): he turns to the nearest quarter, leans
+// on with PLD move 7, then walks move 8 while up is held and the object
+// gives way (room sound 4 on its key 1), and lets go with move 7 backwards
+// (room sound 0).
+#define CHAR_HALF 450
+#define CHAR_HEIGHT 900
+#define BOX_OBJECT 0x4000       // RoomBox.flag: stops the room objects
+#define PLD_PUSH_START 7
+#define PLD_PUSH 8
+#define SND_PUSH 4
+#define SND_PUSH_END 0
+
+typedef struct {
+    int32_t cx, cy, cz, hx, hy, hz;
+} ObjBox;
+
+static int object_box(int n, ObjBox *b)
+{
+    if (n < 0 || n >= MAX_OBJECTS || !objects[n].placed || !(objects[n].flags & OBJ_ON) ||
+        (objects[n].flags & OBJ_NO_BOX))
+        return 0;
+    int turned = (objects[n].dir[1] & 0x400) != 0;
+    b->hx = objects[n].box_half[turned ? 2 : 0];
+    b->hz = objects[n].box_half[turned ? 0 : 2];
+    b->hy = objects[n].box_half[1];
+    b->cx = objects[n].pos[0] + objects[n].box_ofs[turned ? 2 : 0];
+    b->cy = objects[n].pos[1] + objects[n].box_ofs[1];
+    b->cz = objects[n].pos[2] + objects[n].box_ofs[turned ? 0 : 2];
+    return 1;
+}
+
+static int32_t iabs32(int32_t v) { return v < 0 ? -v : v; }
+
+// a character's box at (x, y, z) against the object's (FUN_80034a78)
+static int object_touches(const ObjBox *b, int32_t x, int32_t y, int32_t z, int32_t half)
+{
+    int32_t dy = b->cy - (y - CHAR_HEIGHT), ty = CHAR_HEIGHT + b->hy;
+    return iabs32(b->cx - x) <= half + b->hx && iabs32(b->cz - z) <= half + b->hz && dy >= -ty && dy < ty;
+}
+
+// Stops a step of an enemy or of Leon's partner into an object (the PS1
+// pushes them out again): only deeper in counts, as with the room's boxes.
+static int object_blocks(int32_t from_x, int32_t from_z, int32_t x, int32_t z, int32_t y)
+{
+    ObjBox b;
+    for (int n = 0; n < MAX_OBJECTS; n++) {
+        if (!object_box(n, &b) || !object_touches(&b, x, y, z, PLAYER_RADIUS))
+            continue;
+        if (!object_touches(&b, from_x, y, from_z, PLAYER_RADIUS))
+            return 1;
+        int32_t before = iabs32(b.cx - from_x) > iabs32(b.cz - from_z) ? iabs32(b.cx - from_x) : iabs32(b.cz - from_z);
+        int32_t now = iabs32(b.cx - x) > iabs32(b.cz - z) ? iabs32(b.cx - x) : iabs32(b.cz - z);
+        if (now < before)
+            return 1;
+    }
+    return 0;
+}
+
+// FUN_80034fd0: Leon stands at one of its sides and the point 1.2 times his
+// half width + 128 before him lies in the object
+static int object_faced(int n, const ObjBox *b, int reach, int own)
+{
+    int32_t fx = player.x + ((reach * cosLerp(player.dir)) >> 12);
+    int32_t fz = player.z - ((reach * sinLerp(player.dir)) >> 12);
+    int32_t ax = b->hx - 128, az = b->hz - 128;
+    int32_t dx = objects[n].pos[0] - player.x, dz = objects[n].pos[2] - player.z;
+    if (iabs32(dx) > ax && iabs32(dz) > az)
+        return 0;
+    int32_t px, pz;
+    if (iabs32(dz) < iabs32(dx)) { // at its x side
+        px = fx - b->cx;
+        pz = player.z - b->cz;
+        az += own;
+    } else {
+        px = player.x - b->cx;
+        pz = fz - b->cz;
+        ax += own;
+    }
+    return iabs32(px) <= ax && iabs32(pz) <= az;
+}
+
+// FUN_80034a78 mode 0: Leon out of the box, to the side he came from
+static void object_push_player(const ObjBox *b)
+{
+    if (!object_touches(b, player.x, player.y, player.z, CHAR_HALF))
+        return;
+    int32_t tx = CHAR_HALF + b->hx + 1, tz = CHAR_HALF + b->hz + 1;
+    if (iabs32(b->cx - player.prev_x) >= tx)
+        player.x = player.x - player.prev_x >= 0 ? b->cx - tx : b->cx + tx;
+    else if (iabs32(b->cz - player.prev_z) >= tz)
+        player.z = player.z - player.prev_z >= 0 ? b->cz - tz : b->cz + tz;
+    else if ((int64_t)iabs32(b->cz - player.z) * tx < (int64_t)iabs32(b->cx - player.x) * tz)
+        player.x = b->cx - player.x < 0 ? b->cx + tx : b->cx - tx;
+    else
+        player.z = b->cz - player.z < 0 ? b->cz + tz : b->cz - tz;
+}
+
+// mode 1: the object out of Leon's box, before him
+static void object_push_away(int n, const ObjBox *b)
+{
+    int32_t tx = CHAR_HALF + b->hx + 1, tz = CHAR_HALF + b->hz + 1;
+    int32_t cx = b->cx, cz = b->cz;
+    if (iabs32(b->cx - player.prev_x) >= tx)
+        cx = player.x - player.prev_x >= 0 ? player.x + tx : player.x - tx;
+    else if (iabs32(b->cz - player.prev_z) >= tz)
+        cz = player.z - player.prev_z >= 0 ? player.z + tz : player.z - tz;
+    else if ((int64_t)iabs32(b->cz - player.z) * tx < (int64_t)iabs32(b->cx - player.x) * tz)
+        cx = b->cx - player.x >= 0 ? player.x + tx : player.x - tx;
+    else
+        cz = b->cz - player.z >= 0 ? player.z + tz : player.z - tz;
+    objects[n].pos[0] += cx - b->cx;
+    objects[n].pos[2] += cz - b->cz;
+}
+
+// FUN_80048e00: the room's boxes for objects (flag 0x4000) on its floor that
+// its box overlaps: 1 = a wall, 4 = a ledge (shape 10)
+static int object_room_hits(int n, const ObjBox *b, int skip)
+{
+    if (objects[n].flags & OBJ_NO_WALLS)
+        return 0;
+    uint32_t floor_bit = 1u << object_floor(n);
+    int hits = 0;
+    for (int i = 0; i < room.header->num_boxes; i++) {
+        const RoomBox *r = &room.boxes[i];
+        if (!(r->flag & BOX_OBJECT) || (r->flag & skip) || !(r->floors & floor_bit))
+            continue;
+        if ((uint32_t)(b->cx + b->hx - r->x) >= (uint32_t)(r->w + 2 * b->hx) ||
+            (uint32_t)(b->cz + b->hz - r->z) >= (uint32_t)(r->d + 2 * b->hz))
+            continue;
+        hits |= (r->flag & 15) == SHAPE_JUMP_DOWN ? 4 : 1;
+    }
+    return hits;
+}
+
+// FUN_80034dd8: another object's box in the way
+static int object_hits_object(int n, const ObjBox *b)
+{
+    ObjBox o;
+    for (int k = 0; k < MAX_OBJECTS; k++) {
+        if (k == n || !object_box(k, &o))
+            continue;
+        int32_t dy = b->cy - o.cy, ty = b->hy + o.hy;
+        if (iabs32(b->cx - o.cx) <= b->hx + o.hx && iabs32(b->cz - o.cz) <= b->hz + o.hz && dy > -ty && dy < ty)
+            return 1;
+    }
+    return 0;
+}
+
+// FUN_80034290: a crate tips over a ledge and drops to the floor below. It
+// slides on at 13, 26, ... a tick, turning a quarter with its turn growing
+// by 8, sinks a third of its speed for 12 ticks and then falls (160 more a
+// tick); landed it bounces once (30 up and down).
+static void object_fall_tick(int n)
+{
+    int dx = objects[n].fall_dx, dz = objects[n].fall_dz;
+    switch (objects[n].fall) {
+    case 1:
+        objects[n].fall_speed = 13;
+        objects[n].fall_accel = 13;
+        objects[n].fall_turn = 0;
+        objects[n].fall_angle = 0;
+        objects[n].fall_y = 0;
+        objects[n].fall_t = 0;
+        objects[n].fall_ground = objects[n].pos[1] + LEVEL_HEIGHT;
+        objects[n].fall = 2;
+        // fall through
+    case 2: {
+        objects[n].pos[0] += objects[n].fall_speed * dx;
+        objects[n].pos[2] += objects[n].fall_speed * dz;
+        if (objects[n].fall_angle < 1024) {
+            int turn = objects[n].fall_turn;
+            objects[n].fall_angle += turn;
+            if (objects[n].fall_angle > 1024)
+                turn += 1024 - objects[n].fall_angle;
+            objects[n].tilt[0] -= turn * dz; // about x for a fall along z, about z along x
+            objects[n].tilt[1] += turn * dx;
+        }
+        objects[n].fall_turn += 8;
+        objects[n].fall_speed += objects[n].fall_accel;
+        if (++objects[n].fall_t < 13) {
+            objects[n].pos[1] += objects[n].fall_speed / 3;
+            break;
+        }
+        objects[n].fall_accel = 0;
+        objects[n].pos[1] += objects[n].fall_y;
+        objects[n].fall_y += 160;
+        if (objects[n].pos[1] > objects[n].fall_ground) {
+            objects[n].pos[1] = objects[n].fall_ground;
+            objects[n].fall = 3;
+            sound_play(room_bank, floor_sound() + 1, 110, 64);
+        }
+        break;
+    }
+    case 3:
+    case 4: {
+        int up = objects[n].fall == 3;
+        objects[n].pos[1] += up ? -30 : 30;
+        objects[n].pos[0] += 20 * dx;
+        objects[n].pos[2] += 20 * dz;
+        objects[n].fall = up ? 4 : 0;
+        break;
+    }
+    }
+}
+
+// The AOTs a room object stands in (FUN_8004eddc runs the AOT loop for every
+// object with SAT bit 2): its number goes to the object (member 9) and to
+// variable 1, and an event starts - room 10C's statues on their plates.
+#define AOT_SAT_OBJECT 0x04
+static void objects_aots(void)
+{
+    for (int n = 0; n < MAX_OBJECTS; n++) {
+        if (!objects[n].placed || !(objects[n].flags & OBJ_ON))
+            continue;
+        int floor = object_floor(n);
+        for (int i = 0; i < NUM_AOTS; i++) {
+            Aot *a = &aots[i];
+            if (!a->active || !a->type || !(a->sat & AOT_SAT_OBJECT) || (a->sat & AOT_SAT_MANUAL) ||
+                (a->floor != 255 && a->floor != floor))
+                continue;
+            if (!(a->sat & AOT_SAT_HERE) || !point_in_quad(objects[n].pos[0], objects[n].pos[2], a->x, a->z))
+                continue;
+            script_set_var(VAR_AOT_HERE, i);
+            objects[n].aot = i;
+            if (a->type == SCE_EVENT || a->type == SCE_FLAG_CHG)
+                trigger(a);
+            break; // the PS1 leaves the loop after the first handler
+        }
+    }
+}
+
+static void objects_tick(void)
+{
+    player.pushing = 0;
+    if (flag_get(2, 4))
+        return;
+    ObjBox b;
+    int touched = 0, faced = -1;
+    int pfloor = player_floor();
+    for (int n = 0; n < MAX_OBJECTS; n++) {
+        if (objects[n].type == 2 && objects[n].fall)
+            object_fall_tick(n);
+        if (!object_box(n, &b))
+            continue;
+        if (player.state != ST_WALK && player.state != ST_PUSH)
+            objects[n].push = 0;
+        if (n != player.on_object && object_touches(&b, player.x, player.y, player.z, CHAR_HALF)) {
+            touched++;
+            if (pfloor == object_floor(n) && object_faced(n, &b, CHAR_HALF * 120 / 100 + 128, CHAR_HALF))
+                faced = n;
+        }
+        // a crate at a ledge
+        if (objects[n].type == 2 && !objects[n].fall && (object_room_hits(n, &b, 0x100) & 4)) {
+            int32_t dx = objects[n].pos[0] - player.x, dz = objects[n].pos[2] - player.z;
+            objects[n].fall_dx = iabs32(dx) < 900 ? 0 : dx < 0 ? -1 : 1; // FUN_800347dc: away from Leon
+            objects[n].fall_dz = iabs32(dx) < 900 ? (dz < 0 ? -1 : 1) : 0;
+            objects[n].fall = 1;
+        }
+    }
+    if (touched == 1 && faced >= 0 && (objects[faced].flags & OBJ_PUSHABLE) && !objects[faced].fall &&
+        object_box(faced, &b)) {
+        int n = faced;
+        int16_t x0 = objects[n].pos[0], z0 = objects[n].pos[2];
+        if (++objects[n].push >= 6) {
+            object_push_away(n, &b);
+            ObjBox moved;
+            object_box(n, &moved);
+            if ((object_room_hits(n, &moved, 0) & 1) || object_hits_object(n, &moved) ||
+                enemy_in_box(moved.cx, moved.cy, moved.cz, moved.hx, moved.hy, moved.hz)) {
+                objects[n].push = 0;
+                objects[n].pos[0] = x0;
+                objects[n].pos[2] = z0;
+            } else {
+                player.pushing = 1;
+                if (objects[n].push == 6) { // the first time it only tells: he leans on first
+                    objects[n].pos[0] = x0;
+                    objects[n].pos[2] = z0;
+                } else {
+                    objects[n].push = 7;
+                }
+            }
+        }
+    }
+    for (int n = 0; n < MAX_OBJECTS; n++)
+        if (n != player.on_object && object_box(n, &b))
+            object_push_player(&b);
+    // on a crate: its top carries him; he cannot walk off it (FUN_80035ae0)
+    if (player.on_object >= 0) {
+        if (!object_box(player.on_object, &b) || player.state >= ST_HURT) {
+            player.on_object = -1;
+        } else if (player.state < ST_CLIMB) {
+            int32_t lx = b.hx - CHAR_HALF / 2, lz = b.hz - CHAR_HALF / 2;
+            // onto another crate of the same height standing against it
+            ObjBox o;
+            for (int k = 0; k < MAX_OBJECTS; k++) {
+                if (k == player.on_object || !(objects[k].flags & OBJ_CLIMBABLE) || !object_box(k, &o) ||
+                    o.cy - o.hy != b.cy - b.hy)
+                    continue;
+                if (iabs32(player.x - o.cx) <= o.hx - CHAR_HALF / 2 && iabs32(player.z - o.cz) <= o.hz - CHAR_HALF / 2 &&
+                    iabs32(o.cx - b.cx) <= o.hx + b.hx + CHAR_HALF && iabs32(o.cz - b.cz) <= o.hz + b.hz + CHAR_HALF) {
+                    player.on_object = k;
+                    b = o;
+                    lx = b.hx - CHAR_HALF / 2;
+                    lz = b.hz - CHAR_HALF / 2;
+                    break;
+                }
+            }
+            if (player.x < b.cx - lx) player.x = b.cx - lx;
+            if (player.x > b.cx + lx) player.x = b.cx + lx;
+            if (player.z < b.cz - lz) player.z = b.cz - lz;
+            if (player.z > b.cz + lz) player.z = b.cz + lz;
+            player.y = b.cy - b.hy;
+        }
+    }
+    player.prev_x = player.x;
+    player.prev_z = player.z;
+}
+
+// Where object n is in the room, through what it hangs on
+static void object_world(int n, int32_t out[3], int depth)
+{
+    int kind = objects[n].parent & 0xC0, k = objects[n].parent & 0x3F;
+    const int32_t local[3] = { objects[n].pos[0], objects[n].pos[1], objects[n].pos[2] };
+    int32_t base[3] = { 0, 0, 0 };
+    int dir = 0;
+    memcpy(out, local, sizeof(local));
+    if (object_on_part(n)) {
+        int who = kind == 0x40 ? 0 : k;
+        if (who == 0)
+            leon_point(objects[n].part & 0x7F, local, out);
+        else
+            enemy_part_point(who == 1 ? PARTNER_SLOT : who - 2, objects[n].part & 0x7F, local, out);
+        return;
+    }
+    if (kind == 0xC0 && k < MAX_OBJECTS && k != n && depth < 4 && objects[k].placed) {
+        object_world(k, base, depth + 1);
+        dir = (objects[k].dir[1] * 8) & 32767;
+    } else if (!(kind == 0x40 || kind == 0x80) || !character_place(kind == 0x40 ? 0 : k, base, &dir)) {
+        return;
+    }
+    int32_t c = cosLerp(dir), s = sinLerp(dir);
+    out[0] = base[0] + ((c * local[0] + s * local[2]) >> 12);
+    out[1] = base[1] + local[1];
+    out[2] = base[2] + ((-s * local[0] + c * local[2]) >> 12);
+}
+
+// super_set (scd_op_48, 0x80051888): the work object hangs on the room (0),
+// Leon (0x40), a character (0x80 | k) or a room object (0xc0 | n) - with
+// part & 0x80 on that part of the character - at the place and turn given.
+void game_object_super(int n, int parent, int part, const int16_t pos[3], const int16_t dir[3])
+{
+    if (n < 0 || n >= MAX_OBJECTS)
+        return;
+    objects[n].parent = parent;
+    objects[n].part = part;
+    for (int k = 0; k < 3; k++) {
+        objects[n].pos[k] = pos[k];
+        objects[n].dir[k] = dir[k];
+    }
+}
+
+// super_reset (scd_op_49, 0x80051c2c): back to the room where it is now, with a new turn
+void game_object_super_reset(int n, const int16_t dir[3])
+{
+    if (n < 0 || n >= MAX_OBJECTS)
+        return;
+    int32_t at[3];
+    object_world(n, at, 0);
+    objects[n].parent = objects[n].part = 0;
+    for (int k = 0; k < 3; k++) {
+        objects[n].pos[k] = (int16_t)at[k];
+        objects[n].dir[k] = dir[k];
+    }
+}
+
+// FUN_80035a2c / FUN_800358c8: a crate before Leon that he can climb
+static int object_to_climb(void)
+{
+    ObjBox b;
+    for (int n = 0; n < MAX_OBJECTS; n++)
+        if (n != player.on_object && (objects[n].flags & OBJ_CLIMBABLE) && !objects[n].fall && object_box(n, &b) &&
+            object_floor(n) == player_floor() && object_faced(n, &b, CHAR_HALF * 135 / 100 + 128, 0))
+            return n;
+    return -1;
+}
+
+// Down from the crate he stands on (FUN_80035148's second half): the place a
+// jump ahead (the RBJ jump moves him 1000) must be off the crate, free of
+// other objects and of walls on the floor below.
+static int crate_jump(int32_t *ground)
+{
+    ObjBox b, o;
+    if (!object_box(player.on_object, &b))
+        return 0;
+    int dir = ((player.dir + 4096) & ~8191) & 32767;
+    int32_t x = player.x + ((1000 * cosLerp(dir)) >> 12), z = player.z - ((1000 * sinLerp(dir)) >> 12);
+    if (iabs32(x - b.cx) <= b.hx + CHAR_HALF && iabs32(z - b.cz) <= b.hz + CHAR_HALF)
+        return 0;
+    int32_t base = b.cy + b.hy;
+    for (int k = 0; k < MAX_OBJECTS; k++)
+        if (k != player.on_object && object_box(k, &o) && object_touches(&o, x, base, z, CHAR_HALF))
+            return 0;
+    int floor = base / FLOOR_HEIGHT;
+    if (blocked_for(BOX_PLAYER, 1u << (floor < 0 ? 0 : floor > 31 ? 31 : floor), player.x, player.z, x, z))
+        return 0;
+    *ground = base;
+    return 1;
+}
+
+// pl_move_0a, once per game tick
+static void push_tick(void)
+{
+    const ModelAnim *a = &leon.anims[player.anim];
+    switch (player.push_step) {
+    case 0: // walks on the spot and turns to the nearest quarter
+    case 1: {
+        player.key = (player.key + 1) % a->count;
+        int d = (player.dir >> 3) & 0xFFF;
+        d = (d & 0x200) ? d + ((d >> 2) & 0xFF) : d - ((d >> 2) & 0xFF);
+        if (!(d & 0x3E0)) {
+            d &= 0xFF00;
+            player.push_step = 2;
+        }
+        player.dir = (d << 3) & 32767;
+        if (player.push_step == 2) {
+            player.set = &leon;
+            player.anim = PLD_PUSH_START;
+            player.key = 0;
+        }
+        break;
+    }
+    case 2:
+    case 3: // leans on
+        if (player.key + 1 < a->count)
+            player.key++;
+        else
+            player.push_step = 4;
+        break;
+    case 4:
+    case 5: { // pushes while up is held and the object gives way
+        if (player.push_step == 4) { // the first step always: it is what moves the object
+            player.anim = PLD_PUSH;
+            player.key = 0;
+            player.push_step = 5;
+            a = &leon.anims[player.anim];
+        } else if (!(keysHeld() & KEY_UP) || !player.pushing) {
+            player.anim = PLD_PUSH_START;
+            player.key = leon.anims[PLD_PUSH_START].count - 1;
+            player.push_step = 6;
+            sound_play(room_bank, SND_PUSH_END, 110, 64);
+            break;
+        }
+        int prev = player.key;
+        player.key = (player.key + 1) % a->count;
+        if (player.key == 1)
+            sound_play(room_bank, SND_PUSH, 110, 64);
+        int32_t s0 = player.key == 0 ? 0 : model_frame(&leon, ANIM_FRAME(leon.anim_pool[a->first + prev]))->speed[0];
+        int32_t s1 = model_frame(&leon, ANIM_FRAME(leon.anim_pool[a->first + player.key]))->speed[0];
+        move_forward(s1 - s0 < 0 ? s1 : s1 - s0);
+        break;
+    }
+    default: // lets go: the lean backwards
+        if (player.key > 0) {
+            player.key--;
+        } else {
+            player.state = ST_IDLE;
+            set_anim(ANIM_IDLE);
+        }
+        break;
+    }
 }
 
 // every DS frame: state, animation choice and turning
@@ -4404,6 +5180,9 @@ static void special_move_tick(void)
             player.key++;
         }
         break;
+    case ST_PUSH:
+        push_tick();
+        break;
     case ST_PICKUP: // pl_move_06
         if (crouch_phase == 0) {
             if (!last) {
@@ -4455,7 +5234,24 @@ static void try_special_move(uint32_t pressed)
     if (!rbj_moves)
         return; // this room has no climb animations
     const RoomBox *b = box_in_front(SHAPE_CLIMB_UP);
-    if (b) {
+    int crate = b ? -1 : object_to_climb();
+    int32_t ground;
+    if (crate >= 0) { // FUN_80035148: onto a crate (0x800c79d8 = the object)
+        player.dir = ((player.dir + 4096) & ~8191) & 32767;
+        player.state = ST_CLIMB;
+        player.slope = -1;
+        player.on_object = crate;
+        set_special_anim(RBJ_CLIMB);
+    } else if (!b && player.on_object >= 0) { // ... and down from it, where there is room
+        if (crate_jump(&ground)) {
+            player.dir = ((player.dir + 4096) & ~8191) & 32767;
+            player.state = ST_JUMP;
+            player.slope = -1;
+            player.ground = ground;
+            player.on_object = -1;
+            set_special_anim(RBJ_JUMP);
+        }
+    } else if (b) {
         // face the box square on (the PS1 turns Leon first, pl_move_08 case 1)
         if (player.x < b->x)
             player.dir = 0;           // +X
@@ -4780,6 +5576,12 @@ int main(void)
             }
             for (; game_tick_acc >= DS_HZ && !message_text && !term.active; game_tick_acc -= DS_HZ) {
                 update_player_tick();
+                poison_tick();
+                objects_tick();
+                if (player.pushing && player.state == ST_WALK) { // pl_ctrl_01_walk 0x80039b04
+                    player.state = ST_PUSH;
+                    player.push_step = 0;
+                }
                 EnemyTarget target = {
                     .x = player.x, .y = player.y, .z = player.z, .dir = player.dir,
                     .noise = (player.shot ? NOISE_SHOT : 0) | (player.state == ST_RUN ? NOISE_RUN
@@ -4803,10 +5605,13 @@ int main(void)
                 if (player.state < ST_HURT && player.state != ST_AIM && player.state != ST_FIRE && player.state != ST_RELOAD &&
                     player.state != ST_PICKUP && !flag_get(2, 7))
                     check_aots(pending_keys);
+                objects_aots();
                 if (!near_aot && !message_text)
                     try_special_move(pending_keys);
+                script_pressed = pending_keys;
                 pending_keys = 0;
                 script_tick();
+                script_fade_tick();
                 map_mark_room();
                 if (flag_get(0, 0x0A)) {
                     run_ending();

@@ -167,6 +167,36 @@ addresses (`SLES_009.72`, disc 1, Europe). **observed** = in the code as written
 - `sce_espr3d_on` (op `0x54`): id, sub, object it follows, u16 parameter, s16 x y z, s16
   vector, s16 direction (`FUN_8001bc10`); without an object the DS starts it like
   `sce_espr_on`.
+- **More opcodes** (observed, November 2026; handler table `0x8009f560`):
+  - `sce_key_ck` / `sce_trg_ck` (`0x4f` / `0x50`): wanted result, u16 action bits held
+    (`0x800c5f4c`) / newly pressed (`0x800c5f50`).
+  - `sce_fade_set` (`0x53`, `0x80053bd8`): number 0–2, kind (2 takes the colours away, 1
+    adds them), colours, s16 step: the level (table `0x800d76cc`, 0..`0x7fff`) goes by the
+    step every frame, from 0 up for a step > 0, from full down for one < 0 (`00 02 07 00 04`
+    = to black in 32 frames, `… 00 fc` back). `sce_fade_adjust` (`0x74`): number, s16 level.
+    **DS:** the master brightness, the deepest of the three; reset with the room.
+  - `sce_shake_on` (`0x5c`, `0x80053e44`): s8 x, s8 y - the picture's offset for all 240
+    lines; the scripts give one every frame (the train, the lifts: 40D, 500, 601, 604, 703,
+    704). **DS:** the bitmap layer's reference point and a shift after the 3D projection.
+  - `weapon_chg` (`0x5a`): the weapon in hand, 0 none. `0x81`: compares the rounds in it
+    (compare op, value). `0x88`: item, count taken off it (gone at 0).
+  - `sce_espr_on2` / `sce_espr3d_on2` (`0x64` / `0x75`): as `sce_espr_on` / `_3d_on` with a
+    number in byte 1; `sce_espr_kill2` (`0x65`) ends the effect by it.
+  - `dir_ck` (`0x39`, `FUN_80014fb4`): s16 x, z, angle - the point lies within the angle to
+    either side of the work object's facing. `sce_em_pos_ck` (`0x85`, `FUN_8004d000`): two
+    characters with no room box (flags `0x8400`) between them (room 109).
+  - `plc_neck` (`0x41`, `0x800531d8`): mode 0-6 into `obj+0x1c0` (| `0x80`), s16 x y z into
+    `obj+0x170`, two speeds; 862 uses, most on the people of the scenes.
+  - `plc_flg` (`0x43`, `0x800533b4`): 0 ors, 1 sets, 2 xors the u16 into `obj+0x1cc` (member
+    `0x16`); what its bits do is not looked into. `parts_set` (`0x6e`, `0x80051d4c`): pad,
+    part, field, u16 value into the work object's part (124 bytes each, `obj+0x198`): field 0
+    / 1 the words at +0 / +2, 2 at +112, 3 the byte at +114, 4-6 its place at +104 / 106 / 108
+    (112 and 60D).
+  - Still skipped: `plc_neck` (`0x41`), `plc_flg` (`0x43`), `parts_set` (`0x6e`) and the
+    parts that burst or drop (`0x7a` / `0x7b`), the lights (`0x6a`, `0x6b`, `0x7c`–`0x7f`),
+    `super_on` (`0x72`), the lines (`0x77`–`0x79`), `xa_vol` / `se_vol`, `rbj_reset`,
+    `mizu_div_set`, `splc_ret` / `splc_sce`, `sce_espr_task`, `sce_scr_move`, `st_map_hint`,
+    `mirror_set`.
 - Flag array 33: the area maps found (bit per map page, `maps.bin`), set by the scripts where
   a map lies (room 20B: 2-4); not set at the start (`INIT_TBL`). The map shows rooms not
   visited only with the page's bit.
@@ -273,6 +303,66 @@ which keeps the shots' fading boom that 8 bits turned to noise after 0.2 s.
   +20.
 - `item_aot_set`: data[6] = the model of the item; the PS1 skips items already taken and hides
   their model. `tools/obj2ds.py`.
+
+### Collision, pushing, crates (observed, November 2026)
+
+`obj_model_set` (handler `0x800515dc`; the object is `0x800c7f20 + 504 * ins[1]`): ins[2] the
+type (`obj+8`; 2 = a crate), ins[7] what it hangs on, ins[10] its flags (`obj[0]`, | 1),
+ins[12] the attribute (`obj+0x10`; `0x20` takes flag 1 off: an item's model, off until its
+item AOT turns it on), ins[26]/[28]/[30] the box's offset x / y / z and ins[32]/[34]/[36]
+half its size x / y / z. `FUN_800349b0` puts the box's middle at position + offset, with x
+and z swapped while the object is turned a quarter (`obj+0x76 & 0x400`). Flags: `0x02` no
+box, `0x08` the room's boxes do not stop it, `0x40` no characters, `0x80` can be pushed,
+`0x100` can be climbed. Only 15 objects of disc 1 have a box: the statues of 10C, the
+shelves of 112, the crates of 203, 306 and 603, 216, 403.
+
+Every frame `FUN_80033b10` (not with flag 2:4):
+
+- the box of every enemy and of Leon against every object's (`FUN_80034a78`: a character's
+  box is `obj+0x9a` to each side, 1800 high; mode 0 moves the character out, mode 1 the
+  object, mode 2 only tells). Which way is taken from where the character stood a frame
+  before (`obj+0x4a` / `0x4e`): the side he came from, else the nearer side.
+- Pushing: with exactly one object touched on Leon's floor, which he faces square on
+  (`FUN_80034fd0`: the point 1.2 × half his width + 128 before him lies in the box) and
+  which has flag `0x80`, a counter (`obj+0x144`, only in states 1 and 10) runs. From 6 on the
+  object is put before him (mode 1); if it then touches a room box with flag `0x4000` on its
+  floor (`FUN_80048e00`), an enemy or another object (`FUN_80034dd8`) it goes back and the
+  count starts again, else `0x800c77d4 |= 0x2000`: walking (`0x80039b04`) goes to **state
+  10** (`pl_move_0a` `0x8003bf54`). There Leon turns to the nearest quarter with the walking
+  move going on, leans on with PLD move 7, then walks move 8 (568 units in 25 frames) while
+  up is held and the flag comes again, with room sound 4 on key 1, and lets go with move 7
+  backwards and room sound 0.
+- A crate (type 2) whose box reaches a room box of shape 10 with flag `0x4000` tips over the
+  ledge away from Leon (`FUN_800347dc`, `FUN_80034290`): it slides on at 13, 26, ... a frame,
+  turns a quarter (the turn growing by 8), sinks a third of its speed for 12 frames, then
+  falls with 160 more a frame to the floor below and bounces once by 30. A crate is drawn
+  900 above its place (`0x8003400c`) - the DS had them half in the floor.
+- Leon climbs onto an object with flag `0x100` like onto a climb box (`FUN_80035148`:
+  `FUN_80035a2c` / `FUN_800358c8`, the point 1.35 × half his width + 128 before him in the
+  box; `0x800c79d8` = the object), walks on its top (`FUN_80035ae0`: not off it, but over
+  to another such object standing against it) and jumps down where there is room.
+- The AOT loop runs for every object too (`FUN_8004eddc`: SAT bit 0 Leon, 1 the enemies, 2
+  the **room objects**, 3 the partner): the AOT's number goes to `obj+0x0b` (member 9) and
+  an event starts. Room 10C: `aot_set 03 05 44 …` starts function 4 while something stands
+  on the plate, which asks `member_cmp 00 09 00 03 00` of statue 1, takes flag `0x80` off it
+  (`member_copy 10 00`, `calc … 7f ff`, `member_set2 00 10`) and sets it in place.
+- Members of an object (`work_set 04 n`; table `0x80010f00`): 0 flags, 6 type, 9 the AOT,
+  `0x0a` attribute, `0x0b`–`0x0d` position, `0x0e`–`0x10` rotation, `0x11` floor, `0x1b` the
+  push counter, `0x20`–`0x25` the box.
+- The event AOT's handler (`0x8004e128`) starts nothing while flag 2:6 is set.
+
+**Parents** (`obj+0x80`, a matrix): ins[7] of `obj_model_set` and byte 2 of `super_set`
+(`0x48`, `0x80051888`: pad, parent, part, s16 place, s16 turn; on the work object): `0x00`
+the room, `0x40` Leon, `0x80 | k` a character (0 Leon, 1 the partner, 2 + slot an enemy),
+`0xc0 | n` object n; with byte 3 & `0x80` that part of the character - what somebody holds
+in a scene (113, 115, 301, 304, 30B, 60C, 611, 702 …). `super_reset` (`0x49`,
+`0x80051c2c`: pad, s16 turn) leaves the object in the room where it is. The boards of 205
+hang on the window frames (`0xc0`, `0xc2` …) and fall with `super_reset`.
+
+**DS port:** `objects_tick`, `objects_aots`, `push_tick`, `object_matrix`,
+`game_draw_attached` (`source/main.c`; `ST_PUSH`, `player.on_object`); enemies are stopped
+at the boxes by `game_blocked` instead of being pushed out. Not ported: the splash of a
+crate, the water carrying crates (306 moves them by script), flag `0x200`.
 
 ## 5. Effect sprites (ESP)
 
@@ -384,6 +474,17 @@ and the end; no rewards, clear data or extra modes), `tools/ending2ds.py` (`endi
 
 ## 9. Item use, reloading, effects of a shot
 
+**Poison** (observed, November 2026): an effect with bit 8 of its byte 30 that hits a
+player (`0x8001fae8`: the spiders' spit; two more places, `0x8002181c`, `0x80023500`) sets
+`0x800c7a0c` = 5400 and the counter `0x800c7a0e` = 30. Nothing counts `0x800c7a0c` down:
+while it is not 0 Leon's routine (`0x80039294`) takes the counter down every frame and at 0
+one HP - never the last - and starts it at 30 again; he walks as in Caution (`obj+0x151` =
+1, `0x8003979c`), his model gets a tint (`0x800ac371`, up to 64) and the status screen says
+Poison (`0x80064a28`, before Fine / Caution / Danger). The blue herb and its mixes, `plc_heal`
+(`0x83`: full HP too) and `poison_clr` (`0x87`) end it; `poison_ck` (`0x86`) asks. **DS:**
+`player.poison`, `poison_tick`, `game_player_poison` (the spiders); save version 6. The
+tint is left out.
+
 See [player-control.md](player-control.md), section 5.
 
 ## 10. Room collision, slopes and stairs
@@ -414,7 +515,7 @@ Per frame the main loop (`0x80025058`) runs the player routine (`0x80039114`), t
   state 4) walks them with `obj & 8` set - no room collision - for
   `−1 − (top − bottom) / 1800` floors, and sets the floor at the end.
 - State A (10) is pushing an object: `FUN_80033b10` sets `0x800c77d4 & 0x2000` after 6 frames
-  against one that can move.
+  against one that can move (section 4, "Collision, pushing, crates").
 
 **DS port:** slopes rise one floor up to the floor in the type field (rooms 409: 5 and 6;
 it used to be taken as the rise). Stairs are walked like slopes rising ((type >> 6) & 31)

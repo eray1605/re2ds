@@ -20,6 +20,18 @@ void game_set_player_dir(int16_t dir) { (void)dir; }
 void game_set_box_flag(int box, int flag) { (void)box; (void)flag; }
 void game_bgm_control(int i, int o, int t, int l, int r) { (void)i; (void)o; (void)t; (void)l; (void)r; }
 void game_bgmtbl_set(int s, int r, int m, int u) { (void)s; (void)r; (void)m; (void)u; }
+void game_object_super(int n, int p, int pt, const int16_t pos[3], const int16_t dir[3]) { (void)n; (void)p; (void)pt; (void)pos; (void)dir; }
+void game_object_super_reset(int n, const int16_t dir[3]) { (void)n; (void)dir; }
+void game_shake(int x, int y) { (void)x; (void)y; }
+int game_player_poisoned(void) { return 0; }
+void game_player_cure(void) {}
+void game_espr_on2(const uint8_t *ins, int d) { (void)ins; (void)d; }
+void game_espr_kill2(int h) { (void)h; }
+int game_sight_blocked(int32_t a, int32_t b, int32_t c, int32_t d, int32_t e, int32_t f) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; return 0; }
+int game_keys(int pressed) { (void)pressed; return 0; }
+void game_fade_set(int n, int k, int s) { (void)n; (void)k; (void)s; }
+void game_fade_adjust(int n, int l) { (void)n; (void)l; }
+void game_player_heal(int i, int a) { (void)i; (void)a; }
 void game_item_get(int item, int count) { printf("  item get %02x x%d\n", item, count); }
 void game_movie(int n) { (void)n; }
 void game_play_sound(int bank, int sound) { (void)bank; (void)sound; }

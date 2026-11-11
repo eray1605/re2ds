@@ -128,6 +128,7 @@ void game_player_grabbed(int on);
 void game_player_pose(const Model *set, int anim, int key, int32_t x, int32_t z, int16_t dir);
 void game_player_died(void);              // death animation over
 void game_player_hurt(int kind);          // hit while not held: 0 light, 1 front, 2 from behind
+void game_player_poison(void);           // poisoned: 1 HP less about every second
 void game_player_killed(void);            // killed while not held
 void flag_set(int array, int bit, int value); // script.c
 int flag_get(int array, int bit);
@@ -867,6 +868,22 @@ int enemy_blocks_player(int32_t from_x, int32_t from_z, int32_t x, int32_t z)
         int64_t nx = e->x - x, nz = e->z - z, ox = e->x - from_x, oz = e->z - from_z;
         int64_t now = nx * nx + nz * nz, before = ox * ox + oz * oz;
         if (now < (int64_t)CONTACT_DISTANCE * CONTACT_DISTANCE && now < before)
+            return 1;
+    }
+    return 0;
+}
+
+// an enemy standing in the box (main.c: a pushed object stops at one, FUN_80033b10)
+int enemy_in_box(int32_t cx, int32_t cy, int32_t cz, int32_t hx, int32_t hy, int32_t hz)
+{
+    for (int i = 0; i < MAX_ENEMIES; i++) {
+        const Enemy *e = &enemies[i];
+        if (!present(e) || e->state >= ST_DYING || is_arm(e) || is_moth(e) || is_larva(e) || is_vine(e) ||
+            is_prop(e) || is_roach(e) || off_floor(e))
+            continue;
+        int32_t dx = e->x - cx, dy = cy - (e->y - 900), dz = e->z - cz;
+        if (dx >= -(hx + 450) && dx <= hx + 450 && dz >= -(hz + 450) && dz <= hz + 450 && dy >= -(hy + 900) &&
+            dy < hy + 900)
             return 1;
     }
     return 0;
@@ -3345,6 +3362,7 @@ static void spider_poison(Enemy *e, const EnemyTarget *p)
 {
     game_blood(1, p->x, p->y - 1500, p->z, e->dir, 20, p->y);
     spider_hurts(e, p, SP_SPIT_DAMAGE);
+    game_player_poison(); // the spit's effect has bit 8 of byte 30 (0x8001fae8)
 }
 
 static void spider_bites(Enemy *e, const EnemyTarget *p, int damage)
@@ -7683,9 +7701,26 @@ static void draw_bone(const EnemyType *t, const Enemy *e, int bone)
             glCallList((const u32 *)((const uint8_t *)m->data + off));
         }
     }
+    int slot = (int)(e - enemies); // what the part carries (main.c; the legs' copy carries nothing)
+    if (slot >= 0 && slot < MAX_ENEMIES)
+        game_draw_attached(slot == PARTNER_SLOT ? 1 : slot + 2, bone);
     for (int c = t->first_child[bone]; c >= 0; c = t->next_sibling[c])
         draw_bone(t, e, c);
     glPopMatrix(1);
+}
+
+// where a point of a part is in the room (main.c: a carried object let go, super_reset)
+int enemy_part_point(int slot, int bone, const int32_t local[3], int32_t out[3])
+{
+    if (slot == 0xFF)
+        slot = PARTNER_SLOT;
+    if (slot < 0 || slot >= MAX_ENEMIES || !present(&enemies[slot]))
+        return 0;
+    const Enemy *e = &enemies[slot];
+    if (bone < 0 || bone >= types[e->type].model.header->num_bones)
+        return 0;
+    bone_point(e, bone, local, &out[0], &out[1], &out[2]);
+    return 1;
 }
 
 // Is the point roughly inside the current view? (camera from main.c)

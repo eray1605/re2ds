@@ -11,7 +11,7 @@
 #include "save.h"
 
 #define SAVE_MAGIC 0x31565352  // "RSV1"
-#define SAVE_VERSION 5
+#define SAVE_VERSION 6
 // version 1 slots ended before bgm_saved (padded to the struct's 4-byte alignment)
 #define SLOT_V1_SIZE ((offsetof(SaveSlot, bgm_saved) + 3) & ~(size_t)3)
 
@@ -73,6 +73,8 @@ int save_read(SaveSlot slots[SAVE_SLOTS])
             ok = fread(&slots[i], h.slot_size, 1, f) == 1;
             if (h.version < 2)
                 slots[i].bgm_saved = 0; // was padding: the starting music table
+            if (h.version < 6)
+                slots[i].poison = 0;    // was padding too
         }
     } else {
         ok = 0;
