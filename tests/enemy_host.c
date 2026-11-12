@@ -69,6 +69,8 @@ void game_player_cure(void) {}
 void game_player_poison(void) {}
 void game_espr_on2(const uint8_t *ins, int d) { (void)ins; (void)d; }
 void game_espr_kill2(int h) { (void)h; }
+void game_enemy_part_set(int s, int p, int f, int v) { enemy_part_set(s, p, f, v); }
+int game_free_object_textures(void) { return 0; }
 int game_keys(int pressed) { (void)pressed; return 0; }
 void game_fade_set(int n, int k, int s) { (void)n; (void)k; (void)s; }
 void game_fade_adjust(int n, int l) { (void)n; (void)l; }
@@ -137,6 +139,13 @@ int main(int argc, char **argv)
 {
     Room room;
     if (!room_load(&room, argc > 1 ? argv[1] : "nitro:/room/room1000.bin")) { printf("room load failed\n"); return 1; }
+    static Model room_sets[4]; // the room's animations per enemy slot (main.c: rbj_enemy)
+    for (int i = 0; i < 4 && argc > 1 && strlen(argv[1]) < 200; i++) {
+        char path[256];
+        snprintf(path, sizeof(path), "%.*s_rbj_e%d.bin", (int)strlen(argv[1]) - 4, argv[1], i);
+        if (model_load(&room_sets[i], path))
+            enemy_set_room_set(i, &room_sets[i]);
+    }
     host_room = room;
     enemy_room_reset();
     if (getenv("ZONES")) // e.g. nitrofiles/room/room1020_blk.bin

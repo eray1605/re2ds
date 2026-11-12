@@ -260,7 +260,12 @@ part of the fall after a hit ends at the floor at the latest, the shot's push is
 down. Type `0x24` (its own overlay, not read) has no wall animations: on a wall or the
 ceiling it turns over and drops when it hears him. Room 201's licker outside the window
 (status `0x44`, wall side 1, facing `0x770`) now crawls along its wall; the facing is not
-quite along the wall, so it also creeps down a little, as the PS1 computes it.
+quite along the wall, so it also creeps down a little, as the PS1 computes it. The room script blackens it
+part by part (`parts_set` field 2 / 3 = the part's colour, `+112` / `+114`, written into its
+polygons' GPU codes at `0x8002c9ac`): the legs (`0x0e`–`0x15`) at once, the rest after 28
+frames of the crawl (functions 6, 8–10), so it vanishes in the night outside. **DS:**
+`enemy_part_set`: a part turned near black is not drawn (`Enemy.dark_parts`); before, the lit
+licker stayed outside and showed through the wall from the other cameras.
 
 ### Attacks (observed)
 
@@ -400,6 +405,29 @@ state 25 anim 12 keys `0x2f`-`0x32` range 550 damage 40; 26 anim 15 keys 14-19 r
 damage 10; 27 anim 3 keys 21-25 range 750 damage 30. Spawn status `0x4000` holds him.
 The port uses these; the animation numbers are those of the state routines and unchecked
 on screen.
+
+**Hits** (routine 2 `0x80103f30`, observed November 2026): the kind (`obj+0x1d2`) comes from
+`FUN_80103eb8`: HP under 20000 → 3, else a draw (`FUN_80100630(4, …)`) → 4 (nothing), else
+1 with status `0x20` in `obj+0x1d0`, else 0. Handlers (table `0x80104d48`): 0 and 1
+(`0x80103fbc` / `0x80104078`) flinch with move 4 or 5 (a random bit) / 9, turning to Leon;
+3 (`0x801040e8`) goes down - `FUN_800188ac` sets his set flag (room 10D: the scripts then drop an item), move 10, `obj+0x10e |= 0x4000`, `obj[0] |= 2` - and lies until
+the room script sets member `0x17` (`obj+0x1d4`), then gets up with move 11 (waiting for it
+again). Routine 3 (`0x80104274`) is his death in the scenes. Start HP 20000 + table
+`0x80104660` (EASY `0x80104674`): 250, 450, 300, 300, 220, 300, 400, 300, 400, 350 by the
+room's case. **DS:** `tyrant_shot`, `TY_FLINCH` / `TY_DOWN` / `TY_RISE`; the draw is taken as
+1 in 4, the first HP entry for every room.
+
+**Held** (status `0x4000`): the init (`0x80101324`) starts him in state 9 + variant (table
+`0x80104c90`: 9 ... 17). Variant 6 (rooms 20C, 20D; state 15, `0x8010372c`) clears member
+`0x17`, waits for the script to set it to 1, then plays move 16 without room collision
+(`obj[0] |= 8`) - he breaks in through the wall - and walks on with the hold cleared.
+Variant 4 (604's scene, state 13, `0x80103050`, steps table `0x8010009c`) is driven by
+member `0x17` = 1 … 8, free of collision (`obj[0] |= 0xa`): he waits at y −25000; 1: his
+own move 14 from key 51 while he drops 1000 a frame to −18000, to its end; 2 / 3: his own
+moves 1 and 9; 4: the room's move 1 (`FUN_8001581c` / `FUN_800289d4` with the room set
+`obj+0x190`); 5: turns round, room move 1, his own move 8; 6: room move 2; 7: room move 3;
+8: turns round, room move 4, then room move 0. **DS:** `TY_BREAK_IN`, `TY_SCENE`
+(`tyrant_scene`); the play rates (256 / 1024 / 4096) are taken as one key a frame.
 
 ## 7. Zombie arms (type `0x2d`)
 
@@ -611,6 +639,31 @@ an answer from them (no `member_cmp 17`), so the scenes run through.
   length (table `actor_types` in `enemy.c`), not while a scene has Leon (flag 2:07).
   HP from their inits (`sh 0x156`): embryo 1, G adult 450, tyrant 10000, G1 400, `0x33` 750,
   `0x36` 400, `0x37` −1 (cannot be hurt). Damage values are guesses.
+
+**The second tyrant of 702** (type `0x2b`, CDEMD0.EMS sector `0x911`; main table
+`0x80104b44`: init `0x80101b20`, routine 1 `0x80101c64`, hit `0x80103230`, death
+`0x80103444`; frame `0x8010187c`), observed November 2026: HP 20000 + 250 (EASY 200,
+`0x80104b40`). Every frame member `0x1a` (`obj+0x1da`) = Leon farther than 2800
+(`0x80101d80`), `0x19` (`obj+0x1d8`) = 1 once the HP are under 20000 (`0x80101ac4`), and the
+HP never go under 10000 (`0x80101adc`). While Leon holds the rocket launcher (`0x800c7902` =
+17) the overlay sets `obj+0x1d3 | 0x80` (`0x801018dc`): only the rocket kills him. Routine 3
+is the end scene (`0x8010346c`, steps `0x80104ba8`): he stands at (−14547, −14636) facing
+1432 with move 5 from key 10, cut 11, member `0x18` (`obj+0x1d6`) = 1. Room 702's script:
+function 11 (`0x19` = 1 and `0x1a` = 1, flag 5:`0d`) has Ada throw the launcher down
+(functions 12 / 13); function 14 (`0x18` = 1) runs the ending. **DS:** `super_tyrant_tick`,
+`super_tyrant_rocket` (`enemy.c`), members `0x18`–`0x1a` (`Enemy.answer`).
+
+His fight (routine 1; states `0x80104b54` control / `0x80104b78` move; `obj+0x228` frames
+walked, `obj+0x22a` the pause after a hit): **1** walk (`0x80101d44`): his move 1, turning 32
+a frame; after 220 frames, facing Leon (±300) and more than 3500 away → 4; within reach
+(2300, 1 in 64 2600, 1900 when Leon has under 81 HP) and facing him (±400) → 3, or straight on
+(±140) 3 in 4 times → 2; Leon dead → 6. **2** (`0x80101fd4`): move 2, a hit with part 10 on
+keys 14–19 (`FUN_80100790`: 200 + 500 around the part); a pause of 30; at key 20 a follow-up
+(state 5, move 9: he impales Leon) if he is close and in front. **3** (`0x8010226c`): move
+4, parts 10 and 16 on keys 15–19. **4** charge (`0x80102584`): move 8, part 10 on keys
+27–33 (400). The damage is the main executable's (`FUN_800152b0` kind 2), not read.
+**DS:** `super_tyrant_fight` (`SUT_*`) once the scene leaves him idle; 40 / 60 damage;
+state 5's impaling and 7 / 8 are not ported.
 
 ## 17. The partner following Leon (Ada `0x41`)
 

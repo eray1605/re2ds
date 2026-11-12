@@ -213,6 +213,7 @@ static struct {
     int8_t on_object;         // the crate he stands on (0x800c79d8), -1 none
     uint8_t push_step;        // ST_PUSH (pl_move_0a): obj+6
     uint8_t pushing;          // an object gave way this tick (0x800c77d4 & 0x2000)
+    uint8_t push_grace;       // ticks he keeps pushing without it (the move's loop has a still frame)
     Plc plc;                  // the room script moves him (ST_SCRIPT)
 } player;
 #define PLAYER_HP 200
@@ -259,6 +260,7 @@ static void render_frame(void);
 static int floor_sound(void);
 static void check_camera_switch(void);
 static void move_forward(int32_t dist);
+static void rocket_reset(void);
 static int object_blocks(int32_t from_x, int32_t from_z, int32_t x, int32_t z, int32_t y);
 static void update_height(void);
 
@@ -469,6 +471,25 @@ static int is_item_model(int n)
     return 0;
 }
 
+// Texture memory for an enemy type that did not fit (enemy.c): the room
+// objects' textures give way, all but the items' (room 207's zombies in
+// shirts, type 0x1f with four pages, stayed invisible behind the room's
+// objects). They are not uploaded again in this room. 1 if any was freed.
+int game_free_object_textures(void)
+{
+    int freed = 0;
+    for (int n = 0; n < obj_count; n++) {
+        const uint8_t *m = object_entry(n);
+        int tex = m[0] | m[1] << 8;
+        if (tex >= obj_tex_count || obj_tex_state[tex] != 1 || is_item_model(n))
+            continue;
+        glDeleteTextures(1, &obj_tex[tex]);
+        obj_tex_state[tex] = 2;
+        freed = 1;
+    }
+    return freed;
+}
+
 // textures of the placed models: those of items first
 static void upload_objects(void)
 {
@@ -506,6 +527,7 @@ void game_object_set(const uint8_t *ins)
 void game_espr_on(const uint8_t *ins) { roomfx_on(ins); }
 void game_espr3d_on(const uint8_t *ins) { roomfx_3d_on(ins); }
 void game_espr_kill(int id, int type) { roomfx_kill(id, type); }
+void game_enemy_part_set(int slot, int part, int field, int value) { enemy_part_set(slot, part, field, value); }
 void game_espr_on2(const uint8_t *ins, int is_3d) { roomfx_on2(ins, is_3d); }
 void game_espr_kill2(int handle) { roomfx_kill2(handle); }
 
@@ -1689,7 +1711,9 @@ static void check_camera_switch(void)
     int in_view = 0, other = -1;
     for (int i = 0; i < room.header->num_switches; i++) {
         const RoomSwitch *s = &room.switches[i];
-        if (!(s->role & SWITCH_VIEW_AREA) || (s->floor != 255 && s->floor != floor))
+        // a view area's floor byte is not checked (FUN_8002bbbc): room 10C's camera 0 has 31,
+        // and taken as a floor it sent the camera back and forth on the stairs
+        if (!(s->role & SWITCH_VIEW_AREA))
             continue;
         if (!point_in_quad(player.x, player.z, s->x, s->z))
             continue;
@@ -2975,6 +2999,7 @@ static void enter_room(int stage, int id, int arrival_cam)
     script_camera_changed(-1, arrival_cam);
     script_stage = stage - 1;
     memset(script_fades, 0, sizeof(script_fades)); // a fade does not outlast its room
+    rocket_reset();
     game_shake(0, 0);
     script_room_enter(&room);
 
@@ -4322,8 +4347,11 @@ static void objects_aots(void)
             if (!(a->sat & AOT_SAT_HERE) || !point_in_quad(objects[n].pos[0], objects[n].pos[2], a->x, a->z))
                 continue;
             script_set_var(VAR_AOT_HERE, i);
+            int entered = objects[n].aot != i;
             objects[n].aot = i;
-            if (a->type == SCE_EVENT || a->type == SCE_FLAG_CHG)
+            // an event once on entry: every tick it filled the script threads (a statue on
+            // the wrong plate of 10C) and the second statue's event found none free
+            if (a->type == SCE_FLAG_CHG || (a->type == SCE_EVENT && entered))
                 trigger(a);
             break; // the PS1 leaves the loop after the first handler
         }
@@ -4543,8 +4571,12 @@ static void push_tick(void)
             player.anim = PLD_PUSH;
             player.key = 0;
             player.push_step = 5;
+            player.push_grace = 10;
             a = &leon.anims[player.anim];
-        } else if (!(keysHeld() & KEY_UP) || !player.pushing) {
+        } else if (player.pushing) {
+            player.push_grace = 10;
+        }
+        if (player.push_step == 5 && (!(keysHeld() & KEY_UP) || (!player.pushing && !player.push_grace--))) {
             player.anim = PLD_PUSH_START;
             player.key = leon.anims[PLD_PUSH_START].count - 1;
             player.push_step = 6;
@@ -4557,7 +4589,10 @@ static void push_tick(void)
             sound_play(room_bank, SND_PUSH, 110, 64);
         int32_t s0 = player.key == 0 ? 0 : model_frame(&leon, ANIM_FRAME(leon.anim_pool[a->first + prev]))->speed[0];
         int32_t s1 = model_frame(&leon, ANIM_FRAME(leon.anim_pool[a->first + player.key]))->speed[0];
-        move_forward(s1 - s0 < 0 ? s1 : s1 - s0);
+        // The move walks 571 in its first 18 keys and stands (or steps back a
+        // little) in the last 7: no jump there (the walk's rule for its loop
+        // took the whole 568 at once), and the grace covers the still keys.
+        move_forward(s1 - s0 > 0 ? s1 - s0 : 0);
         break;
     }
     default: // lets go: the lean backwards
@@ -4781,8 +4816,10 @@ static const ShotFx shot_fx[] = {
     { 0x06, 1, 3, 0x0A, 0x18, 130, 900, -10, 0 }, { 0x06, 1, 1, 0x00, 0x20, 130, 900, -10, 0 },
     { 0x06, 1, 1, 0x02, 0x30, 130, 1100, -10, 0 },
     { 0x06, 4, 3, 0x08, 0x09, 330, 50, 0, 0 }, { 0x06, 4, 2, CASING_HANDGUN, 0, 330, 50, 0, 0x694 },
-    // rocket launcher: its own frame handler is not read; the shotgun's flash and smoke at its mouth
-    { 0x11, 1, 1, 0x00, 0x1D, 150, 1300, 0, 0 }, { 0x11, 1, 3, 0x0C, 0x18, 150, 1300, 0, 0 },
+    // rocket launcher 0x80041f28: the flash and the smoke at its mouth, the back blast (the
+    // rocket itself, effect 2 sub 5: rocket_launch)
+    { 0x11, 1, 1, 0x00, 0x20, 0, 1100, 0, 0 }, { 0x11, 1, 3, 0x0A, 0x1A, 0, 1100, 0, 0 },
+    { 0x11, 1, 3, 0x0A, 0x15, 300, -900, 0, 0 },
     // shotgun 0x80041138: the blast along the barrel, the pump
     { 0x07, 1, 1, 0x00, 0x1D, 150, 1300, 0, 0 }, { 0x07, 1, 1, 0x04, 0x10, 150, 1300, 0, 0 },
     { 0x07, 1, 3, 0x0C, 0x18, 150, 1300, 0, 0 }, { 0x07, 1, 3, 0x0E, 0x10, 150, 1800, 0, 0 },
@@ -4899,21 +4936,78 @@ static void reload_tick(void)
     }
 }
 
-// The rocket launcher (item 0x11, Leon B's last fight): the PS1 flies a
-// rocket that bursts on what it hits; here the hit is at once (900 for every
-// distance, the zombie table) and the burst - the shotgun's blast effects,
-// large - where it struck, or 6000 ahead.
-static void rocket_blast(int hit)
+// The rocket launcher (item 0x11, Leon B's last fight). On key 1 of the
+// fire move its frame handler (0x80041f28) starts the flash (effect 1,
+// size 0x20) and smoke (effect 3 sub 2, 0x1a) 1100 along the barrel, a back
+// blast behind (300, -900) and the rocket: core effect 2 sub 5 (frames 18-22,
+// two sprites taking turns) along Leon's facing. Its flight is the effect's
+// own movement, not read: here it flies ROCKET_SPEED a tick in a straight
+// line until it touches an enemy (900 damage, the zombie table), a wall or
+// ROCKET_RANGE, and bursts there - the shotgun's blast effects, large.
+#define ROCKET_FX 0xF0          // roomfx number of the flying rocket
+#define ROCKET_SPEED 450        // a guess
+#define ROCKET_RANGE 24000
+static struct {
+    uint8_t active;
+    int16_t dir;
+    int32_t x, y, z, dy, flown;
+} rocket;
+
+static void rocket_reset(void) { rocket.active = 0; }
+
+static void rocket_blast(int32_t x, int32_t y, int32_t z)
 {
-    int32_t x, y, z;
-    if (hit < 0 || !enemy_look_point(hit, &x, &y, &z)) {
-        x = player.x + ((6000 * cosLerp(player.dir)) >> 12);
-        y = player.y - 1200;
-        z = player.z - ((6000 * sinLerp(player.dir)) >> 12);
-    }
+    roomfx_kill2(ROCKET_FX);
     roomfx_spawn(1, 0x00, x, y, z, GUN_FX(0x1D) * 3, 0);
     roomfx_spawn(3, 0x0C, x, y, z, GUN_FX(0x1D) * 3, 0);
     roomfx_spawn(3, 0x0E, x, y - 500, z, GUN_FX(0x1D) * 2, 0);
+    rocket.active = 0;
+}
+
+static void rocket_launch(void)
+{
+    static const int32_t mouth[3] = { 0, 1100, 0 };
+    int32_t p[3];
+    leon_point(HAND_BONE, mouth, p);
+    if (rocket.active)
+        rocket_blast(rocket.x, rocket.y, rocket.z);
+    rocket.active = 1;
+    rocket.dir = player.dir;
+    rocket.x = p[0];
+    rocket.y = p[1];
+    rocket.z = p[2];
+    rocket.flown = 0;
+    // aimed up or down: it climbs or sinks toward chest height 6000 ahead
+    rocket.dy = player.aim_posture == 1 ? -60 : player.aim_posture == 2 ? 60 : 0;
+    roomfx_spawn_handle(ROCKET_FX, 2, 5, p[0], p[1], p[2], GUN_FX(0x10), player.dir / 8);
+}
+
+static void rocket_tick(void)
+{
+    if (!rocket.active)
+        return;
+    int32_t dx = (ROCKET_SPEED * cosLerp(rocket.dir)) >> 12, dz = -((ROCKET_SPEED * sinLerp(rocket.dir)) >> 12);
+    int32_t nx = rocket.x + dx, ny = rocket.y + rocket.dy, nz = rocket.z + dz;
+    if (enemy_in_box(nx, ny, nz, 200, 200, 200)) {
+        const Weapon *w = NULL;
+        for (unsigned i = 0; i < sizeof(weapons) / sizeof(weapons[0]); i++)
+            if (weapons[i].item == 0x11)
+                w = &weapons[i];
+        if (w) // the hit from just before it, straight on
+            enemy_hit(rocket.x - 2 * dx, player.y, rocket.z - 2 * dz, rocket.dir, 3 * ROCKET_SPEED, 0x11, w->damage, 0);
+        rocket_blast(nx, ny, nz);
+        return;
+    }
+    rocket.flown += ROCKET_SPEED;
+    if (rocket.flown > ROCKET_RANGE || game_sight_blocked(rocket.x, ny, rocket.z, nx, ny, nz) ||
+        ny > player.y || ny < player.y - 3 * LEVEL_HEIGHT) {
+        rocket_blast(rocket.x, rocket.y, rocket.z);
+        return;
+    }
+    rocket.x = nx;
+    rocket.y = ny;
+    rocket.z = nz;
+    roomfx_set_pos(ROCKET_FX, nx, ny, nz);
 }
 
 static void fire(void)
@@ -4938,9 +5032,8 @@ static void fire(void)
         slot->count--;
     player.anim = PLW_FIRST + plw_fire[player.aim_posture];
     sound_play(weapon_bank, 0, 127, 64);
-    int hit = enemy_hit(player.x, player.y, player.z, player.dir, w->range, w->item, w->damage, player.aim_posture);
-    if (w->item == 0x11)
-        rocket_blast(hit);
+    if (w->item != 0x11) // the rocket hits when it gets there (rocket_tick)
+        enemy_hit(player.x, player.y, player.z, player.dir, w->range, w->item, w->damage, player.aim_posture);
 }
 
 // One tick of continuous fire (phase 2, 0x80044584, frame handlers SMG
@@ -5314,6 +5407,8 @@ static void update_player_tick(void)
                     enemy_hit(player.x, player.y, player.z, player.dir, w->range, w->item, w->damage,
                               player.aim_posture);
                 shot_effects(w);
+                if (w->item == 0x11 && player.key == 1)
+                    rocket_launch();
                 // EDD flag 0x100000 on the fire move: the pump
                 if (w->pump_key[player.aim_posture] && player.key == w->pump_key[player.aim_posture])
                     sound_play(weapon_bank, w->pump_sound, 127, 64);
@@ -5576,6 +5671,7 @@ int main(void)
             }
             for (; game_tick_acc >= DS_HZ && !message_text && !term.active; game_tick_acc -= DS_HZ) {
                 update_player_tick();
+                rocket_tick();
                 poison_tick();
                 objects_tick();
                 if (player.pushing && player.state == ST_WALK) { // pl_ctrl_01_walk 0x80039b04

@@ -134,7 +134,9 @@ addresses (`SLES_009.72`, disc 1, Europe). **observed** = in the code as written
   `SWITCH_ON`; `game_cut_be_set`.
 - The first record of a camera is its view area (`FUN_8002bbbc`, `0x800c5f78` on each cut);
   characters outside it are not drawn (`FUN_80026598`; parts flagged `0x9000`, the shotgun's
-  standing legs, still are) - Leon too (he stood in the terminal's close-up).
+  standing legs, still are) - Leon too (he stood in the terminal's close-up). The view area's floor
+  byte is not checked (room 10C's camera 0 has 31, 112 / 206 have 0); taken as a floor it
+  made the DS fall back to camera 1 on 10C's stairs, whose zone sent it back to 0 at once.
 - **Masks** (observed, November 2026): on each cut `FUN_80046334` builds a sprite per mask
   and a table of (on, group, depth); the PRI's offset groups are numbered from their count
   down to 1. Every frame `FUN_800464c0` links a mask into the ordering table at index
@@ -330,7 +332,9 @@ Every frame `FUN_80033b10` (not with flag 2:4):
   count starts again, else `0x800c77d4 |= 0x2000`: walking (`0x80039b04`) goes to **state
   10** (`pl_move_0a` `0x8003bf54`). There Leon turns to the nearest quarter with the walking
   move going on, leans on with PLD move 7, then walks move 8 (568 units in 25 frames) while
-  up is held and the flag comes again, with room sound 4 on key 1, and lets go with move 7
+  up is held and the flag comes again (DS: ten ticks of grace - the move walks 571 in keys
+  0-18 and stands or steps back in the last 7, where he does not touch the object; its
+  negative steps count as 0), with room sound 4 on key 1, and lets go with move 7
   backwards and room sound 0.
 - A crate (type 2) whose box reaches a room box of shape 10 with flag `0x4000` tips over the
   ledge away from Leon (`FUN_800347dc`, `FUN_80034290`): it slides on at 13, 26, ... a frame,
@@ -343,7 +347,7 @@ Every frame `FUN_80033b10` (not with flag 2:4):
   to another such object standing against it) and jumps down where there is room.
 - The AOT loop runs for every object too (`FUN_8004eddc`: SAT bit 0 Leon, 1 the enemies, 2
   the **room objects**, 3 the partner): the AOT's number goes to `obj+0x0b` (member 9) and
-  an event starts. Room 10C: `aot_set 03 05 44 …` starts function 4 while something stands
+  an event starts (DS: once on entry; every tick it filled the script threads). Room 10C: `aot_set 03 05 44 …` starts function 4 while something stands
   on the plate, which asks `member_cmp 00 09 00 03 00` of statue 1, takes flag `0x80` off it
   (`member_copy 10 00`, `calc … 7f ff`, `member_set2 00 10`) and sets it in place.
 - Members of an object (`work_set 04 n`; table `0x80010f00`): 0 flags, 6 type, 9 the AOT,
@@ -547,6 +551,13 @@ through outer walls), never behind a box the room script switches (`sca_id_set`:
 gates).
 
 ## 11. Music (BGM)
+
+**DS timing** (November 2026): the sequencer runs in a calico thread of its own
+(`music_thread_main`, priority `MAIN_THREAD_PRIO - 4`, `threadTimerWait` at 60 Hz) behind a
+recursive mutex that the game's calls take too. Stepped from the main loop, it started notes in
+pairs whenever a pass took two frames and stalled during camera and room loads (catching up
+6 frames at most): the music lagged and stuttered. The host tests still step it from
+`music_frame`.
 
 Three sequence slots: main (`0x800cf110`, 8 bytes: state, start mode, seq id, ..., volume)
 and the two parts of a sub piece (`0x800cf118`, `0x800cf120`).

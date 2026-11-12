@@ -79,6 +79,7 @@ int enemy_blocks_player(int32_t from_x, int32_t from_z, int32_t x, int32_t z);
 // main.c: draws the room objects part bone of character who carries (0 Leon, 1 the partner, 2 + slot)
 void game_draw_attached(int who, int bone);
 int enemy_part_point(int slot, int bone, const int32_t local[3], int32_t out[3]);
+void enemy_part_set(int slot, int part, int field, int value); // parts_set
 // an enemy stands in the box (middle, half sizes): a pushed room object stops
 int enemy_in_box(int32_t cx, int32_t cy, int32_t cz, int32_t hx, int32_t hy, int32_t hz);
 extern int enemy_spawn_calls, enemy_last_error;
