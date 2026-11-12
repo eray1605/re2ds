@@ -103,6 +103,7 @@ int game_player_poisoned(void);                  // poison_ck
 void game_player_cure(void);                     // poison_clr
 int game_sight_blocked(int32_t x0, int32_t y0, int32_t z0, int32_t x1, int32_t y1, int32_t z1); // a room box between
 void game_shake(int x, int y);                   // sce_shake_on
+void game_enemy_part_set(int slot, int part, int field, int value); // parts_set
 void game_fade_set(int n, int kind, int step);   // sce_fade_set
 void game_fade_adjust(int n, int level);         // sce_fade_adjust
 void game_player_heal(int item, int amount);     // plc_heal (and the status screen's herbs)

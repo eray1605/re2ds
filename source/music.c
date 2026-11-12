@@ -263,7 +263,7 @@ static void voices_update(const Player *pl, int midi)
     }
 }
 
-void music_duck(int on)
+static void music_duck_unlocked(int on)
 {
     int d = on ? DUCKED : 127;
     if (d != duck) {
@@ -365,7 +365,7 @@ static void sub_unload(void)
     current_sub = -1;
 }
 
-void music_stop(void)
+static void music_stop_unlocked(void)
 {
     sub_unload();
     main_unload();
@@ -624,12 +624,37 @@ static void music_step(void)
             voice_send(&voices[i]);
 }
 
-// The sequencer steps 60 times a second. main.c calls music_frame once per
-// pass of its loop, but a pass takes two frames in a full room (Kendo, four
-// zombies, Leon) and loading takes longer still: the music slowed down and
-// stalled with its notes held. A 60 Hz tick task counts the frames that went
-// by; music_frame catches up on them, after a long stall on a few only.
+// The sequencer steps 60 times a second. On the DS a thread of its own does
+// it, woken by a 60 Hz timer and above the game's priority: stepped from the
+// main loop (music_frame) the notes came in pairs whenever a pass took two
+// frames (full rooms) and stalled while a camera or room loaded - the music
+// lagged and stuttered. A recursive mutex keeps the game's calls (a new room's
+// music, sce_bgm_control, the effects taking a channel) apart from it. The
+// host tests (no threads) step it from music_frame as before.
 #define CATCH_UP 6
+#ifdef ARM9
+static RMutex music_mutex;
+#define MUSIC_LOCK() rmutexLock(&music_mutex)
+#define MUSIC_UNLOCK() rmutexUnlock(&music_mutex)
+static Thread music_thread;
+static u8 music_stack[8192] __attribute__((aligned(8)));
+static int music_thread_main(void *arg)
+{
+    (void)arg;
+    static TickTask timer;
+    threadTimerStart(&timer, 60);
+    for (;;) {
+        threadTimerWait(&timer);
+        MUSIC_LOCK();
+        music_step();
+        MUSIC_UNLOCK();
+    }
+    return 0;
+}
+#else
+#define MUSIC_LOCK() ((void)0)
+#define MUSIC_UNLOCK() ((void)0)
+#endif
 static TickTask clock_task;
 static volatile uint32_t clock_frames;
 static uint32_t frames_done;
@@ -642,7 +667,7 @@ static void clock_tick(TickTask *t)
 
 // An effect or a voice clip found no free DS channel: the music's quietest
 // note gives way. 1 if one did.
-int music_yield(void)
+static int music_yield_unlocked(void)
 {
     voices_init();
     Voice *v = voice_to_give(NULL);
@@ -656,6 +681,14 @@ void music_frame(void)
 {
     static int started;
     voices_init();
+#ifdef ARM9
+    if (!started) {
+        started = 1;
+        threadPrepare(&music_thread, music_thread_main, NULL, &music_stack[sizeof(music_stack)], MAIN_THREAD_PRIO - 4);
+        threadStart(&music_thread);
+    }
+    return;
+#endif
     if (!started) {
         started = 1;
         tickTaskStart(&clock_task, clock_tick, ticksFromHz(60), ticksFromHz(60));
@@ -738,7 +771,7 @@ void music_table_set(int stage, int room, int main, int sub)
 // others start at once, FUN_8005631c); a new main reloads it as well.
 static void music_entry(int entry, int sub_entry);
 
-void music_room(int stage, int room)
+static void music_room_unlocked(int stage, int room)
 {
     if (!table_load())
         return;
@@ -754,7 +787,7 @@ void music_room(int stage, int room)
 
 // A pair the way the room table gives it, without a room (the ending's
 // FUN_80056410 with its own u16: main | sub << 8, 0xFF none)
-void music_pair(int main, int sub) { music_entry(main, sub); }
+static void music_pair_unlocked(int main, int sub) { music_entry(main, sub); }
 
 static void music_entry(int entry, int sub_entry)
 {
@@ -812,7 +845,7 @@ static void music_entry(int entry, int sub_entry)
 // and pan), n = program n - 1 (the main's bank for id 0, else the sub's). The
 // last two bytes are volume and pan, each stored minus 1; 0 leaves the value
 // as it is (sce_bgm_control 0, 2, 0, 0, 0 only stops).
-void music_control(int id, int op, int type, int volume, int pan)
+static void music_control_unlocked(int id, int op, int type, int volume, int pan)
 {
     if (id < 0 || id >= PLAYERS)
         return;
@@ -842,4 +875,17 @@ void music_control(int id, int op, int type, int volume, int pan)
         *pn = pan - 1 > 127 ? 127 : pan - 1;
     if (volume || pan)
         voices_update(NULL, -1);
+}
+
+// the game's entry points, apart from the music thread
+void music_duck(int on) { MUSIC_LOCK(); music_duck_unlocked(on); MUSIC_UNLOCK(); }
+void music_stop(void) { MUSIC_LOCK(); music_stop_unlocked(); MUSIC_UNLOCK(); }
+int music_yield(void) { MUSIC_LOCK(); int r = music_yield_unlocked(); MUSIC_UNLOCK(); return r; }
+void music_room(int stage, int room) { MUSIC_LOCK(); music_room_unlocked(stage, room); MUSIC_UNLOCK(); }
+void music_pair(int main, int sub) { MUSIC_LOCK(); music_pair_unlocked(main, sub); MUSIC_UNLOCK(); }
+void music_control(int id, int op, int type, int volume, int pan)
+{
+    MUSIC_LOCK();
+    music_control_unlocked(id, op, type, volume, pan);
+    MUSIC_UNLOCK();
 }

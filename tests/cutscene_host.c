@@ -72,6 +72,8 @@ void game_player_cure(void) {}
 void game_player_poison(void) {}
 void game_espr_on2(const uint8_t *ins, int d) { (void)ins; (void)d; }
 void game_espr_kill2(int h) { (void)h; }
+void game_enemy_part_set(int s, int p, int f, int v) { enemy_part_set(s, p, f, v); }
+int game_free_object_textures(void) { return 0; }
 int game_keys(int pressed) { (void)pressed; return 0; }
 void game_fade_set(int n, int k, int s) { (void)n; (void)k; (void)s; }
 void game_fade_adjust(int n, int l) { (void)n; (void)l; }

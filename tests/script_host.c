@@ -28,6 +28,7 @@ void game_player_cure(void) {}
 void game_espr_on2(const uint8_t *ins, int d) { (void)ins; (void)d; }
 void game_espr_kill2(int h) { (void)h; }
 int game_sight_blocked(int32_t a, int32_t b, int32_t c, int32_t d, int32_t e, int32_t f) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; return 0; }
+void game_enemy_part_set(int s, int p, int f, int v) { (void)s; (void)p; (void)f; (void)v; }
 int game_keys(int pressed) { (void)pressed; return 0; }
 void game_fade_set(int n, int k, int s) { (void)n; (void)k; (void)s; }
 void game_fade_adjust(int n, int l) { (void)n; (void)l; }

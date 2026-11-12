@@ -682,7 +682,9 @@ Specific risks:
    appearances logic beyond sce_em_set; his knockdown/stagger missing.
 2. SMG / flamethrower continuous fire: flamethrower has no flame effect sprite yet (only sound
    and damage); SMG casing rate maybe too high. The rocket launcher (Leon B) hits at once
-   (no flying rocket).
+   (no flying rocket). Update November 2026: the flamethrower's flame was there already,
+   the rocket now flies (core effect 2 sub 5, `rocket_tick`; speed guessed) and Mr X
+   flinches and goes down under 20000 HP (`tyrant_shot`).
 3. Leon B: chosen at NEW GAME (the PS1 needs Claire A's clear data from disc 2); its start
    from ENDING.BIN, the rest is the room scripts with flag 1:1 - not played through.
 4. Terminals: door lock service and the RODEM fingerprint registry (name board) ported.
@@ -714,11 +716,11 @@ in scenes. What is left:
 
 1. The user plays Leon A through on the DS; fix what turns up (state of the last PRs).
 2. Release: PR develop -> main, then delete develop (remote + local) and recreate from main.
-3. Leon B through (NEW GAME choice): Mr X's knockdown (overlay hit handler), his scripted
-   appearances, the flamethrower's flame sprite, a flying rocket.
+3. Leon B through (NEW GAME choice): Mr X's scripted appearances; play it through on the DS.
 4. Ending rest: rewards (special weapons with endless rounds), clear data, extra modes.
 5. Partner AI rest: states 6-10, spiders, her real weapon (`obj[0] >> 29`) and shot sound.
-6. Polish: gore variants (head burst, torn upper body, lost arm), SPU reverb, the G forms'
+6. Polish: gore variants (torn upper body, lost arm; the head burst is in: shotgun aimed up from
+   near, the magnums' killing hit), SPU reverb, the G forms'
    and moths' real AIs, an options menu (volumes, controls); the opcodes still skipped
    (engine-notes section 1, "More opcodes": `plc_neck`, `parts_set`, the lights ...).
 7. Performance on the real DS (polygon budget in rooms with many enemies; VERTEX_LIMIT).

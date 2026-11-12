@@ -320,6 +320,23 @@ void roomfx_kill2(int handle)
             inst[i].active = 0;
 }
 
+void roomfx_set_pos(int handle, int32_t x, int32_t y, int32_t z)
+{
+    for (int i = 0; i < MAX_INSTANCES; i++)
+        if (inst[i].active && handle && inst[i].handle == handle) {
+            inst[i].x = x;
+            inst[i].y = y;
+            inst[i].z = z;
+        }
+}
+
+void roomfx_spawn_handle(int handle, int id, int type, int32_t x, int32_t y, int32_t z, int size, int dir_re2)
+{
+    next_handle = handle;
+    roomfx_spawn(id, type, x, y, z, size, dir_re2);
+    next_handle = 0;
+}
+
 void roomfx_kill(int id, int type)
 {
     for (int i = 0; i < MAX_INSTANCES; i++)

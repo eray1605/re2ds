@@ -50,7 +50,7 @@ enum {
     OP_ITEM_AOT_SET_4P = 105, OP_PLC_MOTION = 63, OP_PLC_DEST = 64, OP_PLC_RET = 66, OP_PLC_ROT = 88,
     OP_PLC_CNT = 91, OP_PLC_STOP = 102, OP_XA_ON = 89, OP_MOVIE_ON = 111, OP_SCE_BGMTBL_SET = 87,
     OP_KAGE_SET = 96, OP_CUT_BE_SET = 97, OP_SCE_ESPR3D_ON = 84,
-    OP_SUPER_SET = 72, OP_SUPER_RESET = 73, OP_SCE_SHAKE_ON = 92, OP_SCE_EM_POS_CK = 133,
+    OP_SUPER_SET = 72, OP_SUPER_RESET = 73, OP_SCE_SHAKE_ON = 92, OP_SCE_EM_POS_CK = 133, OP_PARTS_SET = 110,
     OP_SCE_ESPR_ON2 = 100, OP_SCE_ESPR_KILL2 = 101, OP_SCE_ESPR3D_ON2 = 117,
     OP_SCE_KEY_CK = 79, OP_SCE_FADE_SET = 83, OP_WEAPON_CHG = 90, OP_SCE_FADE_ADJUST = 116,
     OP_SCE_AMMO_CMP = 129, OP_PLC_HEAL = 131, OP_POISON_CK = 134, OP_POISON_CLR = 135, OP_SCE_ITEM_LOST2 = 136,
@@ -827,6 +827,10 @@ static void run_thread(Thread *t)
                     work_member_set(t, 0x0B + k, (int16_t)value + t->speed[k]);
             if (t->speed[4] && work_member(t, 0x0F, &value))
                 work_member_set(t, 0x0F, (uint16_t)(value + t->speed[4]));
+            if (t->work_type == 4) // room objects turn about x and z too (members 0x0e, 0x10)
+                for (int k = 3; k <= 5; k += 2)
+                    if (t->speed[k] && work_member(t, 0x0E + (k - 3), &value))
+                        work_member_set(t, 0x0E + (k - 3), (int16_t)value + t->speed[k]);
             break;
         }
         case OP_ADD_ASPEED: // scd_op_31
@@ -911,6 +915,12 @@ static void run_thread(Thread *t)
                 for (int k = 0; k < 3; k++)
                     work_member_set(t, 0x0E + k, rd16(ins + 2 + 2 * k));
             }
+            break;
+        case OP_PARTS_SET: // scd_op_6e: pad, part, field, u16 value (work object's part)
+            if (t->work_type == 3)
+                game_enemy_part_set(t->work_index, ins[2], ins[3], ru16(ins + 4));
+            else if (t->work_type == 2)
+                game_enemy_part_set(0xFF, ins[2], ins[3], ru16(ins + 4));
             break;
         case OP_SCE_SHAKE_ON: // scd_op_5c: s8 x, s8 y - the picture's offset
             game_shake((int8_t)ins[1], (int8_t)ins[2]);

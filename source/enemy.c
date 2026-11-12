@@ -124,6 +124,7 @@ int game_sight_blocked(int32_t x0, int32_t y0, int32_t z0, int32_t x1, int32_t y
 void game_enemy_sound(int sound, int32_t x, int32_t z);
 void game_player_voice(int sound);         // CORE00: 0 / 2 grabbed, 3 dies
 int game_player_damage(int damage);       // 0 hurt, 1 down to 0 HP once (breaks free), 2 dies
+int game_free_object_textures(void);      // main.c: room objects give their texture memory up
 void game_player_grabbed(int on);
 void game_player_pose(const Model *set, int anim, int key, int32_t x, int32_t z, int16_t dir);
 void game_player_died(void);              // death animation over
@@ -230,6 +231,7 @@ typedef struct {
     uint8_t airborne;           // in a jump (obj+0x219)
     uint8_t hidden;             // not drawn nor hit (obj flag 2: the arms inside the wall)
     uint16_t hide_bones;        // parts not drawn (the arms: the other arm of the model)
+    uint32_t dark_parts;        // parts the room script turned black (parts_set field 2 / 3): not drawn
     uint8_t hit_lock;           // ticks the shots pass it by after a hit (obj+0x1d3)
     int16_t fall_v;             // torn apart: the upper body's fall (obj+0x15a)
     uint8_t bounces;            // ... and its bounces left (obj+0x16a)
@@ -253,6 +255,8 @@ typedef struct {
     int16_t home_x, home_z, home_dir; // where it was set (the arms: obj+0x21c / 0x220 / 0x218)
     uint16_t kill_flag;         // array << 8 | bit set when it dies (sce_em_set's set flag, obj+0x1ce)
     uint16_t trigger;           // member 0x17 (obj+0x1d4): the room script's signal (the alligator)
+    uint8_t answer[3];          // members 0x18-0x1a (obj+0x1d6/8/a): what it tells the script (the
+                                // second tyrant: beaten, hurt, Leon far away)
     uint8_t leg;                // the alligator: which stretch of the channel (obj+0x21a)
     int16_t roll;               // turned about the x axis (the cockroaches on the pipe)
     // on a wall or the ceiling (lickers): SURF_*
@@ -511,17 +515,25 @@ static int load_type(int type)
     uint32_t page_size = 512 + TEX_PAGE_WIDTH * TEX_PAGE_HEIGHT;
     if (t->tex_data && t->pages <= MAX_PAGES && size == page_size * t->pages) {
         DC_FlushRange(t->tex_data, size);
-        glGenTextures(t->pages, t->tex);
-        t->drawable = 1;
-        for (int p = 0; p < t->pages; p++) {
-            const uint8_t *page = t->tex_data + p * page_size;
-            glBindTexture(0, t->tex[p]);
-            if (!glTexImage2D(0, 0, GL_RGB256, TEXTURE_SIZE_128, TEXTURE_SIZE_256, 0, TEXGEN_TEXCOORD,
-                              page + 512)) {
-                t->drawable = 0; // texture memory full
-                enemy_last_error = 7;
+        for (int attempt = 0; attempt < 2; attempt++) {
+            glGenTextures(t->pages, t->tex);
+            t->drawable = 1;
+            for (int p = 0; p < t->pages && t->drawable; p++) {
+                const uint8_t *page = t->tex_data + p * page_size;
+                glBindTexture(0, t->tex[p]);
+                if (!glTexImage2D(0, 0, GL_RGB256, TEXTURE_SIZE_128, TEXTURE_SIZE_256, 0, TEXGEN_TEXCOORD,
+                                  page + 512))
+                    t->drawable = 0; // texture memory full
+                else
+                    glColorTableEXT(0, 0, 256, 0, 0, (const uint16_t *)page);
             }
-            glColorTableEXT(0, 0, 256, 0, 0, (const uint16_t *)page);
+            if (t->drawable)
+                break;
+            glDeleteTextures(t->pages, t->tex); // what fitted, then once more with the objects' room
+            if (attempt || !game_free_object_textures()) {
+                enemy_last_error = 7;
+                break;
+            }
         }
     } else {
         enemy_last_error = 6;
@@ -784,6 +796,7 @@ int enemy_member_get(int slot, int member, int *value)
     case 3: *value = e->routine == 1 ? e->state : e->mode; return 1;
     case 7: *value = e->flags; return 1;
     case 0x17: *value = e->trigger; return 1;
+    case 0x18: case 0x19: case 0x1a: *value = e->answer[member - 0x18]; return 1;
     case 0x0B: *value = e->x; return 1;
     case 0x0C: *value = e->y; return 1;
     case 0x0D: *value = e->z; return 1;
@@ -3999,8 +4012,14 @@ static void spider_shot(Enemy *e)
 #define TY_WALK 1
 #define TY_ATTACK 3
 #define TY_PAUSE 4
+#define TY_FLINCH 5             // routine 2 kinds 0 / 1 (0x80103fbc / 0x80104078): moves 4 / 5, 9
+#define TY_RISE 6               // ... kind 3's end: move 11
+#define TY_DOWN 23              // ... kind 3 (0x801040e8): move 10, then he lies (>= ST_DYING: never hit)
+#define TY_BREAK_IN 7           // held variant 6 (state 15, 0x8010372c): through the wall with move 16
+#define TY_SCENE 8              // held variant 4 (state 13, 0x80103050): room 604's scene
 #define TY_WALK_ANIM 0
 #define TY_STAND_ANIM 1
+#define TY_LIFE 20000           // what a shot cannot take: under it he goes down (0x80103ec8)
 
 static const struct { uint8_t anim, key0, key1; uint16_t range; uint8_t damage; } ty_attack[3] = {
     { 12, 0x2F, 0x32, 550, 40 },   // 0x801025b0: the big swing, 231 keys
@@ -4012,10 +4031,182 @@ static int is_tyrant(const Enemy *e) { return types[e->type].type == TYPE_TYRANT
 
 static void tyrant_spawn(Enemy *e)
 {
-    e->hp = 20000 + (rnd() & 0x7F);
+    e->hp = TY_LIFE + (easy() ? 180 : 250); // tables 0x80104674 / 0x80104660, first entry (the room's is not read)
     e->floor_y = e->y;
     set_anim(e, SET_GAIT, TY_STAND_ANIM, 0);
     dog_enter(e, TY_STAND);
+}
+
+// A shot (routine 2, FUN_80103eb8): under 20000 HP he goes down (kind 3);
+// else he flinches with move 4 or 5 - or 9 with status 0x20 - turning to
+// Leon, unless a draw (FUN_80100630, taken as 1 in 4 here) lets it pass.
+static void tyrant_shot(Enemy *e)
+{
+    if (e->state >= ST_DYING || e->state == TY_RISE)
+        return;
+    if (e->hp < TY_LIFE) {
+        // down counts as beaten (FUN_800188ac): his set flag - room 10D drops an item on it
+        if (e->kill_flag) {
+            flag_set(e->kill_flag >> 8, e->kill_flag & 0xFF, 1);
+            e->kill_flag = 0;
+        }
+        dog_enter(e, TY_DOWN);
+        set_anim(e, SET_GAIT, 10, 0);
+        e->trigger = 0;
+        return;
+    }
+    if (e->state == TY_FLINCH || !(rnd() & 3))
+        return;
+    dog_enter(e, TY_FLINCH);
+    set_anim(e, SET_GAIT, 4 + (rnd() & 1), 0);
+}
+
+// One keyframe of the room's animation (or his own) with its root motion,
+// free of the room's walls (obj[0] | 8 in the scene); 1 on the last key.
+static int ty_scene_step(Enemy *e, int moves)
+{
+    const Model *m = anim_model(e);
+    const ModelAnim *a = &m->anims[e->anim];
+    if (!a->count)
+        return 1;
+    int prev = e->key;
+    e->key = (e->key + 1) % a->count;
+    if (moves) {
+        int32_t fwd = frame_speed(m, a, e->key) - (e->key == 0 ? 0 : frame_speed(m, a, prev));
+        e->x += (fwd * cosLerp(e->dir)) >> 12;
+        e->z -= (fwd * sinLerp(e->dir)) >> 12;
+    }
+    return e->key == a->count - 1;
+}
+
+static void ty_room_anim(Enemy *e, int i, int n, int key)
+{
+    e->anim_set = room_sets[i];
+    e->anim = n < e->anim_set->header->num_anims ? n : 0;
+    int count = e->anim_set->anims[e->anim].count;
+    e->key = count ? key % count : 0;
+}
+
+static void ty_own_anim(Enemy *e, int n)
+{
+    if (e->anim_set || e->anim != types[e->type].set_start[SET_GAIT] + n) {
+        e->anim_set = NULL;
+        set_anim(e, SET_GAIT, n, 0);
+    }
+}
+
+// Room 604 (held, variant 4; state 13 0x80103050, steps table 0x8010009c):
+// the script drives him with member 0x17 = 1 ... 8. He waits above the room
+// (y -25000), drops with his own move 14 from key 51 (1000 a frame down
+// to -18000) and lands; 2 / 3 his own moves 1 and 9; 4 room move 1; 5 turns
+// round with room move 1, then his own move 8; 6 room move 2; 7 room move 3;
+// 8 turns round, room move 4, then room move 0. All free of the room's walls.
+static void tyrant_scene(Enemy *e, int i)
+{
+    int t = e->trigger;
+    switch (e->sub) {
+    case 0:
+        e->y = -25000;
+        e->trigger = 0;
+        e->sub = 1;
+        break;
+    case 1:
+        if (t != 1)
+            break;
+        e->y = -24000;
+        ty_own_anim(e, 14); // his own set: steps 1-3 call FUN_800289d4 with the routine's set
+        {
+            int count = anim_model(e)->anims[e->anim].count;
+            e->key = count ? 51 % count : 0;
+        }
+        e->sub = 2;
+        // fall through
+    case 2:
+        ty_scene_step(e, 0);
+        e->y += 1000;
+        if (e->y >= -18000) {
+            e->y = -18000;
+            e->sub = 3;
+        }
+        break;
+    case 3:
+        if (ty_scene_step(e, 0))
+            e->sub = 4;
+        break;
+    case 4:
+        if (t == 2)
+            e->sub = 5;
+        break;
+    case 5:
+        ty_own_anim(e, 1);
+        ty_scene_step(e, 0);
+        if (t == 3) {
+            ty_own_anim(e, 9);
+            e->sub = 6;
+        }
+        break;
+    case 6:
+        if (ty_scene_step(e, 0))
+            e->sub = 7;
+        break;
+    case 7:
+        if (t == 4) {
+            ty_room_anim(e, i, 1, 0);
+            e->sub = 8;
+        }
+        break;
+    case 8:
+        if (ty_scene_step(e, 1))
+            e->sub = 9;
+        break;
+    case 9:
+        if (t == 5) {
+            e->dir = (e->dir + 16384) & 32767;
+            ty_room_anim(e, i, 1, 0);
+            e->sub = 10;
+        }
+        break;
+    case 10:
+        if (e->anim_set && ty_scene_step(e, 1))
+            ty_own_anim(e, 8);
+        else if (!e->anim_set)
+            ty_scene_step(e, 0);
+        if (t == 6) {
+            ty_room_anim(e, i, 2, 0);
+            e->sub = 11;
+        }
+        break;
+    case 11:
+        ty_scene_step(e, 1);
+        if (t == 7) {
+            ty_room_anim(e, i, 3, 0);
+            e->sub = 12;
+        }
+        break;
+    case 12:
+        if (ty_scene_step(e, 1))
+            e->sub = 13;
+        break;
+    case 13:
+        if (t == 8) {
+            e->dir = (e->dir + 16384) & 32767;
+            ty_room_anim(e, i, 4, 0);
+            e->sub = 14;
+        }
+        break;
+    case 14:
+        if (ty_scene_step(e, 1)) {
+            ty_room_anim(e, i, 0, 0);
+            e->sub = 15;
+        }
+        break;
+    case 15:
+        if (ty_scene_step(e, 1))
+            e->sub = 16;
+        break;
+    default: // the scene is over: the script takes it from here
+        break;
+    }
 }
 
 static void tyrant_tick(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
@@ -4025,9 +4216,44 @@ static void tyrant_tick(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
     switch (e->state) {
     case TY_STAND:
         anim_step(e, NULL);
+        // Held (status 0x4000), the PS1 starts him in state 9 + variant (table 0x80104c90).
+        // Variant 6 (rooms 20C, 20D) waits for member 0x17 = 1 from the script, then
+        // breaks in through the wall; the others (604's scene: variant 4, steps 1-8) are
+        // left standing until the script clears the hold (member 7).
+        if ((e->flags & EF_HOLD) && (e->flags & 0x0F) == 4 && room_sets[i]) {
+            dog_enter(e, TY_SCENE);
+            e->sub = 0;
+            tyrant_scene(e, i);
+            break;
+        }
+        if ((e->flags & EF_HOLD) && (e->flags & 0x0F) == 6 && e->trigger == 1) {
+            e->trigger = 0;
+            dog_enter(e, TY_BREAK_IN);
+            set_anim(e, SET_GAIT, 16, 0);
+            break;
+        }
         if (!(e->flags & EF_HOLD) && near && !p->dead && same_floor(e, p))
             dog_enter(e, TY_WALK);
         break;
+    case TY_SCENE:
+        if (!(e->flags & EF_HOLD)) { // the script let him go (member 7)
+            e->anim_set = NULL;
+            set_anim(e, SET_GAIT, TY_STAND_ANIM, 0);
+            dog_enter(e, TY_STAND);
+            break;
+        }
+        tyrant_scene(e, i);
+        break;
+    case TY_BREAK_IN: { // no room collision on the way (obj[0] | 8), then he walks free
+        int done = anim_step(e, &fwd);
+        e->x += (fwd * cosLerp(e->dir)) >> 12;
+        e->z -= (fwd * sinLerp(e->dir)) >> 12;
+        if (done) {
+            e->flags &= ~EF_HOLD;
+            dog_enter(e, TY_WALK);
+        }
+        break;
+    }
     case TY_WALK:
         if (e->sub == 0) {
             set_anim(e, SET_GAIT, TY_WALK_ANIM, e->key);
@@ -4078,6 +4304,27 @@ static void tyrant_tick(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
         }
         break;
     }
+    case TY_FLINCH:
+        e->dir = (e->dir + turn_delta(e, p->x, p->z, 8)) & 32767;
+        if (anim_step(e, NULL))
+            dog_enter(e, TY_WALK);
+        break;
+    case TY_DOWN: { // falls, then lies until the room script wakes him (member 0x17, obj+0x1d4)
+        const ModelAnim *a = &anim_model(e)->anims[e->anim];
+        if (e->key + 1 < a->count)
+            anim_step(e, NULL);
+        else if (e->trigger) {
+            e->trigger = 0;
+            e->hp = TY_LIFE + (easy() ? 180 : 250);
+            dog_enter(e, TY_RISE);
+            set_anim(e, SET_GAIT, 11, 0);
+        }
+        break;
+    }
+    case TY_RISE:
+        if (anim_step(e, NULL))
+            dog_enter(e, TY_WALK);
+        break;
     default:
         anim_step(e, NULL);
         break;
@@ -5879,10 +6126,133 @@ static const struct ActorType *actor_of(const Enemy *e)
 
 static int is_actor(const Enemy *e) { return actor_of(e) != NULL; }
 
+// The second tyrant of 702 (type 0x2b; overlay 0x911, init 0x80101b20,
+// main 0x8010187c): 20000 + 250 HP (EASY 200, 0x80104b40). Every frame
+// member 0x1a = Leon farther than 2800 (0x80101d80), 0x19 = 1 once under
+// 20000 (0x80101ac4), and the HP never go under 10000 (0x80101adc): only
+// the rocket kills him - the overlay marks him (obj+0x1d3 | 0x80) while
+// Leon holds the rocket launcher (0x800c7902 = 17). Dead, routine 3 is the
+// end scene (0x8010346c): he stands at (-14547, -14636) facing 1432, move 5
+// from key 10, member 0x18 = 1 and the script's ending runs (702 function 14).
+#define TYPE_SUPER_TYRANT 0x2b
+static int is_super_tyrant(const Enemy *e) { return types[e->type].type == TYPE_SUPER_TYRANT && e->kill_flag; }
+
+static void super_tyrant_tick(Enemy *e, const EnemyTarget *p, uint32_t d)
+{
+    e->answer[2] = d > 2800;
+    if (e->hp < 20000)
+        e->answer[1] = 1;
+    if (e->hp < 10000 && e->state < ST_DYING)
+        e->hp = 10000;
+}
+
+// His fight (routine 1, states table 0x80104b54 / 0x80104b78; obj+0x228 the
+// frames walked, obj+0x22a the pause after a hit):
+//   1 walk (0x80101d44): his move 1, turning 32 a frame to Leon. After 220
+//     frames, facing him (300) and more than 3500 away: 4. Within reach (2300,
+//     1 in 64 2600; 1900 when Leon is under 81 HP) and facing him (400): 3 or,
+//     straight on (140), 3 in 4 times 2.
+//   2 swing (0x80101fd4): move 2, hit with part 10 on keys 14-19 (200 + 500
+//     around it, FUN_80100790); a pause of 30 after a hit.
+//   3 both hands (0x8010226c): move 4, part 10 and part 16 on keys 15-19.
+//   4 charge (0x80102584): move 8, part 10 on keys 27-33 (400).
+// Damage: the main executable's player hit (FUN_800152b0 kind 2), not read;
+// 40 / 60 as before.
+#define SUT_WALK 15
+#define SUT_SWING 16
+#define SUT_BOTH 17
+#define SUT_CHARGE 18
+static const struct { uint8_t anim, key0, key1, part2; uint16_t range; uint8_t damage; } sut_attack[3] = {
+    { 2, 14, 19, 0, 200, 40 },
+    { 4, 15, 19, 16, 200, 60 },
+    { 8, 27, 33, 0, 400, 60 },
+};
+
+static int sut_reaches(Enemy *e, const EnemyTarget *p, int part, int range)
+{
+    int32_t x, y, z;
+    bone_point(e, part, NULL, &x, &y, &z);
+    int64_t dx = p->x - x, dz = p->z - z;
+    return dx * dx + dz * dz < (int64_t)(range + 500) * (range + 500);
+}
+
+static void super_tyrant_fight(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
+{
+    int32_t fwd;
+    int a = (((angle_to(e, p->x, p->z) - e->dir + 16384) & 32767) - 16384) / 8; // RE2 units
+    if (e->cooldown)
+        e->cooldown--;
+    switch (e->state) {
+    case SUT_WALK: {
+        e->timer++;
+        e->dir = (e->dir + turn_delta(e, p->x, p->z, 32)) & 32767;
+        anim_step(e, &fwd);
+        move_dir(e, i, e->dir, fwd > 0 ? fwd : 0);
+        if (p->dead || !p->can_grab || e->cooldown)
+            break;
+        if (e->timer > 220 && abs(a) < 300 && d > 3500) {
+            e->timer = 0;
+            dog_enter(e, SUT_CHARGE);
+            set_anim(e, SET_GAIT, sut_attack[2].anim, 0);
+            break;
+        }
+        uint32_t reach = p->hp < 81 ? 1900 : (rnd() & 0x3F) == 1 ? 2600 : 2300;
+        if (d < reach && abs(a) < 400) {
+            int k = abs(a) < 140 && (rnd() & 3) < 3 ? 0 : 1;
+            dog_enter(e, k ? SUT_BOTH : SUT_SWING);
+            set_anim(e, SET_GAIT, sut_attack[k].anim, 0);
+        }
+        break;
+    }
+    case SUT_SWING:
+    case SUT_BOTH:
+    case SUT_CHARGE: {
+        int k = e->state - SUT_SWING;
+        int done = anim_step(e, &fwd);
+        if (k == 2)
+            move_dir(e, i, e->dir, fwd > 0 ? fwd : 0);
+        else
+            e->dir = (e->dir + turn_delta(e, p->x, p->z, 8)) & 32767;
+        if (e->key >= sut_attack[k].key0 && e->key <= sut_attack[k].key1 && !e->cooldown && p->can_grab &&
+            (sut_reaches(e, p, 10, sut_attack[k].range) ||
+             (sut_attack[k].part2 && sut_reaches(e, p, sut_attack[k].part2, sut_attack[k].range)))) {
+            game_blood(0, p->x, p->y - 1500, p->z, e->dir, 25, p->y);
+            if (game_player_damage(sut_attack[k].damage) == 2)
+                game_player_killed();
+            else
+                game_player_hurt(((p->dir - e->dir + 8192) & 32767) < 16384 ? 2 : 1);
+            e->cooldown = 30;
+        }
+        if (done) {
+            dog_enter(e, SUT_WALK);
+            set_anim(e, SET_GAIT, 1, 0);
+        }
+        break;
+    }
+    }
+}
+
+// a rocket's hit (main.c rocket_tick): the end scene
+static void super_tyrant_rocket(Enemy *e)
+{
+    e->x = -14547;
+    e->z = -14636;
+    e->dir = (1432 * 8) & 32767;
+    set_anim(e, SET_GAIT, 5, 10);
+    e->state = ST_DYING;         // never aimed at again; plays his move, then ST_DEAD
+    e->answer[0] = 1;
+    if (e->kill_flag) {
+        flag_set(e->kill_flag >> 8, e->kill_flag & 0xFF, 1);
+        e->kill_flag = 0;
+    }
+}
+
 static void actor_spawn(Enemy *e)
 {
     const struct ActorType *a = actor_of(e);
     e->hp = a->hp < 0 ? 32767 : a->hp;
+    if (types[e->type].type == TYPE_SUPER_TYRANT)
+        e->hp = 20000 + (easy() ? 200 : 250);
     e->floor_y = e->y;
     set_anim(e, SET_GAIT, a->idle, rnd() & 7);
     if (!e->kill_flag || a->walk < 0)
@@ -5895,6 +6265,28 @@ static void actor_tick(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
 {
     const struct ActorType *a = actor_of(e);
     int32_t fwd;
+    if (is_super_tyrant(e) || (types[e->type].type == TYPE_SUPER_TYRANT && e->answer[0])) {
+        if (e->answer[0]) { // the end scene: his move, then still
+            const ModelAnim *an = &anim_model(e)->anims[e->anim];
+            if (e->key + 1 < an->count)
+                e->key++;
+            else
+                e->state = ST_DEAD;
+            return;
+        }
+        super_tyrant_tick(e, p, d);
+        if (e->state == ACT_IDLE && !flag_get(2, 7)) { // the scene is over: he fights
+            dog_enter(e, SUT_WALK);
+            set_anim(e, SET_GAIT, 1, 0);
+            e->timer = 0;
+        }
+        if (e->state >= SUT_WALK && e->state <= SUT_CHARGE) {
+            if (flag_get(2, 7) || e->plc.active)
+                return; // a scene has him
+            super_tyrant_fight(e, i, p, d);
+            return;
+        }
+    }
     if (e->cooldown)
         e->cooldown--;
     switch (e->state) {
@@ -7266,8 +7658,24 @@ static void split_tick(Enemy *e, int i)
             l->y = e->y;
             l->z = e->z;
             l->dir = e->dir;
+            if (!e->pose_valid)
+                update_pose(e); // the pose of this very key, not the last one drawn
             memcpy(l->rot, e->pose_rot, sizeof(l->rot));
             memcpy(l->ofs, e->pose_ofs, sizeof(l->ofs));
+            // Stood on the floor: the reel at key 20 has the body thrown back and the
+            // feet off the ground, and the legs hung in the air. Their lower ankle
+            // (parts 4 and 7) goes where it is standing: 224 above the floor.
+            {
+                int32_t ax, ay, az, low = INT32_MIN;
+                static const int feet[2] = { 4, 7 };
+                for (int f = 0; f < 2; f++) {
+                    bone_point(e, feet[f], NULL, &ax, &ay, &az);
+                    if (ay > low)
+                        low = ay;
+                }
+                if (low != INT32_MIN)
+                    l->y += (e->floor_y - 224) - low;
+            }
             e->hide_bones |= LEG_BONES;
             e->fall_v = 10;
             e->bounces = 2;
@@ -7479,6 +7887,10 @@ int enemy_hit(int32_t x, int32_t y, int32_t z, int16_t dir, int range, int weapo
         return best;
     }
     if (is_actor(e)) {
+        if (is_super_tyrant(e) && weapon == 0x11) {
+            super_tyrant_rocket(e);
+            return best;
+        }
         if (e->hp < 32767)
             e->hp -= damage[box];
         game_blood(0, e->x, e->y - 1200, e->z, dir, 20, e->floor_y);
@@ -7526,9 +7938,10 @@ int enemy_hit(int32_t x, int32_t y, int32_t z, int16_t dir, int range, int weapo
         larva_shot(e, best);
         return best;
     }
-    if (is_tyrant(e)) { // he shrugs it off
+    if (is_tyrant(e)) {
         e->hp -= damage[box];
         game_blood(0, e->x, e->y - 1800, e->z, dir, 20, e->floor_y);
+        tyrant_shot(e);
         return best;
     }
     if (is_spider(e)) {
@@ -7564,6 +7977,31 @@ int enemy_hit(int32_t x, int32_t y, int32_t z, int16_t dir, int range, int weapo
     }
     e->hp -= damage[box];
     game_blood(0, e->x, e->y - 2300, e->z, dir, 20, e->y);
+    int shotgun = weapon == 7 || weapon == 8;
+    if (shotgun) // the shotgun's spread: a burst of blood, not the handgun's splash
+        blood_burst(e, dir, box == 0 ? 1600 : 1400);
+    // Head bursts: the shotgun aimed up from near (0x80108b2c: head and arms)
+    // and the magnums' killing hit (0x80109204) take the head off (part 8): it
+    // dies (the PS1 lets it walk on headless 1-3 s half the time: not ported).
+    int standing = e->state != ST_LYING && e->state != ST_DOWN && e->state != ST_GRAB;
+    if (!is_person(e) && standing &&
+        ((shotgun && aim == AIM_UP && box == 0) || ((weapon == 5 || weapon == 6) && e->hp < 0))) {
+        e->hide_bones |= 1 << BONE_HEAD;
+        if (shotgun) { // 0x80108b2c: a whole arm too (parts 12-14), half the time the other (9-11)
+            e->hide_bones |= 0x7000;
+            if (rnd() & 1)
+                e->hide_bones |= 0x0E00;
+        }
+        if (e->hp >= 0)
+            e->hp = -1;
+        blood_burst(e, dir, 1900);
+        blood_burst(e, (dir + 0x2000) & 32767, 2000);
+        e->push_dir = dir;
+        e->push = shotgun ? 300 : 0;
+        fall(e, 1);
+        sound_at(e, SND_TEAR);
+        return best;
+    }
     // The shotgun (zombie tables 0x8010c764 / 0x8010ca48, weapons 7 and 8,
     // upper body): near it throws the zombie over (0x8010663c; the PS1 then
     // often uses "thrown backward" 0x80109550 - impulse 400, -50 per tick,
@@ -7693,7 +8131,8 @@ static void draw_bone(const EnemyType *t, const Enemy *e, int bone)
     glRotateZi(rot[2]);
     if (bone == 0 && bend)
         glRotateZi(-bend * 8);
-    for (int p = 0; p < t->pages && !(bone < 16 && (e->hide_bones >> bone & 1)); p++) {
+    for (int p = 0; p < t->pages && !(bone < 16 && (e->hide_bones >> bone & 1)) && !(bone < 32 && (e->dark_parts >> bone & 1));
+         p++) {
         uint32_t off = m->lists[bone * t->pages + p];
         if (off) {
             int page = bone < 16 && e->bone_page[bone] && e->bone_page[bone] <= t->pages ? e->bone_page[bone] - 1 : p;
@@ -7707,6 +8146,26 @@ static void draw_bone(const EnemyType *t, const Enemy *e, int bone)
     for (int c = t->first_child[bone]; c >= 0; c = t->next_sibling[c])
         draw_bone(t, e, c);
     glPopMatrix(1);
+}
+
+// parts_set (scd_op_6e, 0x80051d4c): pad, part, field, u16 value into the
+// part's record (124 bytes each from obj+0x198). Fields 2 / 3 are its colour
+// (+112 red | green << 8, +114 blue: the GPU code of its polygons, 0x8002c9ac):
+// room 201 turns the licker passing outside the window black part by part,
+// so it vanishes in the dark. A part near black is left out here (the DS
+// background has no night behind it to vanish in). Fields 0 / 1 / 4-6 (its
+// light and place) are not ported.
+void enemy_part_set(int slot, int part, int field, int value)
+{
+    if (slot == 0xFF)
+        slot = PARTNER_SLOT;
+    if (slot < 0 || slot >= MAX_ENEMIES || part < 0 || part >= 32)
+        return;
+    Enemy *e = &enemies[slot];
+    if (field == 2) { // red | green << 8
+        int dark = (value & 0xFF) < 8 && (value >> 8 & 0xFF) < 8;
+        e->dark_parts = dark ? e->dark_parts | 1u << part : e->dark_parts & ~(1u << part);
+    }
 }
 
 // where a point of a part is in the room (main.c: a carried object let go, super_reset)
