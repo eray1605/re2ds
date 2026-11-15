@@ -31,16 +31,29 @@ enum {
     SCE_NORMAL = 3,
     SCE_MESSAGE = 4,
     SCE_EVENT = 5,
+    SCE_FLAG_CHG = 6,          // sets flag data[0]:data[2] = data[4] (handler 0x8004e168)
+    SCE_WATER = 7,             // s16 data[0]: the water's surface (0x8004e1d4: obj+0x10c)
     SCE_SAVE = 9,              // typewriter
     SCE_ITEMBOX = 10,
+    SCE_DAMAGE = 11,           // hurt kind data[0], damage data[2] (0x8004e61c)
+    SCE_STATUS = 12,           // opens the status screen (0x8004e794)
+    SCE_DRAWER = 13,           // a desk locked with the small key: lock, item AOT, camera (0x8004e7d4)
     SCE_TERMINAL = 14,         // a computer: data[0] | data[2] << 4 picks the program (0x80036a90)
 };
 
 // Script variables the engine keeps up to date
+#define VAR_AOT_FRONT 0        // the AOT whose area the point before Leon is in (SAT 0x20)
+#define VAR_AOT_HERE 1         // ... Leon himself is in (SAT 0x40)
+#define VAR_ITEM_USED 2        // the item USEd on the status screen (0x800cc3ec)
 #define VAR_CUT 0x1A           // current camera (room 102 waits for it to open the gate)
+#define VAR_RND 0x1D           // a random number, new every frame and on sce_rnd
 
 // Flag arrays with a known meaning
 #define FLAGS_ITEM_PICKED 8    // bit n set = item AOT with picked index n taken
+#define FLAGS_ITEM_USABLE 10   // bit n set = item n can be USEd here (SCE_FLAG_CHG, every frame)
+#define FLAGS_DRAWER 63        // DS: desks unlocked (the PS1 keeps them with the doors' locks, 0x800cc630)
+#define FLAGS_MASKS 13         // arrays 13-28: camera 0-15's mask groups shown (MaskQuad.group);
+#define MASK_CAMERAS 16        // all set on room entry (0x8004f6c4), the room scripts clear some
 
 typedef struct {
     uint8_t active;
@@ -79,12 +92,37 @@ void game_play_sound(int bank, int sound);
 void game_bgm_control(int id, int op, int type, int left, int right);
 void game_bgmtbl_set(int stage, int room, int main, int sub); // a room's music from now on
 void game_item_get(int item, int count);  // sce_item_get: into the inventory, else the item box
+int game_keys(int pressed);               // PS1 action bits held (0) / newly pressed (1): 0x01 up, 0x02 right,
+                                          // 0x04 down, 0x08 left, 0x10 / 0x20 aim up / down, 0x40 fire, 0x80
+                                          // action, 0x100 aim, 0x200 run, 0x1000 confirm, 0x2000 cancel
+void game_object_super(int n, int parent, int part, const int16_t pos[3], const int16_t dir[3]); // super_set
+void game_object_super_reset(int n, const int16_t dir[3]);
+void game_super_on(int work, int index, const uint8_t *ins); // super_on: the work object put at a parent's point                                        // super_reset
+void game_espr_on2(const uint8_t *ins, int is_3d);   // sce_espr_on2 / sce_espr3d_on2
+void game_espr_kill2(int handle);                // sce_espr_kill2
+void game_espr_task(int kind, int index); // sce_espr_task
+void game_mirror_set(const uint8_t *ins);  // mirror_set
+int game_player_poisoned(void);                  // poison_ck
+void game_player_cure(void);                     // poison_clr
+int game_sight_blocked(int32_t x0, int32_t y0, int32_t z0, int32_t x1, int32_t y1, int32_t z1); // a room box between
+void game_shake(int x, int y);                   // sce_shake_on
+void game_neck_set(int work, int index, const uint8_t *ins); // plc_neck
+uint8_t *game_light_record(int cam); // the room light table's record of a camera (-1: the shown one), or NULL
+void game_enemy_part_set(int slot, int part, int field, int value); // parts_set
+void game_enemy_part_fx(int slot, int part, int drop); // sce_parts_bomb (0) / sce_parts_down (1)
+void game_fade_set(int n, int kind, int step);   // sce_fade_set
+void game_fade_adjust(int n, int level);         // sce_fade_adjust
+void game_player_heal(int item, int amount);     // plc_heal (and the status screen's herbs)
 void game_movie(int n);                     // movie_on: plays movie table entry n
 // sce_em_set: enemy / character in slot `slot` (enemy.c)
 // voice: kind of voice (byte 7), picks the enemy sound set of the room
 void game_spawn_enemy(int slot, int type, int flags, int voice, int x, int y, int z, int dir_re2);
 void game_enemy_motion(int slot, int motion, int ctr); // sce_em_set's motion, control word
 void game_enemy_skin(int slot, int model);            // sce_em_set's model byte (obj+0x1cf)
+// kage_set: an enemy's shadow - the colour the PS1 subtracts (r, g, b),
+// size along / across its facing, offset from its body (enemy.c)
+void game_enemy_shadow(int slot, int r, int g, int b, int w, int h, int ox, int oz);
+void game_cut_be_set(int cam, int n, int on); // cut_be_set: a camera zone on / off
 // enemy object members for the room scripts (member_set / member_copy /
 // member_cmp after work_set 3): 0 if the member is not modelled
 int game_enemy_member(int slot, int member, int *value);
@@ -97,6 +135,8 @@ void game_player_member_set(int member, int value);
 int game_plc(int work_type, int index, const uint8_t *ins);
 // xa_on: voice clip n of the stage (kind 0) or of the common table (kind 1)
 void game_voice(int kind, int n);
+void game_voice_volume(int v);   // xa_vol
+void game_music_scale(int percent); // scd_op_80
 int game_voice_playing(void);  // wsleeping waits for it (PS1 0x800c77d4 & 0x20)
 // obj_model_set: place model ins[1] of the room (the whole 38-byte instruction)
 void game_object_set(const uint8_t *ins);
@@ -106,13 +146,18 @@ void game_object_hide(int model);
 int game_object_member(int n, int member, int *value);
 // sce_espr_on (the 16-byte instruction) / sce_espr_kill: room effect sprites
 void game_espr_on(const uint8_t *ins);
+void game_espr3d_on(const uint8_t *ins); // sce_espr3d_on at a world position (room 204's drops)
 void game_espr_kill(int id, int type);
 // flr_set: the room's floor sound area n on / off (RoomFloorSound.floor & 0x80)
 void game_floor_sound_set(int n, int on);
 void game_object_member_set(int n, int member, int value);
 
 void script_room_enter(const Room *room);   // resets AOTs/threads, runs init, starts main
-void script_tick(void);
+void script_tick(void);                      // ends with variables 0-2 back to -1
+// After every frame's scripts (FUN_8004f484): variables 0-2 back to -1;
+// flag array 10 is cleared before the next AOT check (aot_frame_reset)
+void script_aot_frame_reset(void);
+void script_set_var(int n, int value);
 void script_start_event(int function);      // run a main-script function as a new thread
 
 int flag_get(int array, int bit);

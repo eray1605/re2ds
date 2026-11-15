@@ -70,8 +70,11 @@ def read_cameras(data, offset, count):
 def read_masks(data, offset):
     """PRI list for one camera (OpenBiohazard2 fileio/rdt_pri.go).
 
-    Returns rectangles {src:[u,v], dest:[x,y], depth, w, h}; dest is in
-    320x240 screen space, depth * 32 = distance along the view direction.
+    Returns rectangles {src:[u,v], dest:[x,y], depth, w, h, group}; dest is
+    in 320x240 screen space, depth * 32 = distance along the view direction.
+    group: the PS1 numbers the offset groups from ngroups down to 1
+    (FUN_80046334) and draws a mask only while bit group of flag array
+    13 + camera is set (0x8004655c); the room scripts switch them.
     """
     if offset is None:
         return []
@@ -81,7 +84,7 @@ def read_masks(data, offset):
     groups = [struct.unpack_from("<HHhh", data, offset + 4 + 8 * i) for i in range(ngroups)]
     pos = offset + 4 + 8 * ngroups
     masks = []
-    for count, _, gx, gy in groups:
+    for gi, (count, _, gx, gy) in enumerate(groups):
         for _ in range(count):
             square = struct.unpack_from("<H", data, pos + 6)[0]
             if square == 0:
@@ -91,7 +94,8 @@ def read_masks(data, offset):
                 sx, sy, dx, dy, depth, w = struct.unpack_from("<BBBBHH", data, pos)
                 h = w
                 pos += 8
-            masks.append({"src": [sx, sy], "dest": [dx + gx, dy + gy], "depth": depth, "w": w, "h": h})
+            masks.append({"src": [sx, sy], "dest": [dx + gx, dy + gy], "depth": depth, "w": w, "h": h,
+                          "group": ngroups - gi})
     assert len(masks) == nmasks, (len(masks), nmasks)
     return masks
 

@@ -32,12 +32,22 @@ typedef struct { uint8_t first, flags; uint16_t scale, speed, pad; } Sub; // see
 #define THROWN 8                   // instance flag: roomfx_throw (casings), lies a while after landing
 #define LIE_TICKS 60
 #define GRAVITY 6                  // as effect.c
-// A thrown casing bounces (FUN_8002038c): back up at 40 % of its speed, on at
-// 60 %, and each time it plays FUN_80057364(u16 +0x12 << 16 | 1). +0x12 is in
+// A thrown casing moves by its movement entry (FUN_8001d070: the speed
+// +0x0c..0x10 grows by the bytes +8..10 each frame; CORE00.ESP effect 2:
+// 0, +10, 0) and bounces on the floor (FUN_8002038c, the entry's floor
+// handler 0x2c): back up at 40 % of its speed, on at 60 %; on a wall
+// (FUN_8002047c, handler 0x2d) its way along turns round. Each contact plays
+// FUN_80057364(u16 +0x12 << 16 | 1). +0x12 is in
 // the effect's movement entry (CORE00.ESP effect 2, copied by FUN_8001b8fc):
 // 0x0102 for the handgun casing (sub 0), 0x0109 for the shotgun shell (sub 2),
 // i.e. bank 1 (the weapon's ARMSnn) sound 2 / 9. Here only the first contact
 // plays it, once a shot: the later bounces stay quiet.
+#define THROWN_GRAVITY 10
+// Movement steps per game tick. By the code above a casing thrown from the
+// hand (about 2770 up) lands after some 29 ticks (1.2 s), but in the original
+// its clink is heard right after the shot: two steps a tick (as at 50 Hz),
+// set by ear against the PS1 game until the cause is found.
+#define THROWN_STEPS 2
 #define BOUNCE_UP 40
 #define BOUNCE_ON 60
 #define BOUNCE_MIN 40              // slower than this it stays down (about 3 clicks)
@@ -58,6 +68,9 @@ typedef struct {
 typedef struct {
     uint8_t active, effect, type, frame, timer, flags, row, first;
     uint8_t id;
+    uint8_t handle;               // sce_espr_on2's number for sce_espr_kill2, 0 none
+    uint8_t scripted;             // started by sce_espr_on: owner below
+    int8_t owner_kind, owner_index; // its bytes 4 / 5 (0x80052db4: the world, Leon, ...)
     int32_t x, y, z;
     int32_t vx, vy, vz;           // falling sprites
     int32_t floor;                // thrown: lands here
@@ -99,6 +112,9 @@ static int parse(uint8_t *blob, uint32_t size, Effect *out, int max)
     return n;
 }
 static Instance inst[MAX_INSTANCES];
+static uint8_t next_handle;      // the number the next instance gets (roomfx_on2)
+static uint8_t next_scripted;
+static int8_t next_kind, next_index; // the owner the next one gets (sce_espr_on)
 
 void roomfx_load(int stage, int room)
 {
@@ -218,6 +234,10 @@ void roomfx_spawn(int id, int type, int32_t x, int32_t y, int32_t z, int size, i
             continue;
         memset(n, 0, sizeof(*n));
         n->active = 1;
+        n->handle = next_handle;
+        n->scripted = next_scripted;
+        n->owner_kind = next_kind;
+        n->owner_index = next_index;
         n->id = id;
         n->effect = f - effects;
         n->type = type;
@@ -252,6 +272,7 @@ void roomfx_throw(int id, int first, int row, int32_t x, int32_t y, int32_t z, i
             continue;
         memset(n, 0, sizeof(*n));
         n->active = 1;
+        n->handle = next_handle;
         n->id = id;
         n->effect = f - effects;
         n->type = row << 3;
@@ -272,12 +293,75 @@ void roomfx_throw(int id, int first, int row, int32_t x, int32_t y, int32_t z, i
     }
 }
 
+// sce_espr3d_on: the same layout up to the position, the direction at +20
+void roomfx_3d_on(const uint8_t *ins)
+{
+    next_scripted = 1;
+    next_kind = (int8_t)ins[4];
+    next_index = (int8_t)ins[5];
+    roomfx_spawn(ins[2], ins[3], rd16(ins + 8), rd16(ins + 10), rd16(ins + 12), ins[7], rd16(ins + 20));
+    next_scripted = 0;
+}
+
 void roomfx_on(const uint8_t *ins)
 {
     // op, ?, id, sub | row << 3, object type, object index, u16 parameter,
     // s16 x, y, z, direction; the parameter's high byte looks like a size
     // (0x24..0x40 for the fires of room 100)
+    next_scripted = 1;
+    next_kind = (int8_t)ins[4];
+    next_index = (int8_t)ins[5];
     roomfx_spawn(ins[2], ins[3], rd16(ins + 8), rd16(ins + 10), rd16(ins + 12), ins[7], rd16(ins + 14));
+    next_scripted = 0;
+}
+
+// sce_espr_task (scd_op_82, 0x80052cac): kind, index - ends every effect the
+// owner (0x80052db4: kind 0 the world, 1 Leon, 2 the partner, 3 an enemy,
+// 4 an object, as sce_espr_on's bytes 4 / 5) has; kind 6 ends them all
+// (0x8001ca68). Rooms 500, 613, 617.
+void roomfx_kill_owner(int kind, int index)
+{
+    for (int i = 0; i < MAX_INSTANCES; i++)
+        if (inst[i].active && (kind == 6 || (inst[i].scripted && inst[i].owner_kind == (int8_t)kind &&
+                                             inst[i].owner_index == (int8_t)index)))
+            inst[i].active = 0;
+}
+
+// sce_espr_on2 / sce_espr3d_on2 (scd_op_64 0x800529c0, scd_op_75
+// 0x80052b30): as sce_espr_on / sce_espr3d_on, with a number in byte 1 that
+// sce_espr_kill2 (scd_op_65) ends the effect by - room 20D's three flames.
+void roomfx_on2(const uint8_t *ins, int is_3d)
+{
+    next_handle = ins[1];
+    if (is_3d)
+        roomfx_3d_on(ins);
+    else
+        roomfx_on(ins);
+    next_handle = 0;
+}
+
+void roomfx_kill2(int handle)
+{
+    for (int i = 0; i < MAX_INSTANCES; i++)
+        if (inst[i].active && handle && inst[i].handle == handle)
+            inst[i].active = 0;
+}
+
+void roomfx_set_pos(int handle, int32_t x, int32_t y, int32_t z)
+{
+    for (int i = 0; i < MAX_INSTANCES; i++)
+        if (inst[i].active && handle && inst[i].handle == handle) {
+            inst[i].x = x;
+            inst[i].y = y;
+            inst[i].z = z;
+        }
+}
+
+void roomfx_spawn_handle(int handle, int id, int type, int32_t x, int32_t y, int32_t z, int size, int dir_re2)
+{
+    next_handle = handle;
+    roomfx_spawn(id, type, x, y, z, size, dir_re2);
+    next_handle = 0;
 }
 
 void roomfx_kill(int id, int type)
@@ -285,6 +369,34 @@ void roomfx_kill(int id, int type)
     for (int i = 0; i < MAX_INSTANCES; i++)
         if (inst[i].active && inst[i].id == id && inst[i].type == type)
             inst[i].active = 0;
+}
+
+// One movement step of a thrown casing; 1 on a floor contact.
+static int thrown_step(Instance *n)
+{
+    if (game_blocked(n->x, n->z, n->x + n->vx, n->z + n->vz, n->floor)) {
+        n->vx = -n->vx;
+        n->vz = -n->vz;
+    }
+    n->x += n->vx;
+    n->y += n->vy;
+    n->z += n->vz;
+    n->vy += THROWN_GRAVITY;
+    if (n->y < n->floor)
+        return 0;
+    n->y = n->floor;
+    if (n->sound) {
+        game_casing_sound(n->sound);
+        n->sound = 0;
+    }
+    if (n->vy > BOUNCE_MIN) {
+        n->vy = -n->vy * BOUNCE_UP / 100;
+        n->vx = n->vx * BOUNCE_ON / 100;
+        n->vz = n->vz * BOUNCE_ON / 100;
+    } else {
+        n->lying = LIE_TICKS;
+    }
+    return 1;
 }
 
 void roomfx_tick(void)
@@ -300,25 +412,11 @@ void roomfx_tick(void)
                     n->active = 0;
                 continue;
             }
-            n->x += n->vx;
-            n->y += n->vy;
-            n->z += n->vz;
-            n->vy += GRAVITY;
-            if (n->y >= n->floor) {
-                n->y = n->floor;
-                if (n->sound) {
-                    game_casing_sound(n->sound);
-                    n->sound = 0;
-                }
-                if (n->vy > BOUNCE_MIN) {
-                    n->vy = -n->vy * BOUNCE_UP / 100;
-                    n->vx = n->vx * BOUNCE_ON / 100;
-                    n->vz = n->vz * BOUNCE_ON / 100;
-                } else {
-                    n->lying = LIE_TICKS;
-                }
+            int landed = 0;
+            for (int k = 0; k < THROWN_STEPS && !n->lying; k++)
+                landed |= thrown_step(n);
+            if (landed)
                 continue;
-            }
         }
         if (n->flags & SUB_FALLS) {
             n->x += n->vx;

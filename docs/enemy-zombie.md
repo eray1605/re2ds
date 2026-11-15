@@ -88,7 +88,25 @@ Routine 8 (room script modes, observed): mode 0 stand, 1 walk to the destination
   uniform. Type `0x12`: half get the second head (bone 8 → page 2), half the third body
   (page 3, hands 11 / 14 on page 2). DS: `enemy_set_skin`, `Enemy.bone_page`.
 - **Crawler** (`obj+0x10e & 1`): HP halved, smaller collision box (200 instead of 500), and
-  status bit `0x2000` (a lower priority target for the auto-aim).
+  status bit `0x2000` (a lower priority target for the auto-aim). The kind table
+  `0x8010c678` (by `obj+0x10e & 0x3f`) sends **every odd variant** to the crawler routine
+  `0x80101178` (observed); disc 1 sets them in rooms 11A (3), 204 (7), 20B (1) and 603 (5).
+  That routine runs by `obj+5` (tables `0x8010c730` / `0x8010c73c`, observed):
+  - 0 crawls (`0x80102e14` / `0x80102f58`): set 1 animation 5 (blend 15, random key 0-15),
+    turning `0x18` a frame to its goal while the root motion is over 20, 7-14 frames apart
+    once more; it grabs Leon's leg within `0x514` when he is in one of its arm cones
+    (facing ± `0x100`, half `0x100`) on its floor and nobody holds him;
+  - 1 grabs (`0x801025a4` with the crawler's animations: `0x0e` grab, `0x0f` bite at key 1
+    for 5 (×1.5), `0x10` let go). Shaken off, at key 22 Leon stamps its head off (part 8,
+    blood, sound 2) and at the end of `0x10` it is dead (sub 6: routine 7, HP −1). Leon's
+    side is `FUN_8010ae98` (table `0x8010cd50`, variants 2 / 3): set 2 animations 6 / 10
+    grab, + 1 struggle, + 2 break free, then 9, the stamp (from behind turned round);
+  - 2 lies (`0x801039a4` / `0x80103a84`: animation `0x17`) until Leon comes near in front.
+  Hit (`0x801077c8`): animation 6 from a random key 0-7, groan `0xc`, then on. Death
+  (`0x80108954`): animation 7, blood, groan `0xb` / `0xd`.
+  **DS:** `is_crawler`, `crawler_tick` (`ST_CRAWL`, `ST_CR_HIT`, `ST_CR_LIE`), the grab with
+  `grab.crawler`; variant 3 crawls, 1 lies in wait, 5 / 7 lie as dead (HP −1, no target).
+  Shots pass over a crawler unless Leon aims down (as over a lying zombie).
 - A third of the zombies (`(rand >> (rand & 3)) % 3 == 0`), and type `0x11` always, get
   flag `0x8000` in `obj+0x21a` and a stagger counter of 32–47 instead of 16–31: **fast
   zombies** (observed). In chase (`0x801019d0`) and lunge (`0x80102218`) they skip a keyframe
@@ -99,6 +117,14 @@ Routine 8 (room script modes, observed): mode 0 stand, 1 walk to the destination
 - Gait (`obj+0x218`): animation **0 or 2** of set 0 (table `0x80100004` =
   `0,2,0,2,0,2,2,0`, index `(rand >> (rand & 3)) & 7`). The faster variants 1/3 and the
   gaits 4–7 are not used here.
+
+**Eating** (routine 8 mode 3, `0x80109f9c`, observed): animation `0x15`, then one of
+`0x12`-`0x14` (table `0x801000a8`) after another, every second one with blood at the mouth
+(effect `0x17b8` at part 8, 200 out) on the keyframes with EDD flag `0x10000` - in every zombie
+model `0x12`: 20, 45; `0x13`: 21, 45, 70; `0x14`: 12, 22 (the DS model keeps only the flag bits
+0-3, so `enemy.c` lists them). Mode 2 (`0x80109d98`) lunges and at key `0x11` holds the target,
+which plays the zombie's set 2 (routine `0x2004`): Kendo in room 101. **DS:** the victim gets
+the blood of Leon's death in that animation (spurts from key 41, the floor from 100).
 
 **Spawn variants** (`obj+0x10e & 0x3f`, from the room script):
 
@@ -114,6 +140,14 @@ Routine 8 (room script modes, observed): mode 0 stand, 1 walk to the destination
 | odd   | crawler                                                 |
 
 ---
+
+
+**The body** (routine 7, `0x8010a380`, states by table `0x8010019c`): a zombie that fell dead
+lies in pose `0x17` (`0x16` when it fell backward, `obj+0x21a & 4`), HP −1, its blood pool
+growing; one in three (rand % 3 == 0) twitches - the pose's ten keys played again 40 times
+after 1–16 frames (`0x8010a54c`), then 30 times after 60–123 frames (`0x8010a5fc`), then it
+lies still (state 7, its parts frozen with `0x8000`); the others lie still at once (state 8:
+the pool only). **DS:** `body_start` / `body_tick` in `enemy.c`.
 
 ## 4. Perception (observed)
 

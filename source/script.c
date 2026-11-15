@@ -1,5 +1,6 @@
 // re2ds - interpreter for the RE2 room scripts (see script.h).
 #include <stdlib.h>
+#include <math.h>
 #include <string.h>
 
 #include "script.h"
@@ -41,16 +42,54 @@ enum {
     OP_FOR = 13, OP_NEXT = 14, OP_WHILE = 15, OP_EWHILE = 16, OP_DO = 17, OP_EDWHILE = 18,
     OP_SWITCH = 19, OP_CASE = 20, OP_DEFAULT = 21, OP_ESWITCH = 22, OP_GOTO = 23, OP_GOSUB = 24,
     OP_RETURN = 25, OP_BREAK = 26, OP_WORK_COPY = 29, OP_CK = 33, OP_SET = 34, OP_CMP = 35, OP_SAVE = 36,
-    OP_COPY = 37, OP_CALC = 38, OP_CALC2 = 39, OP_CUT_CHG = 41, OP_CUT_OLD = 42,
+    OP_COPY = 37, OP_CALC = 38, OP_CALC2 = 39, OP_SCE_RND = 40, OP_CUT_CHG = 41, OP_CUT_OLD = 42,
     OP_MESSAGE_ON = 43, OP_AOT_SET = 44, OP_OBJ_MODEL_SET = 45, OP_FLR_SET = 56, OP_SCE_ESPR_ON = 58, OP_SCE_ESPR_KILL = 76, OP_WORK_SET = 46, OP_SPEED_SET = 47, OP_ADD_SPEED = 48, OP_ADD_ASPEED = 49, OP_POS_SET = 50, OP_DIR_SET = 51,
     OP_MEMBER_SET = 52, OP_MEMBER_SET2 = 53, OP_SE_ON = 54, OP_SCA_ID_SET = 55, OP_DIR_CK = 57, OP_SCE_EM_SET = 68, OP_DOOR_AOT_SET = 59, OP_CUT_AUTO = 60, OP_MEMBER_COPY = 61, OP_MEMBER_CMP = 62,
     OP_AOT_RESET = 70, OP_AOT_ON = 71, OP_CUT_REPLACE = 75, OP_ITEM_AOT_SET = 78,
     OP_SCE_TRG_CK = 80, OP_SCE_BGM_CONTROL = 81, OP_KEEP_ITEM_CK = 94, OP_SCE_ITEM_LOST = 98, OP_SCE_ITEM_GET = 118, OP_AOT_SET_4P = 103, OP_DOOR_AOT_SET_4P = 104,
-    OP_ITEM_AOT_SET_4P = 105, OP_PLC_MOTION = 63, OP_PLC_DEST = 64, OP_PLC_RET = 66, OP_PLC_ROT = 88,
-    OP_PLC_CNT = 91, OP_PLC_STOP = 102, OP_XA_ON = 89, OP_MOVIE_ON = 111, OP_SCE_BGMTBL_SET = 87,
+    OP_ITEM_AOT_SET_4P = 105, OP_PLC_MOTION = 63, OP_PLC_DEST = 64, OP_PLC_RET = 66, OP_PLC_FLG = 67, OP_PLC_ROT = 88,
+    OP_PLC_CNT = 91, OP_PLC_STOP = 102, OP_XA_ON = 89, OP_XA_VOL = 95, OP_BGM_SCALE = 128,
+    OP_SPLC_RET = 112, OP_SPLC_SCE = 113, OP_MIRROR_SET = 115, OP_MOVIE_ON = 111, OP_SCE_BGMTBL_SET = 87,
+    OP_KAGE_SET = 96, OP_CUT_BE_SET = 97, OP_SCE_ESPR3D_ON = 84,
+    OP_PLC_NECK = 65, OP_SUPER_SET = 72, OP_SUPER_RESET = 73, OP_SUPER_ON = 114, OP_SCE_SHAKE_ON = 92, OP_SCE_EM_POS_CK = 133, OP_PARTS_SET = 110,
+    OP_SCE_ESPR_ON2 = 100, OP_SCE_ESPR_KILL2 = 101, OP_SCE_ESPR3D_ON2 = 117, OP_SCE_ESPR_TASK = 130,
+    OP_SCE_KEY_CK = 79, OP_SCE_FADE_SET = 83, OP_WEAPON_CHG = 90, OP_SCE_FADE_ADJUST = 116,
+    OP_LIGHT_POS_SET = 106, OP_LIGHT_KIDO_SET = 107, OP_LIGHT_COLOR_SET = 124, OP_LIGHT_POS_CAM_SET = 125,
+    OP_LIGHT_KIDO_CAM_SET = 126, OP_LIGHT_COLOR_CAM_SET = 127, OP_SCE_PARTS_BOMB = 122,
+    OP_SCE_PARTS_DOWN = 123,
+    OP_SCE_AMMO_CMP = 129, OP_PLC_HEAL = 131, OP_POISON_CK = 134, OP_POISON_CLR = 135, OP_SCE_ITEM_LOST2 = 136,
 };
 
 enum { B_IF, B_FOR, B_WHILE, B_DO, B_DOCOND, B_SWITCH };
+
+// The light commands (handlers 0x800546b4 - 0x8005492c) change the room's
+// light table in place (40 bytes a camera, tools/lit2ds.py); the next room
+// loads it anew. Axis 11 / 12 / 13 picks x / y / z of a light's place.
+static void light_place(int cam, int light, int axis, uint16_t v)
+{
+    uint8_t *L = game_light_record(cam);
+    if (!L || light > 2 || axis < 11 || axis > 13)
+        return;
+    uint8_t *p = L + 16 + 6 * light + 2 * (axis - 11);
+    p[0] = v & 0xFF;
+    p[1] = v >> 8;
+}
+
+static void light_range(int cam, int light, uint16_t v)
+{
+    uint8_t *L = game_light_record(cam);
+    if (!L || light > 2)
+        return;
+    L[34 + 2 * light] = v & 0xFF;
+    L[35 + 2 * light] = v >> 8;
+}
+
+static void light_colour(int cam, int light, const uint8_t *rgb)
+{
+    uint8_t *L = game_light_record(cam);
+    if (L && light <= 2)
+        memcpy(L + 4 + 3 * light, rgb, 3);
+}
 
 typedef struct {
     uint8_t type;
@@ -88,6 +127,7 @@ static Thread threads[NUM_THREADS];
 static const Room *cur_room;
 static uint8_t flags[NUM_FLAG_ARRAYS][32];
 static int16_t vars[NUM_VARS];
+static void script_rnd(void);
 static uint8_t cam_map[32];
 static uint8_t cam_auto = 1;
 static uint8_t old_cam;
@@ -287,6 +327,12 @@ static int work_member(const Thread *t, int member, int *value)
     return 0;
 }
 
+static int character_member(int k, int member, int *value)
+{
+    return k == 0 ? game_player_member(member, value)
+                  : game_enemy_member(k == 1 ? PARTNER_SLOT : k - 2, member, value);
+}
+
 static void work_member_set(const Thread *t, int member, int value)
 {
     switch (t->work_type) {
@@ -303,8 +349,8 @@ static Thread *start_thread(int slot, const uint8_t *code, uint16_t code_size, i
     uint16_t pc = function_start(code, function);
     if (pc == 0xFFFF)
         return NULL;
-    if (slot < 0 || slot >= NUM_THREADS) {
-        for (slot = 1; slot < NUM_THREADS && threads[slot].active; slot++)
+    if (slot < 0 || slot >= NUM_THREADS) { // any free one from 2 on (FUN_8004f79c)
+        for (slot = 2; slot < NUM_THREADS && threads[slot].active; slot++)
             ;
         if (slot == NUM_THREADS)
             return NULL;
@@ -501,6 +547,23 @@ static void run_thread(Thread *t)
         case OP_XA_ON: // scd_op_59: kind, u16 clip
             game_voice(ins[1], ru16(ins + 2));
             break;
+        case OP_XA_VOL: // scd_op_5f: volume 0-127 of the voice clips
+            game_voice_volume(ins[1]);
+            break;
+        case OP_MIRROR_SET: // scd_op_73: axis, s16 plane, s16 low, s16 high
+            game_mirror_set(ins);
+            break;
+        case OP_SPLC_RET: // scd_op_70 (0x80054a8c): the partner back to following Leon
+            // (routine 1, aimed at him, 0x800c77d4 | 0x10000000 = flag 1:3)
+            flag_set(1, 3, 1);
+            break;
+        case OP_SPLC_SCE: // scd_op_71 (0x80054b28): the partner to the scene (routine
+            // 0x0604: stands; no target; HP -1), the follow bit cleared
+            flag_set(1, 3, 0);
+            break;
+        case OP_BGM_SCALE: // scd_op_80: the music at ins[1] percent of its volume
+            game_music_scale(ins[1]);
+            break;
         case OP_FOR:
             if (ru16(ins + 4) == 0) {
                 next += ru16(ins + 2);
@@ -631,17 +694,86 @@ static void run_thread(Thread *t)
             inventory_remove(ins[1]);
             break;
         case OP_MEMBER_CMP: { // pad, member, compare op, s16 value
+            // Leon and room objects too (position, facing): room 206's
+            // painting falls `while member_cmp 00 0c 03 a0 f6` (its y under
+            // -2400) - taken as always true, the event never ended and the
+            // automatic cuts stayed off. A member not modelled counts as true.
             int value;
-            if (t->work_type != 3 && t->work_type != 2)
-                cond = 1; // player / objects: state not modelled yet
-            else
+            if (t->work_type == 2 || t->work_type == 3)
                 cond = game_enemy_member(t->work_type == 2 ? PARTNER_SLOT : t->work_index, ins[2], &value) &&
                        compare((int16_t)value, ins[3], rd16(ins + 4));
+            else
+                cond = !work_member(t, ins[2], &value) || compare((int16_t)value, ins[3], rd16(ins + 4));
             break;
         }
-        case OP_DIR_CK:
+        case OP_DIR_CK: { // scd_op_39 (0x80052764, FUN_80014fb4): pad, s16 x, z, angle -
+                          // the point lies within the angle to either side of the work object's facing
+            int x, z, dir;
+            cond = 1;
+            if (work_member(t, 0x0B, &x) && work_member(t, 0x0D, &z) && work_member(t, 0x0F, &dir)) {
+                int w = rd16(ins + 6);
+                int to = (int)(atan2f((float)-(rd16(ins + 4) - z), (float)(rd16(ins + 2) - x)) * 4096.0f / 6.2831853f);
+                cond = ((w + to - dir) & 0xFFF) < 2 * w;
+            }
+            break;
+        }
+        case OP_SCE_EM_POS_CK: { // scd_op_85 (0x80054f0c, FUN_8004d000): two characters (0 Leon, 1 the
+                                 // partner, 2 + slot an enemy) with no room box between them
+            int a[3], b[3], ok = 1;
+            for (int k = 0; k < 3; k++) {
+                ok &= character_member(ins[1], 0x0B + k, &a[k]);
+                ok &= character_member(ins[2], 0x0B + k, &b[k]);
+            }
+            cond = !ok || !game_sight_blocked(a[0], a[1] - 1000, a[2], b[0], b[1] - 1000, b[2]);
+            break;
+        }
+        // scd_op_4f / 50 (0x80053a90 / 0x80053acc): wanted result, u16 action
+        // bits - held (0x800c5f4c) / newly pressed (0x800c5f50)
+        case OP_SCE_KEY_CK:
         case OP_SCE_TRG_CK:
-            cond = 1; // needs object state the engine does not have yet
+            cond = ((game_keys(op == OP_SCE_TRG_CK) & ru16(ins + 2)) != 0) == (ins[1] != 0);
+            break;
+        // scd_op_53 (0x80053bd8): fade number, kind (2 darkens, 1 brightens),
+        // colours, s16 step a frame of 0x8000: > 0 from nothing up, < 0 from
+        // full down. scd_op_74 (0x80053cb8): number, s16 level.
+        case OP_SCE_FADE_SET:
+            game_fade_set(ins[1], ins[2], rd16(ins + 4));
+            break;
+        case OP_SCE_FADE_ADJUST:
+            game_fade_adjust(ins[1], rd16(ins + 2));
+            break;
+        case OP_WEAPON_CHG: { // scd_op_5a (0x800543e4): the weapon in hand, 0 = none
+            inventory_equipped = -1;
+            for (int i = 0; ins[1] && i < INV_SLOTS; i++)
+                if (inventory[i].item == ins[1]) {
+                    inventory_equipped = i;
+                    break;
+                }
+            break;
+        }
+        case OP_SCE_AMMO_CMP: { // scd_op_81 (0x80054208): the rounds in the weapon in hand, compare op, value
+            int rounds = inventory_equipped >= 0 ? inventory[inventory_equipped].count : 0;
+            cond = compare((int16_t)rounds, ins[1], ins[2]);
+            break;
+        }
+        case OP_SCE_ITEM_LOST2: // scd_op_88 (0x80054340): item, count taken off it; gone at 0
+            for (int i = 0; i < INV_SLOTS; i++)
+                if (inventory[i].item && inventory[i].item == ins[1]) {
+                    if (inventory[i].count > ins[2])
+                        inventory[i].count -= ins[2];
+                    else
+                        inventory_remove(ins[1]);
+                    break;
+                }
+            break;
+        case OP_PLC_HEAL: // scd_op_83 (0x80054e6c): full health, the poison gone
+            game_player_heal(0, 0x7FFF);
+            break;
+        case OP_POISON_CK: // scd_op_86 (0x80054fd8): poisoned?
+            cond = game_player_poisoned();
+            break;
+        case OP_POISON_CLR: // scd_op_87 (0x80054ff8)
+            game_player_cure();
             break;
 
         case OP_CUT_CHG: // scd_op_29: also stops the automatic cuts until cut_auto 1
@@ -651,12 +783,18 @@ static void run_thread(Thread *t)
         case OP_CUT_OLD:
             game_cut_change(old_cam);
             break;
+        case OP_SCE_RND: // scd_op_28
+            script_rnd();
+            break;
         case OP_CUT_AUTO:
             cam_auto = ins[1];
             break;
         case OP_CUT_REPLACE:
             if (ins[1] < 32)
                 cam_map[ins[1]] = ins[2];
+            break;
+        case OP_CUT_BE_SET: // scd_op_61: camera, n-th zone from its first, on
+            game_cut_be_set(ins[1], ins[2], ins[3]);
             break;
         case OP_MESSAGE_ON: {
             // The English disc leaves the spoken lines (Marvin, Ada, ...) empty
@@ -693,6 +831,24 @@ static void run_thread(Thread *t)
         case OP_SCE_ESPR_ON: // scd_op_3a: an effect of the room's ESP
             game_espr_on(ins);
             break;
+        case OP_SCE_ESPR3D_ON: // scd_op_54: id, sub, object it follows (0: none),
+                               // u16 parameter, s16 x y z, s16 vector[3], s16 dir
+            if (!ins[4])
+                game_espr3d_on(ins);
+            break;
+        case OP_SCE_ESPR_ON2: // scd_op_64: as sce_espr_on, byte 1 its number
+            game_espr_on2(ins, 0);
+            break;
+        case OP_SCE_ESPR3D_ON2: // scd_op_75
+            if (!ins[4])
+                game_espr_on2(ins, 1);
+            break;
+        case OP_SCE_ESPR_TASK: // scd_op_82: owner kind, index (6: every effect)
+            game_espr_task(ins[1], ins[2]);
+            break;
+        case OP_SCE_ESPR_KILL2: // scd_op_65: the number
+            game_espr_kill2(ins[1]);
+            break;
         case OP_SCE_ESPR_KILL: // scd_op_4c: id, type, object
             game_espr_kill(ins[1], ins[2]);
             break;
@@ -724,6 +880,10 @@ static void run_thread(Thread *t)
                     work_member_set(t, 0x0B + k, (int16_t)value + t->speed[k]);
             if (t->speed[4] && work_member(t, 0x0F, &value))
                 work_member_set(t, 0x0F, (uint16_t)(value + t->speed[4]));
+            if (t->work_type == 4) // room objects turn about x and z too (members 0x0e, 0x10)
+                for (int k = 3; k <= 5; k += 2)
+                    if (t->speed[k] && work_member(t, 0x0E + (k - 3), &value))
+                        work_member_set(t, 0x0E + (k - 3), (int16_t)value + t->speed[k]);
             break;
         }
         case OP_ADD_ASPEED: // scd_op_31
@@ -741,6 +901,7 @@ static void run_thread(Thread *t)
                 flag_set(5, ins[3], 1);
             break;
         case OP_PLC_MOTION:
+        case OP_PLC_FLG:
         case OP_PLC_RET:
         case OP_PLC_ROT:
         case OP_PLC_CNT:
@@ -765,6 +926,11 @@ static void run_thread(Thread *t)
             game_enemy_skin(ins[2], ins[8]);
             break;
         }
+        case OP_KAGE_SET: // scd_op_60: work 1 / 2 / 3 + index, the colour, u16 size, s16 offset
+            if (ins[1] == 2 || ins[1] == 3)
+                game_enemy_shadow(ins[1] == 2 ? PARTNER_SLOT : ins[2], ins[3], ins[4], ins[5], ru16(ins + 6),
+                                  ru16(ins + 8), rd16(ins + 10), rd16(ins + 12));
+            break;
         case OP_SE_ON: // bank, s16 sound (low byte = number), position source, offset
             game_play_sound(ins[1], rd16(ins + 2) & 0xFF);
             break;
@@ -797,10 +963,71 @@ static void run_thread(Thread *t)
             }
             break;
         case OP_DIR_SET:
-            if (t->work_type == 1)
+            if (t->work_type == 1) {
                 game_set_player_dir(rd16(ins + 4));
-            else
-                work_member_set(t, 0x0F, rd16(ins + 4));
+            } else { // members 0x0E-0x10 (the enemies keep only their facing)
+                for (int k = 0; k < 3; k++)
+                    work_member_set(t, 0x0E + k, rd16(ins + 2 + 2 * k));
+            }
+            break;
+        case OP_PARTS_SET: // scd_op_6e: pad, part, field, u16 value (work object's part)
+            if (t->work_type == 3)
+                game_enemy_part_set(t->work_index, ins[2], ins[3], ru16(ins + 4));
+            else if (t->work_type == 2)
+                game_enemy_part_set(0xFF, ins[2], ins[3], ru16(ins + 4));
+            break;
+        case OP_LIGHT_POS_SET: // scd_op_6a: pad, light, axis, u16 (the shown camera's light)
+            light_place(-1, ins[2], ins[3], ru16(ins + 4));
+            break;
+        case OP_LIGHT_KIDO_SET: // scd_op_6b: light, u16 range
+            light_range(-1, ins[1], ru16(ins + 2));
+            break;
+        case OP_LIGHT_COLOR_SET: // scd_op_7c: light, r, g, b
+            light_colour(-1, ins[1], ins + 2);
+            break;
+        case OP_LIGHT_POS_CAM_SET: // scd_op_7d: camera, light, axis, u16
+            light_place(ins[1], ins[2], ins[3], ru16(ins + 4));
+            break;
+        case OP_LIGHT_KIDO_CAM_SET: // scd_op_7e: pad, camera, light, u16 range
+            light_range(ins[2], ins[3], ru16(ins + 4));
+            break;
+        case OP_LIGHT_COLOR_CAM_SET: // scd_op_7f: camera, light, r, g, b
+            light_colour(ins[1], ins[2], ins + 3);
+            break;
+        case OP_SCE_PARTS_BOMB: // scd_op_7a: pad, part, RGB, s16 x 5 (the work object's part bursts)
+            if (t->work_type == 3 || t->work_type == 2)
+                game_enemy_part_fx(t->work_type == 2 ? 0xFF : t->work_index, ins[2], 0);
+            break;
+        case OP_SCE_PARTS_DOWN: // scd_op_7b: part, s16 x 3, u8, s16 x 3 (... drops off)
+            if (t->work_type == 3 || t->work_type == 2)
+                game_enemy_part_fx(t->work_type == 2 ? 0xFF : t->work_index, ins[1], 1);
+            break;
+        case OP_PLC_NECK: // scd_op_41: mode, s16 x y z, speed y, speed z (the work object's head)
+            game_neck_set(t->work_type, t->work_index, ins);
+            break;
+        case OP_SCE_SHAKE_ON: // scd_op_5c: s8 x, s8 y - the picture's offset
+            game_shake((int8_t)ins[1], (int8_t)ins[2]);
+            break;
+        case OP_SUPER_SET: // pad, parent, part, s16 place x y z, s16 turn x y z
+            if (t->work_type == 4) {
+                int16_t pos[3], dir[3];
+                for (int k = 0; k < 3; k++) {
+                    pos[k] = rd16(ins + 4 + 2 * k);
+                    dir[k] = rd16(ins + 10 + 2 * k);
+                }
+                game_object_super(t->work_index, ins[2], ins[3], pos, dir);
+            }
+            break;
+        case OP_SUPER_ON: // scd_op_72: pad, parent, part, s16 place x y z, s16 turn x y z (once)
+            game_super_on(t->work_type, t->work_index, ins);
+            break;
+        case OP_SUPER_RESET: // pad, s16 turn x y z
+            if (t->work_type == 4) {
+                int16_t dir[3];
+                for (int k = 0; k < 3; k++)
+                    dir[k] = rd16(ins + 2 + 2 * k);
+                game_object_super_reset(t->work_index, dir);
+            }
             break;
         default:
             break; // not implemented yet: skipped
@@ -812,8 +1039,26 @@ static void run_thread(Thread *t)
     }
 }
 
+// VAR_RND (0x800cc422) from the PS1's generator FUN_8004f338, which the
+// script runner (FUN_8004fb28) calls every frame before the threads and
+// sce_rnd once more. Room 204's dripping blood waits for it to be over 0x7148
+// (`if cmp 00 1d 01 48 71`): it stayed 0 and the drops never came.
+static uint32_t rnd_seed = 0x2D53A1;
+static void script_rnd(void)
+{
+    rnd_seed = ((rnd_seed + ((rnd_seed & 0x7FFFFFFF) >> 15)) & 0xFFFF) + (rnd_seed & 0x7FFF8000) * 2;
+    vars[VAR_RND] = (int16_t)rnd_seed;
+}
+
+// Every frame the PS1 (FUN_8004fbdc from the main loop) draws a random
+// number and starts the main script's function 1 afresh in thread 0, before
+// the threads run: the rooms' checks that go on all the time - room 101 stops
+// its fight music there once the four zombies' kill flags are set.
 void script_tick(void)
 {
+    script_rnd();
+    if (cur_room && cur_room->exec_script)
+        start_thread(0, cur_room->exec_script, cur_room->header->size_exec, 1);
     script_threads_running = 0;
     for (int i = 0; i < NUM_THREADS; i++) {
         if (threads[i].active) {
@@ -821,7 +1066,20 @@ void script_tick(void)
             script_threads_running++;
         }
     }
+    // FUN_8004f484 after the threads: the AOT and item variables last one
+    // frame (room 206's frame function: "cmp 00 02 00 2f" = the lighter used)
+    vars[VAR_AOT_FRONT] = vars[VAR_AOT_HERE] = vars[VAR_ITEM_USED] = -1;
 }
+
+// The PS1 clears flag array 10 (its first 128 bits) with the variables; here
+// it is cleared just before the AOT check that sets it again, so that the
+// status screen, opened between two frames, still sees this frame's.
+void script_aot_frame_reset(void)
+{
+    memset(flags[FLAGS_ITEM_USABLE], 0, 16);
+}
+
+void script_set_var(int n, int value) { *var(n) = (int16_t)value; }
 
 void script_camera_changed(int previous, int cam)
 {
@@ -832,6 +1090,10 @@ void script_camera_changed(int previous, int cam)
 void script_room_enter(const Room *room)
 {
     cur_room = room;
+    vars[VAR_AOT_FRONT] = vars[VAR_AOT_HERE] = vars[VAR_ITEM_USED] = -1; // FUN_8004fb28
+    memset(flags[FLAGS_ITEM_USABLE], 0, 16);
+    for (int c = 0; c < MASK_CAMERAS; c++) // FUN_8004f5a0: 256 bytes from 0x800cc524
+        memset(flags[FLAGS_MASKS + c], 0xFF, 16);
     memset(aots, 0, sizeof(aots));
     memset(threads, 0, sizeof(threads));
     for (int i = 0; i < 32; i++)
@@ -849,8 +1111,10 @@ void script_room_enter(const Room *room)
         if (t)
             t->active = 0;
     }
+    // the main script's function 0 in thread 1 (FUN_8004fb28); thread 0 is
+    // its function 1's, every frame (script_tick)
     if (room->exec_script)
-        start_thread(0, room->exec_script, room->header->size_exec, 0);
+        start_thread(1, room->exec_script, room->header->size_exec, 0);
 
     // Doors the converter found in the scripts but that were not set (the init
     // script stopped early at an unsupported opcode): add them so every room

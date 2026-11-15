@@ -9,7 +9,8 @@ and samples; its last 16 bytes give VB, VH, the second SEQ and 0
   u32 "RMU1", u32 seq offset, u32 seq size, u16 tone count, u16 format (1 = 8-bit)
   (SUB: "RMU2", the same, then u32 second seq offset, u32 second seq size)
   tones (24 bytes): u8 program, u8 note min, u8 note max, u8 centre,
-                    s8 fine, u8 volume, u8 pan, u8 release (ADSR2 bits 0-4),
+                    s8 fine, u8 volume, u8 pan, u8 pitch bend reach in
+                    semitones (pbmin << 4 | pbmax, VAB tone bytes 12 / 13),
                     u32 sample offset, u32 sample bytes, u32 loop start bytes
                     (0xFFFFFFFF = plays once), u16 ADSR1, u16 ADSR2 (the SPU
                     envelope; source/music.c plays it)
@@ -93,6 +94,7 @@ def convert(src, dst, sub=False):
         for t in range(nt):
             o = tones_off + prog_no * 512 + t * 32
             _, _, vol, pan, centre, fine, lo, hi = struct.unpack_from("<8B", d, o)
+            pbmin, pbmax = d[o + 12], d[o + 13]
             adsr1, adsr2 = struct.unpack_from("<HH", d, o + 16)
             vag = struct.unpack_from("<h", d, o + 22)[0]
             if vag not in decoded:
@@ -104,7 +106,8 @@ def convert(src, dst, sub=False):
                 pcm += bytes((max(-128, min(127, (v + 128) >> 8)) & 0xFF) for v in samples)
             off, size, loop = placed[vag]
             fine_s = fine - 256 if fine > 127 else fine
-            tones.append((p, lo, hi, centre, fine_s, vol, pan, adsr2 & 0x1F, off, size, loop, adsr1, adsr2))
+            reach = min(pbmin, 15) << 4 | min(pbmax, 15)
+            tones.append((p, lo, hi, centre, fine_s, vol, pan, reach, off, size, loop, adsr1, adsr2))
         prog_no += 1
     head = 24 if sub else 16
     seq_off = head + 24 * len(tones)
@@ -113,8 +116,8 @@ def convert(src, dst, sub=False):
     out = bytearray(struct.pack("<IIIHH", MAGIC2 if sub else MAGIC, seq_off, len(seq_data), len(tones), FORMAT_8BIT))
     if sub:
         out += struct.pack("<II", seq2_off, len(seq2_data))
-    for p, lo, hi, centre, fine, vol, pan, rel, off, size, loop, adsr1, adsr2 in tones:
-        out += struct.pack("<BBBBbBBBIIIHH", p, lo, hi, centre, fine, vol, pan, rel,
+    for p, lo, hi, centre, fine, vol, pan, reach, off, size, loop, adsr1, adsr2 in tones:
+        out += struct.pack("<BBBBbBBBIIIHH", p, lo, hi, centre, fine, vol, pan, reach,
                            pcm_off + off, size, loop, adsr1, adsr2)
     out += seq_data + seq2_data
     out += b"\0" * (pcm_off - len(out))

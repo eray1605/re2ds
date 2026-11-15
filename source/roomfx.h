@@ -13,9 +13,15 @@
 void roomfx_load(int stage, int room);   // frees the previous room's
 // ins = the 16-byte sce_espr_on instruction
 void roomfx_on(const uint8_t *ins);
+void roomfx_3d_on(const uint8_t *ins); // sce_espr3d_on
 // effect id (the room's, else CORE00.ESP's), sub effect | palette row << 3,
 // size = the sce_espr_on parameter's high byte (0 = 1:1)
 void roomfx_spawn(int id, int type, int32_t x, int32_t y, int32_t z, int size, int dir_re2);
+void roomfx_on2(const uint8_t *ins, int is_3d);   // sce_espr_on2 / sce_espr3d_on2: byte 1 = its number
+void roomfx_kill2(int handle);                    // sce_espr_kill2
+// an instance the engine moves itself (the rocket): spawned with a number, placed by it
+void roomfx_spawn_handle(int handle, int id, int type, int32_t x, int32_t y, int32_t z, int size, int dir_re2);
+void roomfx_set_pos(int handle, int32_t x, int32_t y, int32_t z);
 // a sprite thrown from (x, y, z) with a speed per tick, falling until floor_y,
 // where it lies a moment; plays the effect's frames from first (casings).
 // Its first floor contact calls game_casing_sound(sound).
@@ -23,7 +29,10 @@ void roomfx_throw(int id, int first, int row, int32_t x, int32_t y, int32_t z, i
                   int32_t floor_y, int scale, int sound);
 // main.c: a thrown sprite (casing) hits the floor: weapon bank sound
 void game_casing_sound(int sound);
+// room collision (main.c): a casing turns round at a wall
+int game_blocked(int32_t from_x, int32_t from_z, int32_t x, int32_t z, int32_t y);
 void roomfx_kill(int id, int type);      // sce_espr_kill
+void roomfx_kill_owner(int kind, int index); // sce_espr_task: an owner's effects (kind 6: all)
 void roomfx_tick(void);                  // once per game tick
 int roomfx_count(void);                  // sprites alive (one quad each)
 void roomfx_draw(const int32_t cam_from[3], const int32_t cam_to[3]);

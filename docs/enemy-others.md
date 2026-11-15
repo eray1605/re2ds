@@ -38,7 +38,8 @@ damage, hits) in [enemy-zombie.md](enemy-zombie.md) and [damage.md](damage.md).
 `tools/research/overlay_symbols.py` prints the complete list.
 
 People (types `0x40` and up, e.g. Kendo `0x48`) are not enemies: the room scripts move them
-(routine 4, `plc_*`), see [engine-notes.md](engine-notes.md).
+(routine 4, `plc_*`), see [engine-notes.md](engine-notes.md). The partner following Leon is in
+section 17.
 
 ### Entry (observed)
 
@@ -187,18 +188,84 @@ With story flag `0xa4` set there are −10 or −20 HP.
 **Set by a scene** (observed, init `0x80103158`): with status bit `0x4000` the start state
 comes from `0x801073bc[variant & 3]` instead of `0x801073b8`: 16, 17, 18, 22. All of them
 wait for the room script's signal (member 0x17, `obj+0x1d4`) before anything happens:
-16/17 hang on the ceiling (animation 3) and then drop: 16 (`0x80104d14`) lets go with animation
-`0x12`, then turns over and falls with `0x13`; 17 (`0x80104f74`) falls with `0x13` at once.
+16/17 wait with animation 3 and then drop: 16 (`0x80104d14`, on the ceiling) lets go with
+animation `0x12`, then turns over and falls with `0x13`; 17 (`0x80104f74`, set upright
+somewhere above, e.g. room 10B's) falls with `0x13` at once.
 Both fall at +72 a frame more each frame (`obj+0x146`) and play `0x13` to its end on the
 floor; 17 hisses (sound 2) on landing. 22 plays animation `0xe` and then
 backs off (state 5), 18 (`0x80105114`) plays animation 0 once and on the signal crawls on
 by it until the next signal - room 201's licker passing the window outside on the first
-visit, which never comes in. **DS port:** `LICK_SCRIPT` (`licker_script`): waits, not
-aimed at nor in the way; on the signal the crawler crawls, the others hunt.
+visit, which never comes in (room 201's event 4 signals it, and again about 100 frames
+later). **DS port:** `LICK_SCRIPT` (`licker_script`): waits, not aimed at nor in the way; on
+the signal the crawler crawls (on its wall), 16 and 17 drop (`LICK_HANG`), 22 hunts.
 
-**Ceiling and walls** (observed): the spawn variant `(+0x10e >> 8) & 0xF` sets the
-orientation. 1 = ceiling, 2–5 = different walls or corners (gravity vector in
-`0x80107524`/`0x80107528`). The helper `0x8010029c` finds the floor or ceiling height for it.
+**Ceiling and walls** (observed, October 2026): status bits 8–11 (`(+0x10e >> 8) & 0xF`) put
+it on a surface. The init (`0x80103158`) writes a rotation delta to `0x80107524/26/28` (x, y,
+z), which the move routine (`0x80102e5c`) multiplies in **before** the object's matrix
+(`FUN_80072938`: delta × matrix, world space; the facing `+0x76` is applied after it, so
+motion = R(surface) × Ry(dir) × root motion, `FUN_80014d94`):
+
+| Bits 8–11 | Delta | Wall side `+0x16b` | Up (the side's normal) |
+|---|---|---|---|
+| 0 | — | floor | −y |
+| 1 | Rz +0x400 | 0 | +x |
+| 2 | Rz −0x400 | 2 | −x |
+| 3 | Rx −0x400 | 3 | +z |
+| 4 | Rx +0x400 | 1 | −z |
+| 5 | Rx 0x800, Ry 0x800 (= Rz 0x800) | ceiling | +y |
+
+A wall is a side of a room collision box: side 0 = `x + w`, 1 = `z`, 2 = `x`, 3 = `z + d`
+(`FUN_8004cd24`); `FUN_8004c8b8` gives the side a point is nearest to (the box cut along its
+diagonals). Boxes a licker can crawl on have flag `0x200`. The start state comes from
+`0x801073b8[variant & 3]` = 0, 7, 11, 23 (with status `0x4000`: `0x801073bc` = 16, 17, 18, 22);
+states index the table at `0x80107488`.
+
+- **State 7** (`0x801039a4`, variant 1: on a wall): anim 1. Each frame `FUN_801007ac` looks
+  2200 ahead along its facing (`0x801073c0`), notes the quadrant it heads to (`+0x16a`,
+  `(angle + 0x100) & 0xc00`) and lists the boxes there (`FUN_80048964`, radius 10, its floor
+  level `-y / 1800`): no climbable box → the wall ends (`0x40000000`); a box without `0x200`
+  but with `0x400` → `0x20000000`; its own box → x or z snapped onto the side; another box
+  whose nearest side is across (other parity) → that side. Heard him (`FUN_80100db0`) or
+  `0x20000000` → state 13. Wall goes on → root motion (`FUN_8001581c` + `FUN_80014d94`). Into a
+  corner: anim `0x11` (root 2200, −1693, 0), then turned by `(2h − s − r)` quarters about y
+  in world space (the side and the facing both move on) and moved `0x69d` along the new
+  heading. Round an edge: anim `0x10` (root 2200, 1648, 0), turned by `(h − s)`, moved
+  `0x670`. The new side is snapped to the box's face.
+- **State 13** (`0x801044b0`): down the wall. Higher than `0x903` above the floor (`+0x1c2`):
+  anim `0x1b` (root 0, 0, −1338 — down the wall), its motion turned by `0x800` when the side
+  minus the heading quadrant is negative. Lower: anim `0x0c` or `0x1a` (root ±1614 down and
+  1614 out), easing to `0x64f` above the floor over 22 frames; then `0x64f` out from the wall
+  (`0x801001a4` turned by the side), on the floor, rotation cleared (`FUN_80019e54`), anim 3
+  for 4 frames → state 14.
+- **State 11** (`0x80104250`, variant 2: ceiling): anim 3 until it hears him or was shot
+  (`+0x219 == 2`); anim `0x12` falling at +72 a frame more each frame; when `0x12` ends:
+  `+0xa8c` lower, rotation cleared, facing `(angle of its 2200-ahead + 0x100) & 0xc00`; anim
+  `0x13` falling until the next step reaches y 0; `0x13` to its end → state 0. **State 23**
+  (`0x80102bec`, variant 3) is the same but waits for member `0x17`.
+- **Hit on a surface**: with `+0x220` (a wall box) set or above the floor the hit routine is
+  table `0x801074e8[2]` (`0x801059a8`; `[5]` with `+0x22c & 0x80`): it falls from the hit on
+  (+48 a frame more each frame, plus the push `+0x144/+0x148`) with the animation it had
+  (`FUN_80101244` spawns blood and sets no animation for these states) to its end; then
+  `+0x4f5` lower, facing `quadrant * 0x400 − 0x800`, rotation cleared; anim `0x19` to the
+  floor and to its end; dead (HP < 0), or anim `0x16` (up) and the next state by distance
+  (`FUN_801055cc`).
+- **State 1** (`0x801035c4`): a licker on the floor climbs the nearest box side (state 15
+  picks it for status bit `0x10` and HP < 50, a quarter of the time). Not ported.
+
+**DS port:** `SURF_*` and `surface_vec`/`surface_turn` in `enemy.c` (the model is drawn with
+`T × R(surface) × Ry(dir)`), `wall_ahead`, `wall_turn`; states `LICK_WALL` (7), `LICK_DOWN`
+(13), `LICK_HANG` (11/16/17/23) and `LICK_FALL` (hit routine 2). Deviations: the clinging
+part of the fall after a hit ends at the floor at the latest, the shot's push is left out
+(it could carry it into the wall), and the crawl down picks whichever way of `0x1b` goes
+down. Type `0x24` (its own overlay, not read) has no wall animations: on a wall or the
+ceiling it turns over and drops when it hears him. Room 201's licker outside the window
+(status `0x44`, wall side 1, facing `0x770`) now crawls along its wall; the facing is not
+quite along the wall, so it also creeps down a little, as the PS1 computes it. The room script blackens it
+part by part (`parts_set` field 2 / 3 = the part's colour, `+112` / `+114`, written into its
+polygons' GPU codes at `0x8002c9ac`): the legs (`0x0e`–`0x15`) at once, the rest after 28
+frames of the crawl (functions 6, 8–10), so it vanishes in the night outside. **DS:**
+`enemy_part_set`: a part turned near black is not drawn (`Enemy.dark_parts`); before, the lit
+licker stayed outside and showed through the wall from the other cameras.
 
 ### Attacks (observed)
 
@@ -273,6 +340,56 @@ quarter turns); the floor state table is `0x801132e8`. No root motion: the spide
 | 8 | `0x8010df0c` | `0x0b` | spits (`FUN_80112828` spawns the projectile) |
 | 9 | `0x8010e198` | 8 | jumps aside: 400–463 toward the player's direction + rand (+ `0x800`) + `0x380` |
 
+**Ceiling and walls** (observed, October 2026; init `0x8010d1ec`): the variant (`& 0xf`) picks
+the surface `+0x222`, which picks the state table: 0 floor (`0x801132e8`), 2–3 ceiling (1,
+`0x80113334`), 4–11 a wall (3, `0x80113394`; 2, `0x80113364`, after it came down from the
+ceiling). Unlike the licker the spider turns its own model: `+0x74/+0x76/+0x78` = x, facing,
+z (`Rx * Ry * Rz`, like the bones).
+
+- **Ceiling:** z `0x800` (upside down), so it walks along its facing + `0x800` (`+0x21a`,
+  `FUN_80014c68`) and aims at Leon mirrored through itself (`FUN_80112114`). `+0x22c` (how high
+  a wall climb ends) = y + 1250. Decide (`0x8010e36c`): idle anim 0 for `(rand + 10) & 0x1f`,
+  then walk (1) or wander (4); a shot → evade (9) or turn (5); with `+0x218` at 0: Leon
+  3001–7499 away → walk, or charge (7) if it faces him (±`0x80`) and 3/16 of the time; nearer
+  than 3000 and facing → spit (8) 3/16, else charge. Walk (`0x8010d850`, table `0x80113310`:
+  anim 2, turn 48) for `rand & 0x2e` frames, then the wall check (`0x8010e4a8`): by a box with
+  flag `0x200` within 800 (stretches they keep off) nothing; by one with `0x400`: if `+0x232`
+  is over and no spider goes between wall and ceiling (`0x800c77f0 & 0x20`) it takes the wall
+  it faces (`FUN_801121a0`: the box side nearest it that its facing quadrant points out of),
+  if that wall goes on 2500 both ways (`FUN_80112390`) and Leon is within 3000 of its plane
+  (`FUN_80112454`) → state 10; otherwise wander. Charge (`0x8010e678`): anim 4 creeping at 100,
+  aims (`0x40`), rushes at 300 turning `0x10` and drops poison (effect `0x8a`, sound 3) every
+  12 frames, stops (anim 7), `+0x218` = 60. State 10 (`0x8010e920`): turns its facing to the
+  side angle `0x18` a frame, anim `0xe` at 25 a frame, then 450 on, y + 1250, `+0x22c` = y.
+- **Wall:** head down (`FUN_8010ec88`): an even side turns z `0x400` and the head's turn
+  within the wall (`+0x226`) goes on x; an odd side turns x by its facing (side × `0x400`) and
+  the head's turn adds to the facing (`FUN_80112284`, side 0 the other way). It crawls along
+  where its head points (`FUN_801122e4`). Set on a wall: facing side × `0x400`, `+0x22c` =
+  variant bits 4–7 × −1800 + 1250 (−3960 for 0); waits (`0x8010fb34`) until Leon is within
+  `0x1c20` or near its plane. Come down from the ceiling (`0x8010ed40`): down at 100 a frame
+  until 3500 above Leon, pause 15–30 frames (`0x8010ef78`). Then: spit (7, `0x8010f8dc`,
+  nearer than 3000 3/16) — the head turns `0x40` a frame toward his side for up to 16 frames,
+  anim `0xb`, effect `0x89` (`0x88` from 3000 on); or turn (3, `0x8010f050`) — the head to
+  ±`0x400` (his side) `0x20` a frame, then rush (6, `0x8010f738`): anim 4, then 300 a frame
+  along the wall until 2500 from its end, or a bite (within 2000, `0x10cc` in height: 20 →
+  30 HP). After either: climb (4, `0x8010f1ec`): the head turns up (rate at random ±64/±32
+  from `0x80113384`, pauses of 15–30), then up at 100 to `+0x22c`; state 5 (`0x8010f47c`): anim
+  `0xe` (25 a frame up), onto the ceiling facing out of the wall, 1225 into the room,
+  `+0x232` = 150.
+- **Hit up there:** no fall. On the ceiling the floor's hit (anim 1, then evade); on a wall
+  it climbs (0x40 a frame, no pauses). Not while going between wall and ceiling (`+0x236`).
+- **Death up there:** ceiling (`0x80110e9c`): z back to 0, 800 lower, falls +40 a frame more
+  each frame, sound 5, anim `0xc`. Wall (`0x8011118c`): 480 a frame down plus +40, upright on
+  landing, facing −(head + side × `0x400` for odd sides).
+
+**DS port:** `spider_pose`, `spider_vec`, `spider_ceiling`, `spider_wall`, states
+`SP_WALK`, `SP_TO_WALL`, `SP_W_*`, `SP_TO_CEILING`. Deviations: the poison is not a flying
+effect but hits at once (drops: within 1500 under it; spits: within 6000 in front of its
+wall), the state where two spiders on the ceiling meet (11) is left out, a spider coming
+down onto a wall is put on its box's face, and a dead one falls upright at once. Also fixed:
+the spider's turn (5) and charge (7) counted as a zombie on the ground (`ST_DOWN` /
+`ST_LYING`), so high shots passed over it and Leon could walk through it.
+
 Hit (`0x8010fcd8`): anim 1, then state 9 or a random one (`0x80113410`). Death (`0x80110d10`):
 anim `0x0c` (206 keys), then dead.
 
@@ -288,6 +405,29 @@ state 25 anim 12 keys `0x2f`-`0x32` range 550 damage 40; 26 anim 15 keys 14-19 r
 damage 10; 27 anim 3 keys 21-25 range 750 damage 30. Spawn status `0x4000` holds him.
 The port uses these; the animation numbers are those of the state routines and unchecked
 on screen.
+
+**Hits** (routine 2 `0x80103f30`, observed November 2026): the kind (`obj+0x1d2`) comes from
+`FUN_80103eb8`: HP under 20000 → 3, else a draw (`FUN_80100630(4, …)`) → 4 (nothing), else
+1 with status `0x20` in `obj+0x1d0`, else 0. Handlers (table `0x80104d48`): 0 and 1
+(`0x80103fbc` / `0x80104078`) flinch with move 4 or 5 (a random bit) / 9, turning to Leon;
+3 (`0x801040e8`) goes down - `FUN_800188ac` sets his set flag (room 10D: the scripts then drop an item), move 10, `obj+0x10e |= 0x4000`, `obj[0] |= 2` - and lies until
+the room script sets member `0x17` (`obj+0x1d4`), then gets up with move 11 (waiting for it
+again). Routine 3 (`0x80104274`) is his death in the scenes. Start HP 20000 + table
+`0x80104660` (EASY `0x80104674`): 250, 450, 300, 300, 220, 300, 400, 300, 400, 350 by the
+room's case. **DS:** `tyrant_shot`, `TY_FLINCH` / `TY_DOWN` / `TY_RISE`; the draw is taken as
+1 in 4, the first HP entry for every room.
+
+**Held** (status `0x4000`): the init (`0x80101324`) starts him in state 9 + variant (table
+`0x80104c90`: 9 ... 17). Variant 6 (rooms 20C, 20D; state 15, `0x8010372c`) clears member
+`0x17`, waits for the script to set it to 1, then plays move 16 without room collision
+(`obj[0] |= 8`) - he breaks in through the wall - and walks on with the hold cleared.
+Variant 4 (604's scene, state 13, `0x80103050`, steps table `0x8010009c`) is driven by
+member `0x17` = 1 … 8, free of collision (`obj[0] |= 0xa`): he waits at y −25000; 1: his
+own move 14 from key 51 while he drops 1000 a frame to −18000, to its end; 2 / 3: his own
+moves 1 and 9; 4: the room's move 1 (`FUN_8001581c` / `FUN_800289d4` with the room set
+`obj+0x190`); 5: turns round, room move 1, his own move 8; 6: room move 2; 7: room move 3;
+8: turns round, room move 4, then room move 0. **DS:** `TY_BREAK_IN`, `TY_SCENE`
+(`tyrant_scene`); the play rates (256 / 1024 / 4096) are taken as one key a frame.
 
 ## 7. Zombie arms (type `0x2d`)
 
@@ -497,13 +637,132 @@ an answer from them (no `member_cmp 17`), so the scenes run through.
 - **With one** (303's G adult `0x62` and embryos `0x63`/`0x81`/`0x82`, 702's tyrant `0x28`,
   509's `0x33` `0x17`): a plain fight with their own animations, chosen by root motion and
   length (table `actor_types` in `enemy.c`), not while a scene has Leon (flag 2:07).
-  HP from their inits (`sh 0x156`): embryo 1, G adult 450, tyrant 10000, G1 400, `0x33` 750,
+  HP from their inits (`sh 0x156`; EASY when `0x800c77b4 & 0x20`): embryo 1, G adult 600 / EASY
+  450 (`0x80100520`), tyrant 10000, G1 500 / 400 (`0x801004ac`), `0x33` 900 / 750 (`0x801002f8`),
   `0x36` 400, `0x37` −1 (cannot be hurt). Damage values are guesses.
 
-## 17. Open points
+**The G adult of 303** (type `0x28`, CDEMD0.EMS `0x3e1800`, size `0x6660`, at `0x80100000`;
+routines `0x801062e8`: init `0x80100504`, 1 `0x80100b0c`, hit `0x80103d34`, death `0x8010525c`).
+Routine 1 picks the mode by `obj+0x10e & 0x3f` (`0x80106354`): 0 its fight, 1 the scenes'
+(`0x80104d90`); mode 0 runs a decision and an action by state `obj+5` (`0x8010635c` /
+`0x80106384`). Init: HP 600 (EASY 450), a hit count `obj+0x220` = 6, no laying for 10 frames.
 
-- The lickers' perception (do they react to noise?) and the switch ceiling ↔ floor.
-- The licker on ceilings and walls (the gravity vectors `0x80107524` / `0x80107528`); the
+| State | Action | What |
+|-------|--------|------|
+| 1 walk | `0x80100d5c` / `0x80100f7c` | move 1 along the zone path to Leon (`FUN_80046fb0`), turning 16 a frame (8 when slow). Leon outside ±1224 for more than 60 frames (counted while outside ±1024) within 6000: 2. The way 2000 ahead free, fewer than five embryos, no pause (`obj+0x218`): 6. Leon within ±824: under 3500 with no swipe pause (`obj+0x21d`) and Leon free: 3, under 2000: 9 |
+| 2 turn | `0x801010a4` | move 8 turning away from Leon (-32), then 2048 about; it cannot die meanwhile (`0x8010525c`: HP 0) |
+| 3 swipe | `0x80101200` | move 4; keys 6–29 turn to Leon at 8 (over 4500 or outside ±1224: back to 1, 15 frames' pause); its facing + 512 kept on him (4, 32 on keys 54–75); keys 54–75 hit when part 12 is within 800 of him or part 10 within 1000: `FUN_8003cf38(30)`, a hurt reaction, sound 6, blood at part 12; at the end it faces 1024 further |
+| 4 / 5 | `0x801015e8` / `0x801016ac` | moves 2 and 3 (not reached from its own code) |
+| 6 lay | `0x80101770` | move 5 for 120 frames: an embryo (`0x8001a8b0` type `0x27`, variant 2) at part 4 at once, one at 100, one more at 90 half the time (while `0x800c77ef` < 5); smoke every 16 frames under 60; then 300 + rand frames without laying (half with fewer than four), within 4000: 3 |
+| 7 | `0x80101b3c` | move 10, a pause (not reached) |
+| 9 back | `0x80102f98` / `0x801030dc` | move 1 backward, 10 a frame, 130–161 frames; decides as 1 (behind ±1524 within 5000 after 90 frames: 2; over 3500: 1) |
+
+States 2, 3, 6 keep it from being stopped (`obj+0x222`). **Hits** (routine 2): the weapon's
+points (`0x80106634`, first byte per weapon 1–18: 2 2 2 2 10 15 4 6 16 16 20 6 2 16 1 4 20 2)
+come off the count, never under 1; at 1 with Leon within ±450 of its facing − 574 it is 0 and
+it reels (`0x80104220`): move 2, then move 9 for 180 frames stumbling about. **Death**
+(`0x801052a8`): moves 7, 14, 16. **DS:** `enemy.c` `g_adult_tick` / `g_adult_shot` (the
+embryos it lays fight with the stand-in of the other actors; the smoke and the per-weapon
+light reactions are not ported).
+
+**The second tyrant of 702** (type `0x2b`, CDEMD0.EMS sector `0x911`; main table
+`0x80104b44`: init `0x80101b20`, routine 1 `0x80101c64`, hit `0x80103230`, death
+`0x80103444`; frame `0x8010187c`), observed November 2026: HP 20000 + 250 (EASY 200,
+`0x80104b40`). Every frame member `0x1a` (`obj+0x1da`) = Leon farther than 2800
+(`0x80101d80`), `0x19` (`obj+0x1d8`) = 1 once the HP are under 20000 (`0x80101ac4`), and the
+HP never go under 10000 (`0x80101adc`). While Leon holds the rocket launcher (`0x800c7902` =
+17) the overlay sets `obj+0x1d3 | 0x80` (`0x801018dc`): only the rocket kills him. Routine 3
+is the end scene (`0x8010346c`, steps `0x80104ba8`): he stands at (−14547, −14636) facing
+1432 with move 5 from key 10, cut 11, member `0x18` (`obj+0x1d6`) = 1. Room 702's script:
+function 11 (`0x19` = 1 and `0x1a` = 1, flag 5:`0d`) has Ada throw the launcher down
+(functions 12 / 13); function 14 (`0x18` = 1) runs the ending. **DS:** `super_tyrant_tick`,
+`super_tyrant_rocket` (`enemy.c`), members `0x18`–`0x1a` (`Enemy.answer`).
+
+His fight (routine 1; states `0x80104b54` control / `0x80104b78` move; `obj+0x228` frames
+walked, `obj+0x22a` the pause after a hit): **1** walk (`0x80101d44`): his move 1, turning 32
+a frame; after 220 frames, facing Leon (±300) and more than 3500 away → 4; within reach
+(2300, 1 in 64 2600, 1900 when Leon has under 81 HP) and facing him (±400) → 3, or straight on
+(±140) 3 in 4 times → 2; Leon dead → 6. **2** (`0x80101fd4`): move 2, a hit with part 10 on
+keys 14–19 (`FUN_80100790`: 200 + 500 around the part); a pause of 30; at key 20 a follow-up
+(state 5, move 9: he impales Leon) if he is close and in front. **3** (`0x8010226c`): move
+4, parts 10 and 16 on keys 15–19. **4** charge (`0x80102584`): move 8, part 10 on keys
+27–33 (400). The damage is the main executable's (`FUN_800152b0` kind 2), not read.
+**DS:** `super_tyrant_fight` (`SUT_*`) once the scene leaves him idle; 40 / 60 damage;
+state 5's impaling and 7 / 8 are not ported.
+
+## 17. The partner following Leon (Ada `0x41`)
+
+The people's routines are in the main executable, not in an overlay: table `0x800a0408`,
+routine 1 `0x8005bdac` -> `FUN_8005be50`. Every 16 frames `FUN_80061090(obj, 3000)` picks a
+mode (enemies near, ...; table `0x800a068c`); each mode runs a decision table, then the action
+table `0x800a06fc`, both by state `obj+5` (mode 0's decisions at `0x800a06c4`, modes 1–10 at
+`0x800a0734 + 0x38 · (mode − 1)`). Ported as `partner_follow` in `enemy.c`; the DS takes it
+while flag 1:3 is set (`0x800c77d4 & 0x10000000`, room 304 sets it as Ada comes along) for the
+slot `0xff` object.
+
+**Enemies** (`FUN_80060d18`, every frame): the three nearest she sees (alive, no `0xc000` in
+`obj+0x10e`, line of sight between the heads) with their distances (`0x800cf198..`,
+`0x800d7588..`). **Mode** (`FUN_80061090(obj, 3000)`, every 16 frames, `0x800a06c3`): 0 none
+seen; none within 3000: 2 / 4 Leon faces the one (±0x400) or not, with more 6 / 8 / 10 he
+faces all / none / some; within 3000: 1 / 3 she faces it or not, with more 5 / 7 / 9 (all /
+none / some). A new mode sets the goal kind (`0x800a06b8`: 2 for modes 3, 4, 7–10, else 0) and
+bit `0x8000` of `obj+0x21c` for the next 16 frames.
+
+**Goal** (`FUN_8005bb74`, every frame): kind 0 a point 1000 from Leon at his facing ±1300,
+kind 2 800 at +1920 (behind him; table `0x800a0674`, Sherry's types `0x45`/`0x4f` have their
+own row: 700 / ±1100, 600 / 2176, 1920), the nearer of the two (`FUN_80060b24`); Leon himself
+when it lies outside the room's zones. `obj+0x218/0x21a` holds it, `obj+0x21e` the distance to
+it; the way there goes by the zone paths (`FUN_80046fb0`, as the zombies do).
+
+| State | Decision / action | What |
+|-------|-------------------|------|
+| 0 stand | `0x8005c950` / `0x8005ccf8` | goal more than 3000 away, or the mode just changed, or mode 10 and over 500: walk (1), or 12 when the way is not within ±0x400; else step aside (3) when Leon runs (`obj+5` 2) at her within 4000 or walks (1) at her within 1000 — he does not face away (`FUN_800152d0`: ±0x400) and she faces him (±0x200). When Leon fires (`0x800c77f2 & 1`, the DS's `NOISE_SHOT`) and she sees an enemy: 5 (`0x8005c4fc`) |
+| 0 stand, odd modes | `0x8005cbc0` | an enemy seen and no pause: 5 (`0x8005c608`); goal more than 3000 away: walk / 12; nothing else |
+| 1 walk | `0x8005d1e4` / `0x8005d3bc` | goal under 300: 11; over 5000: run; under 2000 with Leon running at her: 3; turns to the way at 0x28 a frame. 60 frames close to Leon (1500) or blocked close to the goal: 4 |
+| 1 walk, modes 1–10 | `0x8005cf14` | the nearest enemy under 2000 and nearer than Leon: 5 (`0x8005cd94`); under 1500 and within ±0x4b0 of her facing: turns away from it at 0x28; no state 4 |
+| 2 run | `0x8005d768` / `0x8005d8ec` | back to walking under 3000; turns at 0x38 (modes 1–10, `0x8005d590`: away from an enemy under 2000 within ±0x400; turning about at 0x50) |
+| 5 shoot | `0x8005dddc` / `0x8005de18` | steps below |
+| 3 step aside | `0x8005da48` / `0x8005db18` | walks on, turning 0x80 a frame (0x60 the first) to the side of Leon's facing she stands on (`FUN_80014fb4`), until she faces his way (±0x200) after 5 frames, or 120 frames |
+| 4 face Leon | `0x8005dc90` | turns on the spot to him at 0x50 |
+| 11 align | `0x8005f0d0` | turns on the spot to Leon's facing at 0xa0 (modes 3, 4, 7–10, `0x8005f130`: to his back) |
+| 12 turn first | `0x8005f2bc` | walks turning to the way at 0x30 until it is within ±0x400; goal under 300: 11 |
+
+Blocked (`obj+0x110 & 1`) for 60 frames (`obj+0x224`), she turns about for 30 frames to her
+facing + 0x880 − 0 or 0x100 by random (`obj+0x220`, bit 0x1000 of `obj+0x21c`); running, 15.
+
+Animations of her own set 1 by her health (`obj+0x151`: HP ×4096 / max under 2000 caution,
+under 800 danger): stand 2 / 5 / 8 (`0x800115d4`), walk 0 / 3 / 6, run 1 / 4 / 7, step aside
+0 / 9 / 9 (`0x800115e8`). The DS has no maximum HP for people and keeps the first column.
+
+**Shooting** (state 5, steps `obj+6` by tables `0x800a09b8` / `0x800a09d0`). The reactions
+go by the enemy's type (`0x800a0954`: 0 for all but the spiders `0x25` / `0x26`): a standing
+one is shot straight (`obj+0x154` `0x4000`), a crawling one (variant bit 0, `*obj &
+0x4000000`) down (`0x2000`); one lying otherwise is left alone. Standing she takes the nearest,
+but a standing second within 3000 before a crawling first; walking only a standing one within
+2500 (or one crawling). `obj+0x1b4` = the target. Her animations: set 1 number 9 up, 11 / 15
+aim straight / down, 10 / 14 fire (`0x800115ec`, `0x800115f8`; 13 / 12 up for `0x8000`).
+
+| Step | Action | What |
+|------|--------|------|
+| 0 up | `0x8005debc` | 9 forward, turning to the target at 0xd8; sets "armed" (`obj+0x21c & 0x4000`) and a delay of 7 (`obj+0x14e`) |
+| 1 aim | `0x8005e0c4` / `0x8005e154` | not armed: 3. Straight, or down once the delay is over (`0x8005dfdc`): the target hit-locked (`+0x1d3`) or dead: 3; standing: fire; crawling: fire in the odd modes, else 3. The aim animation up to 30 frames, then 3 |
+| 2 fire | `0x8005e228` | the shot (`FUN_8003dd58` / `FUN_8003dd8c` with `obj[0] >> 29`: not a weapon but the aim - `0x8003f8b4` copies bits 13-15 of `obj+0x154`, up / straight / down, into bits 29-31 of `obj[0]`), fire and flash at her hand (`0x030a0e00`, `0x01000e00` at 138 / 615 / 8, part 11); armed again only when it hit; at the end 1 |
+| 3 down | `0x8005e44c` | 9 backwards from key 1 (`FUN_800289d4` flags `0x10000`), then state 0 and 30 frames (`obj+0x22a`) before she raises it again |
+
+So she fires every 16 frames at a standing zombie while her shots hit, and stops when it goes
+down. The DS uses the VP70's damage (16 / 15 / 14) and its shot sound (ARMS02, loaded at her
+first shot); the partner's routines call no sound function, so where the PS1 takes hers from
+is not known. Steps 4 (animation 16) and 5 (re-aim, 9 from key 3) are not reached from the
+zombies' code.
+
+Not ported: the health columns, state 12 of modes 1–10 (`0x8005f1a0`, with 13 `0x8005f394`),
+states 6–10 (being hit and the like), the spiders' reactions (`0x8005c6e4` …), mode 10's pick
+of Leon's own target (`FUN_8006120c`).
+
+## 18. Open points
+
+- The licker climbing from the floor onto a wall (state 1), type `0x24`'s own overlay, two
+  spiders meeting on the ceiling (state 11) and the spiders' poison as a flying effect; the
   crows perched in routine 4 (status `0x4000`).
 - The alligator's bite on the way (`obj+0x224`, Leon's routine 5) and the camera cuts of its
   death and escape.

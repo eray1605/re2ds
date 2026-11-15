@@ -34,6 +34,9 @@ int enemy_sound_set(const uint8_t *pairs);
 // room starts (enemy.c room_start)
 void enemy_set_motion(int slot, int motion, int ctr);
 void enemy_set_skin(int slot, int model); // sce_em_set's model byte: zombie clothes
+void enemy_set_shadow(int slot, int r, int g, int b, int w, int h, int ox, int oz); // kage_set
+void enemy_shadow_init(void);   // the shadow texture, before the enemies' (VRAM)
+void enemy_player_shadow(int32_t x, int32_t y, int32_t z, int16_t dir); // Leon's, after the bodies
 
 #define NOISE_WALK 0x02
 #define NOISE_RUN 0x04
@@ -51,19 +54,53 @@ int enemy_grabbing(void);       // a zombie holds Leon
 #define NOISE_SHOT 0x01
 // auto-aim: nearest living enemy Leon sees within range (0 = any); -1 none
 int enemy_aim_target(int32_t x, int32_t y, int32_t z, int range, int32_t *tx, int32_t *tz);
+// what Leon's head turns to, seen from his head (x, y, z) facing dir: the
+// nearest standing one within range and +-cone (RE2 units) of dir, else the
+// nearest lying one; -1 none
+int enemy_look_target(int32_t x, int32_t y, int32_t z, int16_t dir, int range, int cone);
+// the point of it his head turns to; 0 when it is gone
+int enemy_look_point(int slot, int32_t *x, int32_t *y, int32_t *z);
 // shot / stab toward dir: damage[near, mid, far]; returns the enemy hit or -1
-// low: Leon aims down. Zombies on the ground (knocked down or lying) are only
-// hit then - a straight shot passes over them, as the PS1's hit check
-// compares the heights of the body parts (FUN_8003dd8c).
-int enemy_hit(int32_t x, int32_t y, int32_t z, int16_t dir, int range, int weapon, const uint16_t damage[3], int low);
+// aim: AIM_*, Leon's aim posture. Zombies on the ground (knocked down, lying,
+// crawling) are only hit aiming down - a straight shot passes over them, as
+// the PS1's hit check compares the heights of the body parts (FUN_8003dd8c).
+#define AIM_STRAIGHT 0
+#define AIM_UP 1
+#define AIM_DOWN 2
+int enemy_hit(int32_t x, int32_t y, int32_t z, int16_t dir, int range, int weapon, const uint16_t damage[3], int aim);
 // room script access (work_set 3): member 7 = flags; 0 if unknown
 int enemy_member_get(int slot, int member, int *value);
 void enemy_member_set(int slot, int member, int value);
-// reserve_*: GX RAM still needed after the enemies (the masks)
+// reserve_*: GX RAM still needed after the enemies (the effects; the masks come first)
 void enemy_draw(int reserve_vertices, int reserve_polygons);
 int enemy_count(void);
 // player collision with enemies (walls are checked in main.c)
 int enemy_blocks_player(int32_t from_x, int32_t from_z, int32_t x, int32_t z);
+// main.c: draws the room objects part bone of character who carries (0 Leon, 1 the partner, 2 + slot)
+void game_draw_attached(int who, int bone);
+int enemy_part_point(int slot, int bone, const int32_t local[3], int32_t out[3]);
+void enemy_part_bomb(int slot, int part);   // sce_parts_bomb: the part bursts
+void enemy_part_down(int slot, int part);   // sce_parts_down: the part drops off
+void enemy_part_set(int slot, int part, int field, int value); // parts_set
+
+// plc_neck (scd_op_41, 0x800531d8) and the head turn it drives (FUN_80017160):
+// mode = obj+0x1c0 (0x80 | the bits of the scene's mode; 0 = looking about on
+// its own), p = obj+0x170/2/4, speed = the neck part's +0xa4/+0xa5, turn = its
+// +0x98/+0x9a (RE2 units, added to the head's y / z turn).
+typedef struct {
+    uint8_t mode;
+    uint8_t speed[2];
+    int16_t p[3];
+    int16_t turn[2];
+} Neck;
+void neck_set(Neck *n, const uint8_t *ins);
+// one tick of a scene's head turn: head = the head part's place, body = the
+// facing (RE2 units) incl. the root's turn, anim = the head's own y / z turn
+void neck_step(Neck *n, const int32_t head[3], int body, const int anim[2]);
+void enemy_neck_set(int slot, const uint8_t *ins);
+int enemy_head_point(int slot, int32_t out[3]);
+// an enemy stands in the box (middle, half sizes): a pushed room object stops
+int enemy_in_box(int32_t cx, int32_t cy, int32_t cz, int32_t hx, int32_t hy, int32_t hz);
 extern int enemy_spawn_calls, enemy_last_error;
 extern int enemy_jumps, enemy_jump_max, enemy_toggles;
 

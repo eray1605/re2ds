@@ -1,7 +1,10 @@
 """Convert pld2json output to the DS model + texture format (source/formats.h).
 
 - One packed GX display list per (bone, texture page): BEGIN / TEXCOORD /
-  VTX_16 / END. Vertices stay in bone-local game units (fit VTX_16 directly).
+  (NORMAL) / VTX_16 / END. Vertices stay in bone-local game units (fit VTX_16
+  directly). Characters (write_model) carry the PS1's vertex normals, for
+  the room lights (source/main.c: game_light_character); room objects and
+  doors are drawn unlit and have none.
 - PS1 quads are strips (0,1,2,3); the DS draws quads as polygons, so the
   vertex order becomes 0,1,3,2.
 - Keyframe angles: 12 bit (4096 = 360 deg) -> DS units (32768 = 360 deg).
@@ -20,9 +23,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pld2json  # noqa: E402
 
 MODEL_MAGIC = 0x31444D52  # "RMD1"
-CMD_COLOR, CMD_TEXCOORD, CMD_VTX16 = 0x20, 0x22, 0x23
+CMD_COLOR, CMD_NORMAL, CMD_TEXCOORD, CMD_VTX16 = 0x20, 0x21, 0x22, 0x23
 CMD_BEGIN, CMD_END = 0x40, 0x41
-PARAMS = {CMD_COLOR: 1, CMD_TEXCOORD: 1, CMD_VTX16: 2, CMD_BEGIN: 1, CMD_END: 0}
+PARAMS = {CMD_COLOR: 1, CMD_NORMAL: 1, CMD_TEXCOORD: 1, CMD_VTX16: 2, CMD_BEGIN: 1, CMD_END: 0}
 GL_TRIANGLES, GL_QUADS = 0, 1
 
 
@@ -45,11 +48,23 @@ def vtx16(v):
     return [(y & 0xFFFF) << 16 | (x & 0xFFFF), z & 0xFFFF]
 
 
+def normal10(n):
+    """A PS1 normal (any length) as the GX NORMAL parameter: x, y, z in 1.0.9
+    fixed point, 10 bits each. A zero normal points nowhere: no light."""
+    x, y, z = (float(c) for c in n)
+    length = (x * x + y * y + z * z) ** 0.5
+    if length == 0:
+        return [0]
+    def bits(c):
+        return max(-512, min(511, round(c / length * 511))) & 0x3FF
+    return [bits(x) | bits(y) << 10 | bits(z) << 20]
+
+
 def texcoord(u, v):
     return [((v * 16) & 0xFFFF) << 16 | ((u * 16) & 0xFFFF)]
 
 
-def build_lists(mesh, page):
+def build_lists(mesh, page, normals=False):
     lists = []
     for prim, size in ((GL_TRIANGLES, 3), (GL_QUADS, 4)):
         cmds = []
@@ -57,10 +72,14 @@ def build_lists(mesh, page):
             if face["page"] != page or len(face["v"]) != size:
                 continue
             verts = mesh["tri_vertices"] if face["src"] == "tri" else mesh["quad_vertices"]
+            norms = mesh["tri_normals"] if face["src"] == "tri" else mesh["quad_normals"]
             order = (0, 1, 2) if size == 3 else (0, 1, 3, 2)
             for k in order:
                 u, v = face["uv"][k]
                 cmds.append((CMD_TEXCOORD, texcoord(u, v)))
+                if normals:
+                    n = face["n"][k]
+                    cmds.append((CMD_NORMAL, normal10(norms[n] if n < len(norms) else (0, 0, 0))))
                 cmds.append((CMD_VTX16, vtx16(verts[face["v"][k]])))
         if cmds:
             lists += [(CMD_BEGIN, [prim])] + cmds + [(CMD_END, [])]
@@ -86,17 +105,22 @@ def write_model(model, tim, out):
     lists_blob, list_offsets = bytearray(), []
     for b in range(nb):
         for p in range(pages):
-            words = build_lists(model["meshes"][b], p)
+            words = build_lists(model["meshes"][b], p, normals=True)
             if words is None:
                 list_offsets.append(None)
             else:
                 list_offsets.append(len(lists_blob))
                 lists_blob += struct.pack(f"<{len(words)}I", *words)
 
+    # Every keyframe holds one turn per bone of the model: the engine reads
+    # them at a fixed stride (assets.c). An EMR set of its own (sets 1 and 2)
+    # may have more or fewer parts than the model's first one; its frames are
+    # cut or padded with no turn, else every frame after them was read shifted.
     frames = bytearray()
     for fr in skel["frames"]:
         frames += struct.pack("<6h", *fr["offset"], *fr["speed"])
-        for rx, ry, rz in fr["rot"]:
+        rot = (list(fr["rot"]) + [[0, 0, 0]] * nb)[:nb]
+        for rx, ry, rz in rot:
             frames += struct.pack("<3h", rx * 8, ry * 8, rz * 8)
 
     # pool entries: frame index (12 bits) | EDD frame flags bits 0..3 << 12

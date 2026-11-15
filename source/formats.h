@@ -29,9 +29,18 @@ typedef struct {
 //   layout below.
 //   Each mask rectangle is a textured quad placed in the world at its PS1
 //   depth (distance along the view direction = depth * 32). Drawn with the
-//   room camera after the models, the hardware depth test hides whatever is
-//   behind the foreground object.
-#define MASK_MAGIC 0x314B4D52 // "RMK1"
+//   room camera, the hardware depth test hides whatever is behind the
+//   foreground object.
+//   The PS1 links a mask into its ordering table at index depth (0x800465c8)
+//   and a model's triangle at OTZ / 8 (0x80027190), leaving out those with
+//   OTZ < 8 (0x8002716c): a mask of depth 0 covers every model (room 108,
+//   camera 0: the railing in front; room 204, camera 6: the wall around a
+//   window). Masks nearer than the DS near plane (depth < MASK_NEAR_DEPTH)
+//   hold their screen rectangle instead: corner[k] = x and y in normalised
+//   device coordinates * 4096 (x right, y up), z = 0; they are drawn without
+//   the camera, in front of every model.
+#define MASK_MAGIC 0x324B4D52 // "RMK2"
+#define MASK_NEAR_DEPTH 8     // depth * 32 = 256 units; setup_camera's near plane is at 204.8
 
 typedef struct {
     uint32_t magic;
@@ -47,17 +56,20 @@ typedef struct {
 typedef struct {
     uint8_t u, v;           // top-left texel in the atlas
     uint16_t w, h;          // size in texels (= PS1 screen pixels)
-    uint16_t depth;         // PS1 depth value (distance / 32), for reference
+    uint16_t depth;         // PS1 depth value (distance / 32)
+    uint8_t group;          // shown while bit group of flag array FLAGS_MASKS + camera is set
+    uint8_t pad[3];
     int32_t corner[4][3];   // world positions: top-left, top-right,
-                            // bottom-right, bottom-left (as seen on screen)
-} MaskQuad;                 // 56 bytes
+                            // bottom-right, bottom-left (as seen on screen);
+                            // screen positions if depth < MASK_NEAR_DEPTH
+} MaskQuad;                 // 60 bytes
 
 // ---------------------------------------------------------------------------
 // Room: room/<rdt>.bin (<rdt> = "room" + stage + room in hex + player, e.g.
 // room10a0 for Leon). room/index.bin lists the converted rooms: u16 count,
 // then count x (u8 stage, u8 room).
 #define ROOM_MAGIC 0x314D5252 // "RRM1"
-#define ROOM_VERSION 4
+#define ROOM_VERSION 5
 
 typedef struct {
     uint32_t magic;
@@ -109,11 +121,13 @@ typedef struct {
 // OpenBiohazard2: per camera, the first zone with cam1 == 0 is that camera's
 // own view area and never switches.
 #define SWITCH_VIEW_AREA 0x01  // role bit: this zone is cam0's view area
+#define SWITCH_ON 0x02         // role bit: the RVD record's byte 0 is set: a transition
+                               // switches only then; the scripts turn it with cut_be_set
 typedef struct {
     uint8_t cam0;          // active camera
     uint8_t cam1;          // camera to switch to
     uint8_t floor;         // 255 = any floor
-    uint8_t role;          // SWITCH_VIEW_AREA or 0 (= transition)
+    uint8_t role;          // SWITCH_VIEW_AREA, SWITCH_ON
     int16_t x[4];
     int16_t z[4];
 } RoomSwitch;              // 20 bytes

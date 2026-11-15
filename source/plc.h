@@ -22,6 +22,10 @@ enum {
     PLC_BACK = 7,         // walk backward to the destination
     PLC_BACK_STRAIGHT = 8, // backward without turning first (FUN_80061a9c)
     PLC_FACE = 9,         // turn to face the destination (walking on the spot)
+    PLC_MOVE_ROOM = 0x0A, // as 0-3, and the animation moves the character (FUN_800625ec)
+    PLC_MOVE_OWN = 0x0B,
+    PLC_MOVE_SET2 = 0x0C,
+    PLC_MOVE_SET3 = 0x0D,
     PLC_WALK_CLIMB = 0x12, // as walking; the PS1 also climbs a box on the way (FUN_80061d08)
     PLC_PAUSED = 0x14,    // plc_stop
     PLC_TURN_TO = 0x15,   // turn to the facing in dest_x
@@ -38,8 +42,9 @@ typedef struct {
     uint8_t active;          // routine 4: the room script moves the character
     uint8_t mode, step;      // obj+5 / obj+6
     uint8_t saved_mode, saved_step; // plc_stop
-    uint16_t flags;          // obj+0x1cc: 4 loop, 8 double speed, 0x10 half speed,
-                             // 0x40 no blend, 0x80 backward
+    uint16_t flags;          // obj+0x1cc: 1 / 2 keep a foot planted, 4 loop, 8 double
+                             // speed, 0x10 half speed, 0x40 no blend, 0x80 backward,
+                             // 0x100 root motion measured from the first keyframe shown
     int16_t rot, rot_end;    // obj+0x1d4 / 0x1d6: turn per tick (RE2 units), at the end
     int16_t dest_x, dest_z;  // obj+0x1c4 / 0x1c6
     uint8_t done_bit;        // obj+0x1cb: bit of flag array 5 set on arrival
@@ -47,6 +52,7 @@ typedef struct {
     uint8_t anim;            // modes 0 / 1
     uint8_t key;             // obj+0x14d: next keyframe
     uint8_t odd;             // flag 0x10 toggle
+    int16_t root[3];         // obj+0x20c..0x210: the shown keyframe's root motion (modes 0x0a-0x0d)
 } Plc;
 
 // The character as plc_tick sees it; the owner copies its fields in and out.

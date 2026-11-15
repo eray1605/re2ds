@@ -48,8 +48,10 @@ static void back(const PlcBody *b)
 }
 
 int game_blocked(int32_t a, int32_t b, int32_t c, int32_t d, int32_t y) { (void)a; (void)b; (void)c; (void)d; (void)y; return 0; }
+const RoomBox *game_room_boxes(int *n) { *n = 0; return NULL; }
 int camera_sees(int32_t x, int32_t y, int32_t z, int32_t m) { (void)x; (void)y; (void)z; (void)m; return 1; }
 int camera_occluded(int32_t x, int32_t y, int32_t z) { (void)x; (void)y; (void)z; return 0; }
+int camera_view_area(int32_t x, int32_t z) { (void)x; (void)z; return 1; }
 int cull_models = 0;
 void game_aot_on(int n) { (void)n; }
 int game_busy(void) { return 0; }
@@ -61,6 +63,31 @@ void game_set_player_dir(int16_t d) { pl.dir = d * 8; }
 void game_set_box_flag(int b, int f) { printf("t%d  box %d flag %04x\n", tick, b, f & 0xFFFF); }
 void game_bgm_control(int i, int o, int t, int l, int r) { (void)i; (void)o; (void)t; (void)l; (void)r; }
 void game_bgmtbl_set(int s, int r, int m, int u) { (void)s; (void)r; (void)m; (void)u; }
+void game_object_super(int n, int p, int pt, const int16_t pos[3], const int16_t dir[3]) { (void)n; (void)p; (void)pt; (void)pos; (void)dir; }
+void game_object_super_reset(int n, const int16_t dir[3]) { (void)n; (void)dir; }
+void game_draw_attached(int who, int bone) { (void)who; (void)bone; }
+void game_shake(int x, int y) { (void)x; (void)y; }
+int game_player_poisoned(void) { return 0; }
+void game_player_cure(void) {}
+void game_player_poison(void) {}
+void game_espr_on2(const uint8_t *ins, int d) { (void)ins; (void)d; }
+void game_espr_kill2(int h) { (void)h; }
+void game_enemy_part_set(int s, int p, int f, int v) { enemy_part_set(s, p, f, v); }
+int game_free_object_textures(void) { return 0; }
+void game_neck_set(int w, int i, const uint8_t *ins) { if (w == 2) enemy_neck_set(0xFF, ins); else if (w == 3) enemy_neck_set(i, ins); }
+int game_character_head(int k, int32_t out[3]) { if (k >= 1) return enemy_head_point(k == 1 ? 0xFF : k - 2, out); out[0] = out[1] = out[2] = 0; return 1; }
+int game_light_character(int32_t x, int32_t y, int32_t z) { (void)x; (void)y; (void)z; return 0; }
+uint8_t *game_light_record(int cam) { (void)cam; return NULL; }
+void game_super_on(int work, int index, const uint8_t *ins) { (void)work; (void)index; (void)ins; }
+void game_voice_volume(int v) { (void)v; }
+void game_enemy_part_fx(int s, int p, int d) { printf("  part %d of %d %s\n", p, s, d ? "drops" : "bursts"); if (d) enemy_part_down(s, p); else enemy_part_bomb(s, p); }
+void game_music_scale(int p) { (void)p; }
+void game_espr_task(int k, int i) { (void)k; (void)i; }
+void game_mirror_set(const uint8_t *ins) { (void)ins; }
+int game_keys(int pressed) { (void)pressed; return 0; }
+void game_fade_set(int n, int k, int s) { (void)n; (void)k; (void)s; }
+void game_fade_adjust(int n, int l) { (void)n; (void)l; }
+void game_player_heal(int i, int a) { (void)i; (void)a; }
 void game_item_get(int item, int count) { printf("  item get %02x x%d\n", item, count); }
 void game_movie(int n) { (void)n; }
 void game_play_sound(int bank, int sound) { printf("t%d  sound bank %d #%d\n", tick, bank, sound); }
@@ -71,6 +98,8 @@ void game_spawn_enemy(int s, int t, int v, int voice, int x, int y, int z, int d
 }
 void game_enemy_motion(int s, int m, int c) { enemy_set_motion(s, m, c); }
 void game_enemy_skin(int s, int m) { enemy_set_skin(s, m); }
+void game_cut_be_set(int c, int n, int on) { (void)c; (void)n; (void)on; }
+void game_enemy_shadow(int s, int r, int g, int b, int w, int h, int ox, int oz) { enemy_set_shadow(s, r, g, b, w, h, ox, oz); }
 void game_enemy_sound(int sound, int32_t x, int32_t z) { (void)sound; (void)x; (void)z; }
 void game_player_voice(int sound) { (void)sound; }
 int game_player_damage(int dmg) { (void)dmg; return 0; }
@@ -80,9 +109,10 @@ void game_player_died(void) {}
 void game_player_hurt(int kind) { (void)kind; }
 void game_player_killed(void) {}
 void game_blood(int k, int32_t x, int32_t y, int32_t z, int16_t d, int sp, int32_t f) { (void)k; (void)x; (void)y; (void)z; (void)d; (void)sp; (void)f; }
+void game_partner_shot(int32_t x, int32_t y, int32_t z) { (void)x; (void)y; (void)z; }
 int game_sight_blocked(int32_t a, int32_t b, int32_t c, int32_t d, int32_t e, int32_t f) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; return 0; }
 int game_enemy_member(int s, int m, int *v) { return enemy_member_get(s, m, v); }
-void game_enemy_member_set(int s, int m, int v) { enemy_member_set(s, m, v); }
+void game_enemy_member_set(int s, int m, int v) { if (getenv("TRACE_MEMBERS")) printf("  member_set enemy %d member %#x = %d\n", s, m, v); enemy_member_set(s, m, v); }
 int game_player_member(int m, int *v)
 {
     switch (m) { case 0x0B: *v = pl.x; return 1; case 0x0D: *v = pl.z; return 1; case 0x0F: *v = pl.dir / 8; return 1; }
@@ -95,6 +125,7 @@ int game_voice_playing(void) { return voice_left > 0; }
 void game_object_set(const uint8_t *ins) { (void)ins; }
 void game_object_hide(int model) { (void)model; }
 void game_espr_on(const uint8_t *ins) { (void)ins; }
+void game_espr3d_on(const uint8_t *ins) { (void)ins; }
 void game_espr_kill(int id, int type) { (void)id; (void)type; }
 void game_floor_sound_set(int n, int on) { (void)n; (void)on; }
 static int16_t obj_pos[32][3], obj_dir[32];
@@ -173,7 +204,7 @@ int main(int argc, char **argv)
             if (target >= 0) {
                 int16_t dir = (int16_t)((int)(atan2f((float)-(tz - pl.z), (float)(tx - pl.x)) * 32768.0f / 6.2831853f) & 32767);
                 static const uint16_t dmg[3] = { 16, 15, 14 };
-                printf("t%d  shot -> %d\n", tick, enemy_hit(pl.x, 0, pl.z, dir, 0, 2, dmg, 1));
+                printf("t%d  shot -> %d\n", tick, enemy_hit(pl.x, 0, pl.z, dir, 0, 2, dmg, AIM_DOWN));
             }
         }
         if (tick % 50 == 0) {

@@ -7,6 +7,14 @@ typedef int32_t s32;
 #define GL_RGB256 4
 #define TEXTURE_SIZE_128 4
 #define TEXTURE_SIZE_256 5
+#define TEXTURE_SIZE_32 2
+#define GL_RGB8_A5 6
+#define GL_QUADS 1
+#define inttot16(n) ((n) << 4)
+static inline void glBegin(int mode) { (void)mode; }
+static inline void glEnd(void) { }
+static inline void glTexCoord2t16(int u, int v) { (void)u; (void)v; }
+static inline void glVertex3v16(int x, int y, int z) { (void)x; (void)y; (void)z; }
 #define TEXGEN_TEXCOORD 0
 #define POLY_ALPHA(n) 0
 #define POLY_CULL_NONE 0

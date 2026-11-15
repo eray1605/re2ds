@@ -20,6 +20,27 @@ void game_set_player_dir(int16_t dir) { (void)dir; }
 void game_set_box_flag(int box, int flag) { (void)box; (void)flag; }
 void game_bgm_control(int i, int o, int t, int l, int r) { (void)i; (void)o; (void)t; (void)l; (void)r; }
 void game_bgmtbl_set(int s, int r, int m, int u) { (void)s; (void)r; (void)m; (void)u; }
+void game_object_super(int n, int p, int pt, const int16_t pos[3], const int16_t dir[3]) { (void)n; (void)p; (void)pt; (void)pos; (void)dir; }
+void game_object_super_reset(int n, const int16_t dir[3]) { (void)n; (void)dir; }
+void game_shake(int x, int y) { (void)x; (void)y; }
+int game_player_poisoned(void) { return 0; }
+void game_player_cure(void) {}
+void game_espr_on2(const uint8_t *ins, int d) { (void)ins; (void)d; }
+void game_espr_kill2(int h) { (void)h; }
+int game_sight_blocked(int32_t a, int32_t b, int32_t c, int32_t d, int32_t e, int32_t f) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; return 0; }
+void game_enemy_part_set(int s, int p, int f, int v) { (void)s; (void)p; (void)f; (void)v; }
+void game_neck_set(int w, int i, const uint8_t *ins) { (void)w; (void)i; (void)ins; }
+uint8_t *game_light_record(int cam) { (void)cam; return NULL; }
+void game_super_on(int work, int index, const uint8_t *ins) { (void)work; (void)index; (void)ins; }
+void game_voice_volume(int v) { (void)v; }
+void game_enemy_part_fx(int s, int p, int d) { (void)s; (void)p; (void)d; }
+void game_music_scale(int p) { (void)p; }
+void game_espr_task(int k, int i) { (void)k; (void)i; }
+void game_mirror_set(const uint8_t *ins) { (void)ins; }
+int game_keys(int pressed) { (void)pressed; return 0; }
+void game_fade_set(int n, int k, int s) { (void)n; (void)k; (void)s; }
+void game_fade_adjust(int n, int l) { (void)n; (void)l; }
+void game_player_heal(int i, int a) { (void)i; (void)a; }
 void game_item_get(int item, int count) { printf("  item get %02x x%d\n", item, count); }
 void game_movie(int n) { (void)n; }
 void game_play_sound(int bank, int sound) { (void)bank; (void)sound; }
@@ -32,6 +53,7 @@ int game_voice_playing(void) { return 0; }
 void game_object_set(const uint8_t *ins) { (void)ins; }
 void game_object_hide(int model) { (void)model; }
 void game_espr_on(const uint8_t *ins) { (void)ins; }
+void game_espr3d_on(const uint8_t *ins) { (void)ins; }
 void game_espr_kill(int id, int type) { (void)id; (void)type; }
 void game_floor_sound_set(int n, int on) { (void)n; (void)on; }
 int game_object_member(int n, int m, int *v) { (void)n; (void)m; (void)v; return 0; }
@@ -40,6 +62,11 @@ int game_plc(int w, int i, const uint8_t *ins) { (void)w; (void)i; (void)ins; re
 void game_spawn_enemy(int s, int t, int v, int voice, int x, int y, int z, int d) { (void)voice; if (getenv("SHOW_SPAWNS")) printf("  spawn slot %d type %02x variant %d at %d %d %d dir %d\n", s, t, v, x, y, z, d); }
 void game_enemy_motion(int s, int m, int c) { (void)s; (void)m; (void)c; }
 void game_enemy_skin(int s, int m) { (void)s; (void)m; }
+void game_cut_be_set(int c, int n, int on) { (void)c; (void)n; (void)on; }
+void game_enemy_shadow(int s, int r, int g, int b, int w, int h, int ox, int oz)
+{
+    printf("  shadow enemy %d colour %02x %02x %02x size %d x %d offset %d %d\n", s, r, g, b, w, h, ox, oz);
+}
 
 const char *room_message(const Room *room, int n)
 {
@@ -99,6 +126,12 @@ int main(int argc, char **argv)
                 if (aots[k].active && aots[k].type == SCE_ITEM)
                     printf("    item %02x x%d picked %02x model %d\n", aots[k].data[0], aots[k].data[2],
                            aots[k].data[4], aots[k].data[6]);
+        if (getenv("AOTS")) // every AOT after the scripts ran: type, data bytes
+            for (int k = 0; k < NUM_AOTS; k++)
+                if (aots[k].active)
+                    printf("    aot %d type %d data %02x %02x %02x %02x %02x %02x %02x %02x\n", k, aots[k].type,
+                           aots[k].data[0], aots[k].data[1], aots[k].data[2], aots[k].data[3], aots[k].data[4],
+                           aots[k].data[5], aots[k].data[6], aots[k].data[7]);
         extern int script_unknown_at;
         if (script_unknown_ops)
             printf("    unknown op %d at %d\n", script_unknown_at >> 16, script_unknown_at & 0xFFFF);

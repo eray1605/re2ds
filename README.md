@@ -223,7 +223,6 @@ Debug:
 
 | Button | Action |
 |--------|--------|
-| SELECT | room menu: warp to any room (L/R ±10, A warp) |
 | hold SELECT while the game boots | leaves out the title movie and the opening (NEW GAME) |
 | L + A at a door | opens any lock |
 | L + A at a typewriter | saves without an ink ribbon |

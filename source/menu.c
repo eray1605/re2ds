@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "assets.h"
+#include "msgtop.h"
 #include "menu.h"
 #include "script.h"
 
@@ -45,7 +46,11 @@ static int msg_answer;          // 0 yes, 1 no
 static char info[96];                  // text box when no message is open
 static int ecg_phase;
 static int combine_from = -1;          // COMBINE picked on this slot: choosing the other
-static uint8_t *pictures;              // menu/pictures.bin (tools/itps2ds.py)
+// menu/pictures.bin (tools/itps2ds.py): only the picture shown is read (the
+// whole file, 787 KB, took the room a full room's models and sounds needed -
+// room 207's zombies went silent, then unseen)
+static uint8_t *picture_buf;
+static int picture_loaded = -1;
 static int num_pictures, picture_w, picture_h;
 static int picture;                    // item whose picture covers the slots (0 = none)
 
@@ -54,6 +59,8 @@ static int picture;                    // item whose picture covers the slots (0
 // blip, 8 the long reload click (assignment by ear, not traced to the calls).
 enum { SND_CURSOR = 4, SND_SELECT = 5, SND_BACK = 6, SND_NO = 7, SND_RELOAD = 8 };
 void game_menu_sound(int sound);
+void game_player_heal(int item, int amount); // main.c: HP up, to the maximum
+void game_item_use(int item);        // main.c: USEd at an item AOT (variable 2)
 
 static int col(int c) { return ui ? ui[c] : (c == C_WHITE ? 255 : 0); }
 
@@ -87,27 +94,45 @@ static void text(int x, int y, const char *s, int c)
 
 // Message control codes kept by tools/rdt2json.py: '\f' a new page (the
 // PS1 waits for a button, code 0xFD), '\v' a yes / no question (0xFB).
+// '\x01' switches to and back from the colour of names (the PS1's 0xF9 1 /
+// 0xF9 0 around an item's name, 0xF8).
 #define MSG_PAGE '\f'
 #define MSG_CHOICE '\v'
+#define MSG_NAME '\x01'
 static int text_end(char c) { return !c || c == MSG_PAGE || c == MSG_CHOICE; }
 
 // word-wrapped text from (x, y), lines of up to 30 characters, until y_end
 // or the end of the page; returns where it stopped
+static int measuring; // text_wrapped only finds where the page ends
+
 static const char *text_wrapped(int x, int y, int y_end, const char *s, int c)
 {
     char line[31];
+    int now = c;
     while (!text_end(*s) && y + 8 <= y_end) {
-        int len = 0, last_space = -1;
-        while (!text_end(s[len]) && s[len] != '\n' && len < 30) {
+        int len = 0, shown = 0, last_space = -1;
+        while (!text_end(s[len]) && s[len] != '\n' && shown < 30) {
             if (s[len] == ' ')
                 last_space = len;
+            shown += s[len] != MSG_NAME;
             len++;
         }
         if (!text_end(s[len]) && s[len] != '\n' && last_space > 0)
             len = last_space;
-        memcpy(line, s, len);
-        line[len] = 0;
-        text(x, y, line, c);
+        for (int i = 0, cx = x; i < len;) {
+            if (s[i] == MSG_NAME) {
+                now = now == c ? C_GREEN : c;
+                i++;
+                continue;
+            }
+            int n = 0;
+            while (i < len && s[i] != MSG_NAME)
+                line[n++] = s[i++];
+            line[n] = 0;
+            if (!measuring)
+                text(cx, y, line, now);
+            cx += 8 * n;
+        }
         s += len;
         while (*s == ' ' || *s == '\n')
             s++;
@@ -144,8 +169,31 @@ const char *item_name(int item)
 
 static int is_weapon(int item) { return item >= 0x01 && item <= 0x13; }
 
+// Leon's own item, in a box of its own (the PS1's slot 10, 0x800cc660): the
+// status screen puts the lighter there while flag 3:0xa2 is set (0x80063fd8)
+#define SEL_SPECIAL INV_SLOTS
+#define ITEM_LIGHTER 0x2F
+static InvSlot special_slot;
+
+static int special_item(void) { return flag_get(3, 0xA2) ? ITEM_LIGHTER : 0; }
+
+static InvSlot *slot_at(int i)
+{
+    if (i == SEL_SPECIAL) {
+        special_slot.item = (uint8_t)special_item();
+        special_slot.count = 0;
+        return &special_slot;
+    }
+    return &inventory[i];
+}
+
 static void slot_pos(int i, int *x, int *y)
 {
+    if (i == SEL_SPECIAL) {
+        *x = 146;
+        *y = 4;
+        return;
+    }
     *x = 8 + (i % 4) * 62;
     *y = 56 + (i / 4) * 40;
 }
@@ -154,16 +202,17 @@ static void draw_slot(int i)
 {
     int x, y;
     slot_pos(i, &x, &y);
+    const InvSlot *s = slot_at(i);
     int c = focus && row == 0 && sel == i ? C_YELLOW : i == combine_from ? C_RED
           : i == inventory_equipped ? C_GREEN : C_DARK;
     fill(x, y, 48, 36, C_BLACK);
     frame(x, y, 48, 36, c);
-    if (inventory[i].item) {
-        icon(x + 4, y + 3, inventory[i].item);
-        int item = inventory[i].item;
+    if (s->item) {
+        icon(x + 4, y + 3, s->item);
+        int item = s->item;
         if (item >= 0x02 && item <= 0x1E) { // guns, ammunition, ink ribbons (not the knife, herbs)
             char n[8];
-            snprintf(n, sizeof(n), "%d", inventory[i].count);
+            snprintf(n, sizeof(n), "%d", s->count);
             text(x + 46 - 8 * (int)strlen(n), y + 27, n, C_WHITE);
         }
     }
@@ -203,15 +252,19 @@ static int ecg_wave(int t)
 }
 
 #define ECG_X 54
-#define ECG_W 140
+#define ECG_W 88                // Leon's own item's box beside it
 #define ECG_BASE 40
+
+int game_player_poisoned(void); // main.c
 
 static void draw_condition(int hp)
 {
     int c = hp < 21 ? C_RED : hp < 101 ? C_YELLOW : C_GREEN;
     int dim = hp < 21 ? C_DIM_RED : hp < 101 ? C_DIM_YELLOW : C_DIM_GREEN;
     const char *s = hp < 21 ? "DANGER " : hp < 101 ? "CAUTION" : "FINE   ";
-    fill(52, 2, 144, 52, C_BLACK);
+    if (game_player_poisoned()) // 0x80064a28: Poison comes before the rest
+        s = "POISON ";
+    fill(52, 2, 92, 52, C_BLACK);
     text(54, 5, "CONDITION", C_GREY);
     text(54, 17, s, c);
     // a monitor sweep: the trace is written left to right at the cursor,
@@ -265,12 +318,22 @@ static void draw_weapon(void)
 // the PS1's item picture (ITPS.ITP), over the slots
 static void draw_picture(void)
 {
-    if (!pictures || picture < 1 || picture >= num_pictures)
+    if (!picture_buf || picture < 1 || picture >= num_pictures)
         return;
+    if (picture_loaded != picture) {
+        FILE *f = fopen("nitro:/menu/pictures.bin", "rb");
+        long size = (long)picture_w * picture_h;
+        int ok = f && fseek(f, 12 + picture * size, SEEK_SET) == 0 && fread(picture_buf, 1, (size_t)size, f) == (size_t)size;
+        if (f)
+            fclose(f);
+        if (!ok)
+            return;
+        picture_loaded = picture;
+    }
     int x = (256 - picture_w) / 2, y = 58;
     fill(x - 4, y - 4, picture_w + 8, picture_h + 8, C_BLACK);
     frame(x - 2, y - 2, picture_w + 4, picture_h + 4, C_GREY);
-    const uint8_t *p = pictures + 12 + picture * picture_w * picture_h;
+    const uint8_t *p = picture_buf;
     for (int j = 0; j < picture_h; j++)
         memcpy(fb + (y + j) * 256 + x, p + j * picture_w, picture_w);
 }
@@ -285,12 +348,18 @@ static void redraw(int hp)
     draw_weapon();
     for (int i = 0; i < INV_SLOTS; i++)
         draw_slot(i);
+    if (special_item())
+        draw_slot(SEL_SPECIAL);
     draw_commands();
     draw_picture();
-    if (message)
+    if (message) {
+        fill(4, 150, 248, 40, C_BLACK);
+        frame(4, 150, 248, 40, C_GREY);
         draw_message();
-    else
+    } else {
+        msgtop_hide();
         text_box(info, C_LIGHT, 188);
+    }
     dirty = 1;
 }
 
@@ -364,6 +433,7 @@ static void pause_show(int on)
 void menu_init(void)
 {
     pause_init();
+    msgtop_init();
     uint32_t size;
     data = asset_load("nitro:/menu/items.bin", &size);
     if (data && *(uint32_t *)data == ITEMS_MAGIC) {
@@ -378,15 +448,16 @@ void menu_init(void)
         name_offs = (const uint16_t *)(portrait + portrait_w * portrait_h);
         names = (const char *)(name_offs + num_names);
     }
-    pictures = asset_load("nitro:/menu/pictures.bin", NULL);
-    if (pictures && *(uint32_t *)pictures == PICTURES_MAGIC) {
-        num_pictures = *(uint16_t *)(pictures + 4);
-        picture_w = *(uint16_t *)(pictures + 6);
-        picture_h = *(uint16_t *)(pictures + 8);
-    } else if (pictures) {
-        asset_free(pictures);
-        pictures = NULL;
+    FILE *pf = fopen("nitro:/menu/pictures.bin", "rb");
+    uint8_t head[12];
+    if (pf && fread(head, 1, sizeof(head), pf) == sizeof(head) && *(uint32_t *)head == PICTURES_MAGIC) {
+        num_pictures = *(uint16_t *)(head + 4);
+        picture_w = *(uint16_t *)(head + 6);
+        picture_h = *(uint16_t *)(head + 8);
+        picture_buf = malloc((size_t)picture_w * picture_h);
     }
+    if (pf)
+        fclose(pf);
     show_screen();
 }
 
@@ -411,13 +482,23 @@ void menu_message(const char *t)
     msg_page = t;
     msg_answer = 0;
     last_hp = -9999; // redraw
+    if (t)
+        draw_message();
 }
 
 // The page of the message: the rest of a page that does not fit (4 lines)
 // comes as the next one. A question shows YES / NO under its last page.
+static const char *page_end(const char *s, int y_end)
+{
+    measuring = 1;
+    const char *end = text_wrapped(8, 153, y_end, s, C_WHITE);
+    measuring = 0;
+    return end;
+}
+
 static void draw_message(void)
 {
-    const char *end = text_box(msg_page, C_WHITE, 188);
+    const char *end = page_end(msg_page, 188);
     msg_choice = 0;
     msg_rest = NULL;
     if (*end == MSG_PAGE)
@@ -425,15 +506,16 @@ static void draw_message(void)
     else if (*end && *end != MSG_CHOICE)
         msg_rest = end; // did not fit
     else if (*end == MSG_CHOICE) {
-        end = text_box(msg_page, C_WHITE, 179); // three lines and the answers
+        end = page_end(msg_page, 179); // three lines and the answers
         if (*end != MSG_CHOICE) { // three lines now, the rest with the answers next
             msg_rest = end;
             return;
         }
         msg_choice = 1;
-        text(56, 180, "YES", msg_answer == 0 ? C_YELLOW : C_DARK);
-        text(168, 180, "NO", msg_answer == 1 ? C_YELLOW : C_DARK);
     }
+    // The page is shown on the upper screen only, as the PS1 shows it
+    // (msgtop.c); the lower screen stays as it is (the map or the status).
+    msgtop_show(msg_page, end, msg_choice, msg_answer);
     if (msg_rest)
         while (*msg_rest == ' ' || *msg_rest == '\n')
             msg_rest++;
@@ -804,14 +886,14 @@ int menu_lower_dirty(void)
 static int lower_status;        // Y: the status screen during play instead of the map
 static int status_shown;        // the status screen is on the lower screen
 
-int menu_lower_map(void) { return !debug_mode && !focus && !message && !picture && !lower_status; }
+int menu_lower_map(void) { return !debug_mode && !focus && !picture && !lower_status; }
 
 void menu_lower_toggle(void) { lower_status = !lower_status; }
 
 static void set_info(int slot)
 {
-    if (slot >= 0 && inventory[slot].item)
-        snprintf(info, sizeof(info), "%s", item_name(inventory[slot].item));
+    if (slot >= 0 && slot_at(slot)->item)
+        snprintf(info, sizeof(info), "%s", item_name(slot_at(slot)->item));
     else
         info[0] = 0;
 }
@@ -827,6 +909,11 @@ static const struct { uint8_t weapon, ammo, capacity; } loads[] = {
     { 0x07, 0x15, 5 }, { 0x08, 0x15, 7 },                         // shotguns
     { 0x09, 0x18, 6 }, { 0x0A, 0x19, 6 }, { 0x0B, 0x1A, 6 },      // grenade launcher
     { 0x0C, 0x1D, 18 }, { 0x0E, 0x1C, 100 }, { 0x0F, 0x1B, 100 }, { 0x10, 0x17, 100 },
+};
+// a weapon + its parts: the custom weapon, the rounds in it kept (the
+// combine table 0x800a1cb8, operation 4: 20 04 04 00, 21 04 06 01, 22 04 08 02)
+static const struct { uint8_t weapon, part, result; } upgrades[] = {
+    { 0x02, 0x20, 0x04 }, { 0x05, 0x21, 0x06 }, { 0x07, 0x22, 0x08 },
 };
 // mixed herbs 0x29.. : G+G, G+R, G+B, G+G+G, G+G+B, G+R+B
 static const uint8_t mixes[][3] = {
@@ -879,6 +966,10 @@ void inventory_reload(void)
 
 static int combine(int a, int b)
 {
+    if (a == SEL_SPECIAL || b == SEL_SPECIAL) {
+        snprintf(info, sizeof(info), "You cannot combine these.");
+        return 0;
+    }
     InvSlot *x = &inventory[a], *y = &inventory[b];
     if (a == b || !x->item || !y->item)
         return 0;
@@ -902,6 +993,31 @@ static int combine(int a, int b)
         game_menu_sound(SND_RELOAD);
         return 1;
     }
+    // two of the same ammunition (table 0x800a1cb8: 14 05 14 ff, 15 05 15 ff ...): one stack
+    if (x->item == y->item && x->item >= 0x14 && x->item <= 0x1D && x->item != 0x1E) {
+        int sum = x->count + y->count;
+        x->count = (uint8_t)(sum > 255 ? 255 : sum);
+        y->count = (uint8_t)(sum > 255 ? sum - 255 : 0);
+        if (!y->count)
+            y->item = 0;
+        snprintf(info, sizeof(info), "%s combined.", item_name(x->item));
+        game_menu_sound(SND_SELECT);
+        return 1;
+    }
+    for (unsigned i = 0; i < sizeof(upgrades) / sizeof(upgrades[0]); i++) {
+        InvSlot *w = x->item == upgrades[i].weapon ? x : y->item == upgrades[i].weapon ? y : NULL;
+        InvSlot *p = w == x ? y : x;
+        if (!w || p->item != upgrades[i].part)
+            continue;
+        w->item = upgrades[i].result;
+        p->item = 0;
+        p->count = 0;
+        if (inventory_equipped == (p == x ? a : b))
+            inventory_equipped = -1;
+        snprintf(info, sizeof(info), "%s made.", item_name(w->item));
+        game_menu_sound(SND_RELOAD);
+        return 1;
+    }
     for (unsigned i = 0; i < sizeof(mixes) / sizeof(mixes[0]); i++) {
         if (!((x->item == mixes[i][0] && y->item == mixes[i][1]) ||
               (y->item == mixes[i][0] && x->item == mixes[i][1])))
@@ -920,9 +1036,53 @@ static int combine(int a, int b)
     return 0;
 }
 
+// USE (status screen 0x800665a4): weapons, ammunition and ribbons (items
+// under 30) only buzz; the spray and the herbs heal by a part of the maximum
+// (0x800117f0: spray, G+R, G+G+G all, G+G and G+G+B half, G and G+B a
+// quarter; blue and its mixes cure poison); anything else only where
+// an item AOT set flag 10:item this frame: then it goes to variable 2 and
+// the screen closes (0x80066790), else the buzz.
+static int heal_part(int item)
+{
+    switch (item) {
+    case 0x23: case 0x2A: case 0x2C: case 0x2E: return 4; // F. Aid Spray, G+R, G+G+G, G+R+B
+    case 0x29: case 0x2D: return 2;                        // G+G, G+G+B
+    case 0x26: case 0x2B: return 1;                        // Green Herb, G+B
+    case 0x28: return 0;                                   // Blue Herb
+    }
+    return -1;
+}
+
+static void use_item(int slot)
+{
+    InvSlot *s = slot_at(slot);
+    int item = s->item, part = heal_part(item);
+    info[0] = 0;
+    if (item < 0x1E) {
+        game_menu_sound(SND_NO);
+        return;
+    }
+    if (part >= 0) {
+        game_player_heal(item, 200 * part / 4); // PLAYER_HP
+        s->item = 0;
+        s->count = 0;
+        snprintf(info, sizeof(info), "%s used.", item_name(item));
+        game_menu_sound(SND_SELECT);
+        return;
+    }
+    if (!flag_get(FLAGS_ITEM_USABLE, item)) {
+        game_menu_sound(SND_NO);
+        return;
+    }
+    game_item_use(item);
+    game_menu_sound(SND_SELECT);
+    focus = 0;
+    combine_from = -1;
+}
+
 static void command(int k)
 {
-    InvSlot *s = &inventory[sel];
+    InvSlot *s = slot_at(sel);
     if (!s->item) {
         game_menu_sound(SND_NO);
         return;
@@ -940,8 +1100,8 @@ static void command(int k)
         }
         break;
     case CMD_USE:
-        snprintf(info, sizeof(info), "%s: nothing happens here.", item_name(s->item));
-        break;
+        use_item(sel);
+        return;
     case CMD_CHECK:
         snprintf(info, sizeof(info), "%s.", item_name(s->item));
         menu_picture(s->item);
@@ -964,7 +1124,9 @@ static void combine_with(int slot)
 
 static int touched_slot(int tx, int ty)
 {
-    for (int i = 0; i < INV_SLOTS; i++) {
+    for (int i = 0; i <= INV_SLOTS; i++) {
+        if (i == SEL_SPECIAL && !special_item())
+            break;
         int x, y;
         slot_pos(i, &x, &y);
         if (tx >= x && tx < x + 48 && ty >= y && ty < y + 36)
@@ -973,11 +1135,50 @@ static int touched_slot(int tx, int ty)
     return -1;
 }
 
+// A / B / a touch: the next page or the end; left / right: the answer.
+// Returns whether anything changed.
+static int message_input(uint32_t down)
+{
+    int changed = 0;
+    if (msg_choice && (down & (KEY_LEFT | KEY_RIGHT))) {
+        msg_answer ^= 1;
+        game_menu_sound(SND_CURSOR);
+        changed = 1;
+    } else if (down & (KEY_A | KEY_B | KEY_TOUCH)) {
+        if (msg_rest && *msg_rest) { // the next page
+            msg_page = msg_rest;
+        } else {
+            if (msg_choice) { // the answer: flag 11:0x1F set = no (as the PS1's typewriter question)
+                if (down & KEY_TOUCH) {
+                    touchPosition t;
+                    touchRead(&t);
+                    msg_answer = t.px >= 128;
+                } else if (down & KEY_B) {
+                    msg_answer = 1;
+                }
+                flag_set(11, 0x1F, msg_answer);
+            }
+            message = NULL;
+            msgtop_hide();
+            picture = 0;
+        }
+        changed = 1;
+    }
+    return changed;
+}
+
 int menu_frame(uint32_t down, int hp)
 {
     if (debug_mode)
         return 0;
     int changed = 0;
+    if (menu_lower_map() && message) { // the message is on the upper screen, the map stays
+        if (message_input(down) && message)
+            draw_message();
+        status_shown = 0;
+        pause_show(0);
+        return 1;
+    }
     if (menu_lower_map()) {
         // the map is shown: START or a touch below its title opens the inventory
         touchPosition t = { 0 };
@@ -1005,29 +1206,7 @@ int menu_frame(uint32_t down, int hp)
         changed = 1;
     }
     if (message) {
-        if (msg_choice && (down & (KEY_LEFT | KEY_RIGHT))) {
-            msg_answer ^= 1;
-            game_menu_sound(SND_CURSOR);
-            changed = 1;
-        } else if (down & (KEY_A | KEY_B | KEY_TOUCH)) {
-            if (msg_rest && *msg_rest) { // the next page
-                msg_page = msg_rest;
-            } else {
-                if (msg_choice) { // the answer: flag 11:0x1F set = no (as the PS1's typewriter question)
-                    if (down & KEY_TOUCH) {
-                        touchPosition t;
-                        touchRead(&t);
-                        msg_answer = t.px >= 128;
-                    } else if (down & KEY_B) {
-                        msg_answer = 1;
-                    }
-                    flag_set(11, 0x1F, msg_answer);
-                }
-                message = NULL;
-                picture = 0;
-            }
-            changed = 1;
-        }
+        changed |= message_input(down);
     } else if (down & KEY_TOUCH) {
         touchPosition t;
         touchRead(&t);
@@ -1067,12 +1246,19 @@ int menu_frame(uint32_t down, int hp)
         if (down & (KEY_LEFT | KEY_RIGHT | KEY_UP | KEY_DOWN))
             game_menu_sound(SND_CURSOR);
         if (row == 0) {
-            if (down & KEY_LEFT)
+            // the slots in two rows of four, Leon's own item's box above
+            // them: up and down go round the three
+            int special = special_item() != 0;
+            if (sel == SEL_SPECIAL && !special)
+                sel = 0;
+            if (sel != SEL_SPECIAL && (down & KEY_LEFT))
                 sel = (sel + INV_SLOTS - 1) % INV_SLOTS;
-            if (down & KEY_RIGHT)
+            if (sel != SEL_SPECIAL && (down & KEY_RIGHT))
                 sel = (sel + 1) % INV_SLOTS;
-            if (down & (KEY_UP | KEY_DOWN))
-                sel ^= 4;
+            if (down & KEY_UP)
+                sel = sel == SEL_SPECIAL ? 6 : sel < 4 && special ? SEL_SPECIAL : sel ^ 4;
+            else if (down & KEY_DOWN)
+                sel = sel == SEL_SPECIAL ? 2 : sel >= 4 && special ? SEL_SPECIAL : sel ^ 4;
             if ((down & KEY_A) && combine_from >= 0) {
                 combine_with(sel);
                 keep_info = 1;
@@ -1103,7 +1289,7 @@ int menu_frame(uint32_t down, int hp)
         game_menu_sound(SND_SELECT);
     }
     // the game changes the inventory too (shots, pickups): redraw then
-    uint32_t inv = inventory_equipped;
+    uint32_t inv = inventory_equipped * 31 + special_item();
     for (int i = 0; i < INV_SLOTS; i++)
         inv = inv * 31 + (inventory[i].item << 16 | inventory[i].count);
     if (inv != last_inv)
