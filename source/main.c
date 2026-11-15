@@ -160,7 +160,6 @@ static int8_t first_child[64], next_sibling[64];
 
 static const RoomRef *room_index;
 static int room_count;
-static int menu_open, menu_sel;
 static const Aot *near_aot;         // trigger the action button would activate
 static uint32_t pending_keys;       // keys pressed since the last game tick
 static int game_tick_acc;           // accumulates GAME_HZ per DS frame
@@ -3977,68 +3976,6 @@ static void start_game(void)
     new_game();
 }
 
-// The room file's spawn point (tools/room2ds.py) is the middle of a camera's
-// view area at height 0: in the 27 rooms on another floor (103 at -5400, the
-// sewers) Leon stood in the ground or out of sight. A warp arrives as through
-// a door instead: where a neighbouring room's door into this room puts Leon,
-// with its facing and camera. Doors that leave the height to the room's
-// script (-32000, the lifts) are passed over; the rooms no door leads into
-// (11C, 11D, 40C, 509, 600) keep the spawn point.
-#define WARP_SCRIPTED_Y -32000
-
-static int warp_entry(int stage, int id, int32_t pos[3], int16_t *dir, int *cam)
-{
-    char path[48];
-    Room here, next;
-    snprintf(path, sizeof(path), "nitro:/room/room%d%02x0.bin", stage, id);
-    if (!room_load(&here, path))
-        return 0;
-    int found = 0;
-    for (int i = 0; i < here.header->num_doors && !found; i++) {
-        const RoomDoor *d = &here.doors[i];
-        snprintf(path, sizeof(path), "nitro:/room/room%d%02x0.bin", d->next_stage, d->next_room);
-        if (!room_load(&next, path))
-            continue;
-        for (int k = 0; k < next.header->num_doors && !found; k++) {
-            const RoomDoor *b = &next.doors[k];
-            if (b->next_stage != stage || b->next_room != id || b->next[1] <= WARP_SCRIPTED_Y)
-                continue;
-            pos[0] = b->next[0];
-            pos[1] = b->next[1];
-            pos[2] = b->next[2];
-            *dir = (int16_t)b->next_dir;
-            *cam = b->next_camera;
-            found = 1;
-        }
-        asset_free(next.data);
-    }
-    asset_free(here.data);
-    return found;
-}
-
-static void warp_to(int index)
-{
-    const RoomRef *r = &room_index[index];
-    int32_t pos[3];
-    int16_t dir;
-    int cam;
-    int door = warp_entry(r->stage, r->room, pos, &dir, &cam);
-    fade(1);
-    enter_room(r->stage, r->room, door ? cam : -1);
-    if (!door) {
-        const RoomHeader *h = room.header;
-        pos[0] = h->spawn[0];
-        pos[1] = h->spawn[1];
-        pos[2] = h->spawn[2];
-        dir = h->spawn_dir;
-        cam = h->start_camera;
-    }
-    place_player(pos[0], pos[1], pos[2], dir, cam);
-    objects_ready = 1;
-    upload_objects();
-    fade(-1);
-}
-
 // ---------------------------------------------------------------- triggers
 static void use_door(const Aot *a)
 {
@@ -5772,93 +5709,6 @@ static void update_player_tick(void)
     }
 }
 
-// ---------------------------------------------------------------- debug screen
-static const char *aot_name(int type)
-{
-    switch (type) {
-    case SCE_DOOR: return "Door";
-    case SCE_ITEM: return "Item";
-    case SCE_MESSAGE: return "Text";
-    case SCE_EVENT: return "Event";
-    case SCE_FLAG_CHG: return "Flag";
-    case SCE_WATER: return "Water";
-    case SCE_DAMAGE: return "Damage";
-    case SCE_DRAWER: return "Desk";
-    default: return "?";
-    }
-}
-
-static void print_status(void)
-{
-    if (menu_sel >= 0 && menu_open)
-        return; // the room list uses the console
-    printf("\x1b[0;0HRE2 DS - room %X%02X  cam %d   \n", cur_stage, cur_room, cur_cam);
-    printf("pos %6ld %6ld %6ld  \n", (long)player.x, (long)player.y, (long)player.z);
-    printf("dir %5d floor %d slope %3d  \n", player.dir & 0x7FFF, player_floor(), player.slope);
-    printf("skript: %d threads, %d unbek.  \n", script_threads_running, script_unknown_ops);
-    // fehler: enemy_last_error (enemy.h; 7 = no texture memory: invisible)
-    printf("HP %3d %s  gegner %d fehler %d  \n", player.hp,
-           player.hp < 21 ? "Danger " : player.hp < 101 ? "Caution" : "Fine   ", enemy_count(), enemy_last_error);
-    printf("cull %s gx %4d/%4d   \n",
-           cull_models == POLY_CULL_BACK ? "back " : cull_models == POLY_CULL_FRONT ? "front" : "aus  ",
-           gx_vertices_last, gx_polygons_last);
-    printf("fx %d st %d n %d    \n", effect_count(), effect_status, effect_spawned);
-    if (near_aot && near_aot->type == SCE_DOOR)
-        printf("A: Tuer -> %X%02X            \n", near_aot->data[8] + 1, near_aot->data[9]);
-    else if (near_aot)
-        printf("A: %s                 \n", aot_name(near_aot->type));
-    else if (player.state < ST_CLIMB && box_in_front(SHAPE_CLIMB_UP))
-        printf("A: hochklettern            \n");
-    else if (player.state < ST_CLIMB && box_in_front(SHAPE_JUMP_DOWN))
-        printf("A: runterspringen          \n");
-    else
-        printf("                          \n");
-    printf("\nD-pad walk/turn, B run\nA use, L+A open any lock\nL+A at a typewriter: save\nSELECT room menu\n");
-}
-
-static void update_menu(uint32_t down)
-{
-    if (down & KEY_SELECT) {
-        menu_open = !menu_open;
-        menu_debug(menu_open);
-        if (menu_open) {
-            for (int i = 0; i < room_count; i++)
-                if (room_index[i].stage == cur_stage && room_index[i].room == cur_room)
-                    menu_sel = i;
-        }
-    }
-    if (!menu_open)
-        return;
-    if (down & KEY_UP)
-        menu_sel--;
-    if (down & KEY_DOWN)
-        menu_sel++;
-    if (down & (KEY_LEFT | KEY_L))
-        menu_sel -= 10;
-    if (down & (KEY_RIGHT | KEY_R))
-        menu_sel += 10;
-    menu_sel = (menu_sel % room_count + room_count) % room_count;
-    if (down & (KEY_A | KEY_B | KEY_X)) {
-        menu_open = 0;
-        menu_debug(0);
-        if (down & KEY_A)
-            warp_to(menu_sel);
-        if (down & KEY_X)
-            flag_set(0, 0x0A, 1); // the ending, as after the last room
-        return;
-    }
-
-    printf("\x1b[0;0HChoose a room (%d rooms)\n", room_count);
-    printf("up/down, L/R +-10\nA warp, B back, X ending\n\n");
-    int first = menu_sel - 7;
-    if (first < 0)
-        first = 0;
-    if (first > room_count - 16)
-        first = room_count - 16 < 0 ? 0 : room_count - 16;
-    for (int i = first; i < first + 16 && i < room_count; i++)
-        printf("%c Raum %X%02X   \n", i == menu_sel ? '>' : ' ', room_index[i].stage, room_index[i].room);
-}
-
 // ---------------------------------------------------------------- main
 int main(void)
 {
@@ -5940,16 +5790,16 @@ int main(void)
         // message; the closing press is not passed on (it would trigger the
         // same AOT again)
         int paused = 0;
-        if (!menu_open && menu_has_focus() && !menu_message_open() && (down & KEY_L)) {
+        if (menu_has_focus() && !menu_message_open() && (down & KEY_L)) {
             open_files();
             down = 0;
         }
         // Y during play: the lower screen shows the map or the status screen
-        if (!menu_open && !menu_has_focus() && !menu_message_open() && (down & KEY_Y)) {
+        if (!menu_has_focus() && !menu_message_open() && (down & KEY_Y)) {
             menu_lower_toggle();
             game_menu_sound(4);
         }
-        if (!menu_open) {
+        {
             int had_message = menu_message_open();
             paused = menu_frame(down, player.hp) || had_message;
             if (!menu_message_open())
@@ -5958,19 +5808,16 @@ int main(void)
                 down = 0;
         }
         static int map_was_shown;
-        int map_shown = !menu_open && menu_lower_map();
+        int map_shown = menu_lower_map();
         if (menu_lower_dirty())
             map_was_shown = 0;
         if (map_shown)
             map_live(!map_was_shown);
         map_was_shown = map_shown;
-        if (!menu_open)
-            menu_subtitle(voice_key() ? subs_at(voice_key(), voice_ms()) : NULL);
-        if (!menu_open && !paused)
-            pending_item_frame();
+        menu_subtitle(voice_key() ? subs_at(voice_key(), voice_ms()) : NULL);
         if (!paused)
-            update_menu(down);
-        if (!menu_open && !paused) {
+            pending_item_frame();
+        if (!paused) {
             pending_keys |= down;
             if (!term.active)
                 update_player_frame(keysHeld(), down);
@@ -6033,8 +5880,6 @@ int main(void)
                 }
             }
         }
-        if (menu_open)
-            print_status();
         render_frame();
         swiWaitForVBlank();
         music_frame();
