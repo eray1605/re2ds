@@ -190,15 +190,82 @@ addresses (`SLES_009.72`, disc 1, Europe). **observed** = in the code as written
   - `plc_neck` (`0x41`, `0x800531d8`): mode 0-6 into `obj+0x1c0` (| `0x80`), s16 x y z into
     `obj+0x170`, two speeds; 862 uses, most on the people of the scenes.
   - `plc_flg` (`0x43`, `0x800533b4`): 0 ors, 1 sets, 2 xors the u16 into `obj+0x1cc` (member
-    `0x16`); what its bits do is not looked into. `parts_set` (`0x6e`, `0x80051d4c`): pad,
-    part, field, u16 value into the work object's part (124 bytes each, `obj+0x198`): field 0
+    `0x16`) - the word `plc_motion` (`0x80052f08`) writes its byte 3 into: 4 loop / keep the
+    mode, 8 twice as fast, 0x10 half speed (0x20 the tick parity), 0x40 no pose blend, 0x80
+    backward, 1 / 2 keep a foot where it stands (`0x80015ba0` after each tick: the bone chain
+    to the foot, the body shifted back by its slide), 0x100 the root motion counted from the
+    mode's first keyframe (`0x8001581c`). **Ported** into `Plc.flags`; 1 / 2 (rooms 114, 301) and
+    0x100 (room 30B) are ported too (section 2: root motion, foot planted). `parts_set` (`0x6e`, `0x80051d4c`): pad,
+    part, field, u16 value into the work object's part (172 bytes each, `obj+0x198`): field 0
     / 1 the words at +0 / +2, 2 at +112, 3 the byte at +114, 4-6 its place at +104 / 106 / 108
     (112 and 60D).
-  - Still skipped: `plc_neck` (`0x41`), `plc_flg` (`0x43`), `parts_set` (`0x6e`) and the
-    parts that burst or drop (`0x7a` / `0x7b`), the lights (`0x6a`, `0x6b`, `0x7c`–`0x7f`),
-    `super_on` (`0x72`), the lines (`0x77`–`0x79`), `xa_vol` / `se_vol`, `rbj_reset`,
-    `mizu_div_set`, `splc_ret` / `splc_sce`, `sce_espr_task`, `sce_scr_move`, `st_map_hint`,
-    `mirror_set`.
+  - `plc_neck`: ported (`docs/player-control.md`, the neck).
+  - The lights (`0x6a` `light_pos_set`, `0x6b` `light_kido_set`, `0x7c` `light_color_set`,
+    `0x7d`–`0x7f` the same for a given camera; handlers `0x800546b4`–`0x8005492c`) write
+    into the room's light table (below, "Room lights"): `0x6a` pad, light, axis 11/12/13 =
+    x/y/z, u16; `0x6b` light, u16 range; `0x7c` light, r, g, b; `0x7d` camera, light, axis,
+    u16; `0x7e` pad, camera, light, u16; `0x7f` camera, light, r, g, b. Ported.
+  - `super_on` (`0x72`, `0x800519fc`): pad, parent, part, s16 place, s16 turn - puts the work
+    object once at the place in the frame of the room (0), Leon (0x40: obj+36 at `0x800c7818`;
+    with part & 0x80 his part from `0x800c798c` = his obj+0x198), a character (0x80 | k) or a
+    room object (0xc0 | n), turned as that frame and the turn (`0x800438c8`). Room 409 puts the
+    thing Leon throws into his hand (part 11), 505 / 601 / 607 / 700 / 703 keep the partner at
+    his side every frame. **Ported** (`game_super_on`; the turn only by the parent's facing).
+  - `xa_vol` (`0x5f`, `0x80053d70`): the voice clips' volume 0-127 into `0x800cd6a0`, 120 at
+    each room's start (`FUN_8004f484`). **Ported** (`voice_volume`; 120 = the DS's 127).
+  - `splc_ret` (`0x70`, `0x80054a8c`) / `splc_sce` (`0x71`, `0x80054b28`): the partner back to
+    her routine 1 (following Leon: aimed at him, `0x800c77d4 | 0x10000000`, her HP from
+    `0x800cc780`) / to the scene (routine `0x0604`, standing, no target, HP -1, the bit
+    cleared). **Ported** as flag 1:3 set / cleared (the bit the follow routine reads).
+  - `scd_op_80` (`0x80053dac`): the music at byte 1 percent of the volume `0x800df0f0` had at
+    the first such command since the room's start (kept at `0x800d081a`, 255 = none): room
+    604's scene turns it down and back to 100. **Ported** (`music_scale`).
+  - `scd_op_89` (`0x80054b90`, room 410): the partner's HP (+342, +354) and `0x800cc780` to
+    200; `st_map_hint` (`0x84`, `0x80054ea4`): opens the status screen on the map
+    (`0x800cd750` = 4) with a hint (301, 304, 30B, 603); `scd_op_1c` does nothing. Not
+    ported: the partner's HP is not modelled, the DS's lower screen shows the map anyway.
+  - No effect on the DS: `sce_scr_move` (`0x6d`, `0x80054998`: a background scroll offset into
+    `0x800cc290`; disc 1 only gives 0), `rbj_reset` (`0x6c`, `0x80046bbc`: compacts the RBJ
+    memory of characters gone; the DS loads each set apart).
+  - `sce_parts_bomb` (`0x7a`, `0x80054c58`): pad, part, RGB, s16 x 5 - bits 0x4a into the work
+    object's part (+0), its colour (+112), the burst's numbers (+152 .. +164).
+    `sce_parts_down` (`0x7b`, `0x80054d10`): part, s16 x 3, u8, s16 x 3 - bits 0x1062, the
+    fall's numbers (+56 .. +66, +121). Room 101: Kendo's shotgun takes the zombie's arm (part
+    12 bursts, 13 drops); 500: Ada's shot takes a part 7. **Ported** roughly
+    (`enemy_part_bomb` / `enemy_part_down`): the burst part is left out with blood, the dropped
+    one and the parts below it fall in their pose to the floor; the flight numbers are unused.
+  - Still skipped: the lines (`0x77`–`0x79`,
+    `0x8002a268` / `0x8002a0ec` / `0x8002a234`: a screen line moved sideways by a DR_MOVE, the
+    picture wobbling in 507 and 601), `mizu_div_set` (`0x5d`, water).
+  - `sce_espr_task` (`0x82`, `0x80052cac`): kind, index - ends the effects that owner has
+    (`0x80052db4`: 0 the world, 1 Leon, 2 the partner, 3 an enemy, 4 an object, as
+    `sce_espr_on`'s bytes 4 / 5); kind 6 ends all (`0x8001ca68`). **Ported**
+    (`roomfx_kill_owner`).
+  - `mirror_set` (`0x73`, `0x80054bd8`, room 20E): axis, s16 plane, s16 low, s16 high into
+    `0x800c77b9`.., `0x800c77d4 | 0x10000` on. Characters are drawn again from the camera
+    mirrored at the plane (`0x8002dc2c`: axis 0 mirrors z, 1 x, 2 y) when the line from the
+    camera to the reflection crosses the plane between low and high (`0x8002dee4`; camera
+    and character on one side). **Ported** for Leon (`draw_player_mirrored`: he is drawn
+    reflected at the plane, the other faces culled; the enemies have no reflection).
+- **Room lights** (RDT section 9 "LIT", `tools/lit2ds.py` -> `room/<rdt>_lit.bin`): 40 bytes
+  per camera - u8 gain, u8 type per light (3), RGB per light at +4, ambient RGB at +13, s16
+  place per light at +16, u16 range per light at +34. Every character is lit with the shown
+  camera's record (`FUN_80026598` -> `FUN_80072454`): a type-0 light is a point at its place,
+  colour * (r - d) / r with r = range >> 4 and d = the distance on the floor plane in units
+  of 16 (`SquareRoot0` of dx² + dz², the height not counted), 0 beyond; type 1 is a
+  direction (the place as vector). Light matrix row = -gain * unit(character - light),
+  colour matrix = colours << 4, back colour = the ambient, the RGB code 0x808080: a channel
+  is ambient / 256 + sum colour / 256 * gain * falloff * (N . L) times the texture. Light 2
+  is black in every room on disc 1. **DS:** the hardware lights 0-2 per character
+  (`game_light_character`), the ambient as the emission, the vertex normals in the models'
+  display lists (`tools/model2ds.py`, NORMAL before each VTX_16; room objects and doors
+  have none and keep the plain vertex colour). The DS cannot brighten past the texture (the
+  PS1 can, to twice): strong lights (gain 2, colours over 128) top out. Not compared with
+  the PS1 side by side yet.
+- **Model keyframes** (`tools/model2ds.py`): every keyframe carries one turn per bone of the
+  model's first EMR set; a later set's EMR may have more or fewer parts - its frames are now
+  cut or padded. Before, 26 models (dogs, crows, lickers, the alligator, Mr X, the G forms,
+  six of Leon's weapon models) had those sets' frames shifted, read at a fixed stride.
 - Flag array 33: the area maps found (bit per map page, `maps.bin`), set by the scripts where
   a map lies (room 20B: 2-4); not set at the start (`INIT_TBL`). The map shows rooms not
   visited only with the page's bit.
@@ -212,8 +279,9 @@ a mode from table `0x800a0de0`:
 |------|-------------|---------------------------------------------|
 | 0x3F | plc_motion  | mode, animation, flags                      |
 | 0x40 | plc_dest    | pad, mode, done bit, s16 x, s16 z           |
-| 0x41 | plc_neck    | head turning (`docs/player-control.md`; ignored here) |
+| 0x41 | plc_neck    | head turning (`docs/player-control.md`) |
 | 0x42 | plc_ret     | back to the object's own control            |
+| 0x43 | plc_flg     | 0 or / 1 set / 2 xor, u16 into the flags    |
 | 0x58 | plc_rot     | 0 = turn per tick / 1 = once at the end, s16 |
 | 0x5B | plc_cnt     | jump to keyframe                            |
 | 0x66 | plc_stop    | freeze / resume                             |
@@ -221,10 +289,29 @@ a mode from table `0x800a0de0`:
 Modes (handlers `0x800a0de0`): 0-3 play an animation from one of four sets (`FUN_800621b0`):
 0 the room's (RBJ, `obj+0x190`), 1 `obj+0x108`, 2 `obj+0x180` (Leon's walking moves), 3
 `obj+0x188`; 4 walk to, 5 run to, 6 stand (idle animation 2), 7 walk backward, 8 backward
-without turning first, 9 turn to face, 0x12 walk (and climb a box on the way), 0x14 paused,
-0x15 turn to an absolute facing. Flags (`obj+0x1cc`, `plc_flag`): 4 keep going (a new
+without turning first, 9 turn to face, 0x0a-0x0d as 0-3 with the animation's root motion
+(`FUN_800625ec`, below), 0x12 walk (and climb a box on the way), 0x14 paused, 0x15 turn to an
+absolute facing. Flags (`obj+0x1cc`, `plc_flag`): 4 keep going (a new
 `plc_dest` of the same mode only moves the destination; on arrival the mode goes on), 8
-double speed, 0x10 half speed, 0x40 no pose blending, 0x80 backward. Speed and turn tables
+double speed, 0x10 half speed, 0x40 no pose blending, 0x80 backward, 1 / 2 a foot planted,
+0x100 root motion counted from the first shown keyframe.
+
+**Root motion** (modes 0x0a-0x0d; disc 1 uses 0x0a 27 times, 0x0b 5, 0x0c 2 - Leon's climbs
+and falls in 109, 704, 30B, the lab): every tick `0x8001581c` takes the shown keyframe's
+"speed" (frame header +6/+8/+10, `ModelFrame.speed`: the displacement since the animation's
+start), moves the object by its difference to the last one (`0x80014cf0`, turned by the
+facing, y as well) and keeps it; keyframe 0 starts the count anew from 0 (backward: from the
+last keyframe's), so a first keyframe that is not 0 shifts the character once (Kendo's loop
+in 101 has a constant (-404, 0, 318) and plays in mode 0: no motion). Flag 0x100 starts the
+count at the first shown keyframe (`plc_cnt` before). **DS:** `plc.c` `root_move`, x and z
+only.
+
+**Foot planted** (flags 1 / 2, `0x80015ba0` after each tick of routine 4): the world place of
+part 4 (1) or 7 (2) - the ends of the chains 0-1-2-3-4 and 0-1-5-6-7, parts 172 bytes at
+`obj+0x198` - is compared with where it was drawn the frame before and the body moves by the
+difference: the foot stays put. Room 114's zombie walks forward this way (`plc_motion 1 0 5`
+in place, `plc_flg` switching 5 / 6 with each step). **DS:** enemies only (`enemy.c`
+`plc_step`, the unblended keyframe pose before and after the tick). Speed and turn tables
 are indexed with 16 for the player, enemy type − 0x40 for people. Arriving sets bit `done`
 of flag array 5 (`FUN_800727d8`); only the room start (`FUN_8004f484`) clears bits
 0x20-0x3f. **DS port:** the scenes wait for the bit after each destination (room 202:
@@ -478,6 +565,13 @@ and the end; no rewards, clear data or extra modes), `tools/ending2ds.py` (`endi
 
 ## 9. Item use, reloading, effects of a shot
 
+**Messages** (November 2026): the PS1 writes them over the picture in the font of
+`COMMON/DATA/TEX.TIM` (first texture page: an 8 × 8 font in ASCII order at y 0 / 8 / 16, and
+the message font in 14 × 14 cells from y 28, 18 to a row: `.` `(` `)` … `0`–`9`, `A`–`Z`,
+`a`–`z`, then kana). **DS:** `tools/font2ds.py` → `menu/font.bin`; `msgtop.c` draws the page the
+lower screen shows also over the bottom of the picture (sprites, OAM 2–9), white with a
+shadow, item names and the chosen answer green.
+
 **Poison** (observed, November 2026): an effect with bit 8 of its byte 30 that hits a
 player (`0x8001fae8`: the spiders' spit; two more places, `0x8002181c`, `0x80023500`) sets
 `0x800c7a0c` = 5400 and the counter `0x800c7a0e` = 30. Nothing counts `0x800c7a0c` down:
@@ -592,32 +686,40 @@ and the two parts of a sub piece (`0x800cf118`, `0x800cf120`).
   chords with 246 of them. The police station pieces hold up to 14 notes at once.
 
 **DS port** (`source/music.c`): three sequences (main, sub 1, sub 2) on two banks (MAIN,
-SUB), start modes, fade, live volume and pan, 14 shared channels. Rooms 100, 103, 109 and
-the police station's piece 07 would hold 14-16 notes with their tails; with 12 channels a note
-took a sounding one every few seconds (103: 54 held notes and 431 tails cut in 2 minutes), with
-14 and the rules below 18 / 251 (109: 2 / 99, piece 07: 0 / 56). A new note takes a free
-channel, else the quietest one fading out (its end is least heard), else the oldest held
-one. When no DS channel is left, the effects and voice clips take the music's quietest note
-(`music_yield`, `sound_play` / `voice_play` retry) and the music its own. `soundPlaySample`
-picks the channel on the ARM9 from `soundGetActiveChannels`, which synchronises with the ARM7
-(calico, auto-update off), so notes started together do not share one. A sample played once
-counts as over a frame early (and sooner when bent up), never late: a channel the DS freed may
-already play another sound. A stop keeps the bank (a start replays from the beginning). A sub sequence takes a
-program its own bank lacks from the main bank. `tools/bgm2ds.py --sub` writes `RMU2` files.
-The sequencer steps at 60 Hz by a tick task (`music_frame` catches up on up to 6 missed
-frames): driven by the main loop it slowed down whenever a pass took two frames and stalled
-with held notes during loads. `tests/music_host.c` plays a room's music on the host and
-counts voices, steals, sound messages and the summed channel volume.
-Loudness: the DS mixer adds up all channels and clips once a side gets more than about one
-channel at full volume. At a master volume of 64 the police station's and the city's pieces
-summed 160-390 (room 100 peaked at 730) and crackled; the PS1 SPU (24 voices, 16-bit sum) has
-far more room. The music now plays at 48 and keeps the summed volume of its channels under 160
-(`MIX_LIMIT`): after the frame's new notes start, every voice is scaled down at once if the sum
-is over, and the gain comes back by 2/256 a frame. Room 100 averages 144 instead of 394.
-The voices' volumes go out with 11 bits (`soundChSetVolume`, 0..2047: 0..127 times 1, 1/2,
-1/4 or 1/16; a note starts with `soundPlaySample`'s 0..127 and is set at once): at the
-music's level a voice had only 20-40 of the 0..127 steps, and a fading note came to 0 and
-ended at about −25 dB - in the main hall's sparse piece (MAIN05) the notes broke off.
+SUB), start modes, fade, live volume and pan. **Channels** (November 2026): the music owns DS
+channels 0-12 (voice i on channel i, started directly with `soundPreparePcm`), the effects
+13-14 and 15 (`sound.c` `sound_channel`; 15 is the voice clips' and the movies', the effects'
+while no clip plays; an effect with none free replaces its own that ends first). Before, all
+16 were shared through `soundPlaySample`: an effect that found none free took a sounding note
+(`music_yield`) - a gap in the music at every step or shot while the music was busy - and its
+ARM7 round trip (`soundGetActiveChannels`) let the game's and the music's thread start on the
+same channel. A new note takes a free voice, else the quietest one fading out, else the
+oldest held one (room 103: 7 held notes and 137 tails cut a minute with 13 voices).
+**Loops:** the DS plays the loop point plus the length (SOUNDxPNT + SOUNDxLEN) and repeats from
+the loop point; `soundPlaySample` writes the whole size as the length, so every pass of a loop
+ran on into the next tone's data (426 of the 683 music tones loop, all with a loop start > 0;
+13-38 % of the music's loudness came from such foreign data). Notes are started with the loop
+part as the length now. A sample played once counts as over a frame early (and sooner when
+bent up), never late. A stop keeps the bank (a start replays from the beginning). A sub
+sequence takes a program its own bank lacks from the main bank. `tools/bgm2ds.py --sub` writes
+`RMU2` files.
+**Timing:** the sequencer steps at 60 Hz on its own thread (priority above the game's). The
+thread is woken by `threadTimerWait`, but a wake-up that comes while it waits for the lock or
+a sound command is lost (calico: `threadUnblockAllByValue` wakes only waiting threads), so a
+clock tick task half a frame ahead counts the frames due and the thread runs them (up to 6).
+A room's banks are read before the lock is taken (`music_preload`; with the lock held the
+main piece stood still while the next room's sub loaded, 100-400 KB from the card) and only
+taken over under it; without memory for both it loads under the lock as before.
+**Loudness:** the DS mixer adds up all channels and clips once a side gets more than about
+one channel at full volume. The music plays at a master volume of 32 (48 before, 64 at first)
+and keeps the summed volume of its channels under 160 (`MIX_LIMIT`): after the frame's new
+notes start, every voice is scaled down at once if the sum is over; the gain holds for 60
+frames and comes back by 1/256 a frame (it rose 2/256 a frame at once: at 48 the city's piece
+pumped by up to 10 dB with every chord). The voices' volumes go out with 11 bits
+(`soundChSetVolume` / the start's volume, 0..2047): at the music's level a voice had only
+20-40 of the 0..127 steps, and a fading note came to 0 and ended at about −25 dB.
+The voice clips duck the music while `voice_playing()` by the clock (it counted main-loop
+passes: twice as long at 30 frames a second).
 Pitch bends reach as far as the tone says (VAB tone bytes 12 / 13, `pbmin` down and `pbmax`
 up, 0 to 12 semitones; `bgm2ds.py` stores them as `pbmin << 4 | pbmax` in the tone's 8th
 byte); all were taken as ±2 semitones, so 16 pieces bent wrong (piece 07 by 1, MAIN00 6 / 12,

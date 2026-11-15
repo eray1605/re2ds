@@ -40,6 +40,8 @@ done
 
 JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 echo $ROOMS | tr ' ' '\n' | xargs -P "$JOBS" -I{} tools/convert_room.sh "$DISC" {}
+# the room lights per camera: room/<rdt>_lit.bin (source/main.c: game_light_character)
+python3 -I tools/lit2ds.py "$DISC/PL0/RDT" build/ds/room > /dev/null
 
 # room/index.bin: u16 count, then (u8 stage, u8 room) per converted room
 python3 -I - build/ds/room <<'PY'
@@ -85,6 +87,8 @@ python3 -I tools/bgm2ds.py --table "$DISC/SLES_009.72" "$DISC/COMMON/DATA/INIT_T
 
 # status screen: item icons, names, Leon's portrait
 mkdir -p build/ds/menu
+# the PS1 message font for the upper screen (source/msgtop.c)
+python3 -I tools/font2ds.py "$DISC/COMMON/DATA/TEX.TIM" build/ds/menu/font.bin > /dev/null
 python3 -I tools/menu2ds.py "$DISC/SLES_009.72" "$DISC/COMMON/DATA/ST0.TIM" \
     "$DISC/COMMON/DATA/ITEMALL.PIX" build/ds/menu/items.bin > /dev/null
 python3 -I tools/itps2ds.py "$DISC/COMMON/DATA/ITPS.ITP" build/ds/menu/items.bin \

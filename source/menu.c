@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "assets.h"
+#include "msgtop.h"
 #include "menu.h"
 #include "script.h"
 
@@ -45,7 +46,11 @@ static int msg_answer;          // 0 yes, 1 no
 static char info[96];                  // text box when no message is open
 static int ecg_phase;
 static int combine_from = -1;          // COMBINE picked on this slot: choosing the other
-static uint8_t *pictures;              // menu/pictures.bin (tools/itps2ds.py)
+// menu/pictures.bin (tools/itps2ds.py): only the picture shown is read (the
+// whole file, 787 KB, took the room a full room's models and sounds needed -
+// room 207's zombies went silent, then unseen)
+static uint8_t *picture_buf;
+static int picture_loaded = -1;
 static int num_pictures, picture_w, picture_h;
 static int picture;                    // item whose picture covers the slots (0 = none)
 
@@ -98,6 +103,8 @@ static int text_end(char c) { return !c || c == MSG_PAGE || c == MSG_CHOICE; }
 
 // word-wrapped text from (x, y), lines of up to 30 characters, until y_end
 // or the end of the page; returns where it stopped
+static int measuring; // text_wrapped only finds where the page ends
+
 static const char *text_wrapped(int x, int y, int y_end, const char *s, int c)
 {
     char line[31];
@@ -122,7 +129,8 @@ static const char *text_wrapped(int x, int y, int y_end, const char *s, int c)
             while (i < len && s[i] != MSG_NAME)
                 line[n++] = s[i++];
             line[n] = 0;
-            text(cx, y, line, now);
+            if (!measuring)
+                text(cx, y, line, now);
             cx += 8 * n;
         }
         s += len;
@@ -310,12 +318,22 @@ static void draw_weapon(void)
 // the PS1's item picture (ITPS.ITP), over the slots
 static void draw_picture(void)
 {
-    if (!pictures || picture < 1 || picture >= num_pictures)
+    if (!picture_buf || picture < 1 || picture >= num_pictures)
         return;
+    if (picture_loaded != picture) {
+        FILE *f = fopen("nitro:/menu/pictures.bin", "rb");
+        long size = (long)picture_w * picture_h;
+        int ok = f && fseek(f, 12 + picture * size, SEEK_SET) == 0 && fread(picture_buf, 1, (size_t)size, f) == (size_t)size;
+        if (f)
+            fclose(f);
+        if (!ok)
+            return;
+        picture_loaded = picture;
+    }
     int x = (256 - picture_w) / 2, y = 58;
     fill(x - 4, y - 4, picture_w + 8, picture_h + 8, C_BLACK);
     frame(x - 2, y - 2, picture_w + 4, picture_h + 4, C_GREY);
-    const uint8_t *p = pictures + 12 + picture * picture_w * picture_h;
+    const uint8_t *p = picture_buf;
     for (int j = 0; j < picture_h; j++)
         memcpy(fb + (y + j) * 256 + x, p + j * picture_w, picture_w);
 }
@@ -334,10 +352,14 @@ static void redraw(int hp)
         draw_slot(SEL_SPECIAL);
     draw_commands();
     draw_picture();
-    if (message)
+    if (message) {
+        fill(4, 150, 248, 40, C_BLACK);
+        frame(4, 150, 248, 40, C_GREY);
         draw_message();
-    else
+    } else {
+        msgtop_hide();
         text_box(info, C_LIGHT, 188);
+    }
     dirty = 1;
 }
 
@@ -411,6 +433,7 @@ static void pause_show(int on)
 void menu_init(void)
 {
     pause_init();
+    msgtop_init();
     uint32_t size;
     data = asset_load("nitro:/menu/items.bin", &size);
     if (data && *(uint32_t *)data == ITEMS_MAGIC) {
@@ -425,15 +448,16 @@ void menu_init(void)
         name_offs = (const uint16_t *)(portrait + portrait_w * portrait_h);
         names = (const char *)(name_offs + num_names);
     }
-    pictures = asset_load("nitro:/menu/pictures.bin", NULL);
-    if (pictures && *(uint32_t *)pictures == PICTURES_MAGIC) {
-        num_pictures = *(uint16_t *)(pictures + 4);
-        picture_w = *(uint16_t *)(pictures + 6);
-        picture_h = *(uint16_t *)(pictures + 8);
-    } else if (pictures) {
-        asset_free(pictures);
-        pictures = NULL;
+    FILE *pf = fopen("nitro:/menu/pictures.bin", "rb");
+    uint8_t head[12];
+    if (pf && fread(head, 1, sizeof(head), pf) == sizeof(head) && *(uint32_t *)head == PICTURES_MAGIC) {
+        num_pictures = *(uint16_t *)(head + 4);
+        picture_w = *(uint16_t *)(head + 6);
+        picture_h = *(uint16_t *)(head + 8);
+        picture_buf = malloc((size_t)picture_w * picture_h);
     }
+    if (pf)
+        fclose(pf);
     show_screen();
 }
 
@@ -458,13 +482,23 @@ void menu_message(const char *t)
     msg_page = t;
     msg_answer = 0;
     last_hp = -9999; // redraw
+    if (t)
+        draw_message();
 }
 
 // The page of the message: the rest of a page that does not fit (4 lines)
 // comes as the next one. A question shows YES / NO under its last page.
+static const char *page_end(const char *s, int y_end)
+{
+    measuring = 1;
+    const char *end = text_wrapped(8, 153, y_end, s, C_WHITE);
+    measuring = 0;
+    return end;
+}
+
 static void draw_message(void)
 {
-    const char *end = text_box(msg_page, C_WHITE, 188);
+    const char *end = page_end(msg_page, 188);
     msg_choice = 0;
     msg_rest = NULL;
     if (*end == MSG_PAGE)
@@ -472,15 +506,16 @@ static void draw_message(void)
     else if (*end && *end != MSG_CHOICE)
         msg_rest = end; // did not fit
     else if (*end == MSG_CHOICE) {
-        end = text_box(msg_page, C_WHITE, 179); // three lines and the answers
+        end = page_end(msg_page, 179); // three lines and the answers
         if (*end != MSG_CHOICE) { // three lines now, the rest with the answers next
             msg_rest = end;
             return;
         }
         msg_choice = 1;
-        text(56, 180, "YES", msg_answer == 0 ? C_YELLOW : C_DARK);
-        text(168, 180, "NO", msg_answer == 1 ? C_YELLOW : C_DARK);
     }
+    // The page is shown on the upper screen only, as the PS1 shows it
+    // (msgtop.c); the lower screen stays as it is (the map or the status).
+    msgtop_show(msg_page, end, msg_choice, msg_answer);
     if (msg_rest)
         while (*msg_rest == ' ' || *msg_rest == '\n')
             msg_rest++;
@@ -851,7 +886,7 @@ int menu_lower_dirty(void)
 static int lower_status;        // Y: the status screen during play instead of the map
 static int status_shown;        // the status screen is on the lower screen
 
-int menu_lower_map(void) { return !debug_mode && !focus && !message && !picture && !lower_status; }
+int menu_lower_map(void) { return !debug_mode && !focus && !picture && !lower_status; }
 
 void menu_lower_toggle(void) { lower_status = !lower_status; }
 
@@ -1100,11 +1135,50 @@ static int touched_slot(int tx, int ty)
     return -1;
 }
 
+// A / B / a touch: the next page or the end; left / right: the answer.
+// Returns whether anything changed.
+static int message_input(uint32_t down)
+{
+    int changed = 0;
+    if (msg_choice && (down & (KEY_LEFT | KEY_RIGHT))) {
+        msg_answer ^= 1;
+        game_menu_sound(SND_CURSOR);
+        changed = 1;
+    } else if (down & (KEY_A | KEY_B | KEY_TOUCH)) {
+        if (msg_rest && *msg_rest) { // the next page
+            msg_page = msg_rest;
+        } else {
+            if (msg_choice) { // the answer: flag 11:0x1F set = no (as the PS1's typewriter question)
+                if (down & KEY_TOUCH) {
+                    touchPosition t;
+                    touchRead(&t);
+                    msg_answer = t.px >= 128;
+                } else if (down & KEY_B) {
+                    msg_answer = 1;
+                }
+                flag_set(11, 0x1F, msg_answer);
+            }
+            message = NULL;
+            msgtop_hide();
+            picture = 0;
+        }
+        changed = 1;
+    }
+    return changed;
+}
+
 int menu_frame(uint32_t down, int hp)
 {
     if (debug_mode)
         return 0;
     int changed = 0;
+    if (menu_lower_map() && message) { // the message is on the upper screen, the map stays
+        if (message_input(down) && message)
+            draw_message();
+        status_shown = 0;
+        pause_show(0);
+        return 1;
+    }
     if (menu_lower_map()) {
         // the map is shown: START or a touch below its title opens the inventory
         touchPosition t = { 0 };
@@ -1132,29 +1206,7 @@ int menu_frame(uint32_t down, int hp)
         changed = 1;
     }
     if (message) {
-        if (msg_choice && (down & (KEY_LEFT | KEY_RIGHT))) {
-            msg_answer ^= 1;
-            game_menu_sound(SND_CURSOR);
-            changed = 1;
-        } else if (down & (KEY_A | KEY_B | KEY_TOUCH)) {
-            if (msg_rest && *msg_rest) { // the next page
-                msg_page = msg_rest;
-            } else {
-                if (msg_choice) { // the answer: flag 11:0x1F set = no (as the PS1's typewriter question)
-                    if (down & KEY_TOUCH) {
-                        touchPosition t;
-                        touchRead(&t);
-                        msg_answer = t.px >= 128;
-                    } else if (down & KEY_B) {
-                        msg_answer = 1;
-                    }
-                    flag_set(11, 0x1F, msg_answer);
-                }
-                message = NULL;
-                picture = 0;
-            }
-            changed = 1;
-        }
+        changed |= message_input(down);
     } else if (down & KEY_TOUCH) {
         touchPosition t;
         touchRead(&t);

@@ -42,22 +42,26 @@ static int tex = -1;
 static Sprite sprites[MAX_SPRITES];
 int effect_status, effect_spawned; // diagnostics: 1 loaded, 2 texture ok
 
+// The file once; the texture again after each reset of texture memory
+// (main.c: textures_rebuild, every room).
 void effect_load(void)
 {
-    uint32_t size;
-    data = asset_load("nitro:/effect/core.bin", &size);
-    if (!data || *(uint32_t *)data != EFFECT_MAGIC) {
-        asset_free(data);
-        data = NULL;
-        return;
+    if (!data) {
+        uint32_t size;
+        data = asset_load("nitro:/effect/core.bin", &size);
+        if (!data || *(uint32_t *)data != EFFECT_MAGIC) {
+            asset_free(data);
+            data = NULL;
+            return;
+        }
+        num_anims = *(uint16_t *)(data + 4);
+        anims = (const EffectAnim *)(data + 8);
+        DC_FlushRange(data, size);
     }
-    num_anims = *(uint16_t *)(data + 4);
     int num_frames = *(uint16_t *)(data + 6);
-    anims = (const EffectAnim *)(data + 8);
     frames = (const EffectFrame *)(anims + num_anims);
     const uint16_t *palette = (const uint16_t *)(frames + num_frames);
     const uint8_t *texels = (const uint8_t *)(palette + 16);
-    DC_FlushRange(data, size);
     glGenTextures(1, &tex);
     glBindTexture(0, tex);
     effect_status = 1;

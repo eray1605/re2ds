@@ -22,21 +22,30 @@
 #define MUSIC_MAGIC 0x31554D52  // "RMU1": MAINxx, one sequence
 #define MUSIC_MAGIC2 0x32554D52 // "RMU2": SUB_xx, two sequences
 #ifndef MAX_VOICES
-#define MAX_VOICES 14           // DS channels for music: rooms 103, 109 and the police station
-                                // would hold 14-16 notes (with their tails); 12 cut notes off.
-                                // An effect or a voice clip that finds no free channel takes
-                                // the quietest note (music_yield).
+#define MAX_VOICES 13           // DS channels 0-12 are the music's own (voice i plays on channel
+                                // i), 13-15 the effects' and the voice clips' (sound.c): an
+                                // effect took a sounding note before (music_yield) - a gap in
+                                // the music at every step or shot when all were busy - and the
+                                // two threads could start notes on the same channel.
 #endif
-#define MASTER_VOLUME 48        // below the effects, like the PS1 mix
+#define MASTER_VOLUME 32        // below the effects, like the PS1 mix (48 drove the limiter
+                                // below half the volume most of the time in the city)
 // The DS mixer adds up the channels and clips once a side gets more than
 // about one channel at full volume: the police station's and the city's
 // pieces summed 160-390 (peaks 730) and crackled. The music keeps the sum of
 // its channel volumes under MIX_LIMIT, coming down in the frame the notes
-// start and back up by 2/256 a frame.
+// start; it holds that for a second and then goes back up by 1/256 a frame
+// (it rose 2/256 at once: the level pumped with every chord).
 #define MIX_LIMIT (160 * 16)    // in the 11-bit volumes below (160 of 127 a channel)
 static int mix_gain = 256;      // 256 = 1
+#define GAIN_HOLD 60
+static int gain_hold;
 #define DUCKED 40               // while a voice clip plays
 static int duck = 127;
+// scd_op_80 (0x80053dac): the music at a percentage of the volume it had at
+// the first such command of the room (0x800df0f0, kept at 0x800d081a, which
+// each room start forgets); 100 = as before. Room 604's scene turns it down.
+static int scale = 100;
 #define FADE_FRAMES 90          // fade out (FUN_800755b8(seq, 0x7f, 0x5a))
 #define PROGRAMS 16             // programs whose volume and pan sce_bgm_control sets
 
@@ -86,6 +95,7 @@ typedef struct {
     uint8_t midi, note, velocity;
     uint8_t phase;              // ENV_*: where in its envelope
     int32_t level;              // SPU envelope level, 0..0x7FFF
+    // ch: the voice's own DS channel (its index) while it sounds
     uint16_t volume;            // before the envelope (voice_mix), DS volume 0..2047
     uint16_t sent;              // the DS volume last set
     uint16_t frames;            // frames left for samples that play once (0 = loops); never
@@ -97,6 +107,8 @@ typedef struct {
 static Bank main_bank, sub_bank;
 static Player players[PLAYERS];
 static Voice voices[MAX_VOICES];
+// frames a music channel is lent to an effect (music_lend): no note starts there
+static uint16_t lent[MAX_VOICES];
 
 static void voices_init(void)
 {
@@ -238,6 +250,7 @@ static void voice_mix(const Voice *v, int *volume, int *pan)
         bgm_pan += b->prog_pan[t->program] - 64;
     }
     int x = t->volume * v->pl->ch_volume[v->midi] / 127 * v->velocity / 127 * MASTER_VOLUME * 16 / 127 * duck / 127;
+    x = x * scale / 100;
     x = x * vol / 127;
     if (v->pl->fade)
         x = x * v->pl->fade / FADE_FRAMES;
@@ -329,6 +342,36 @@ static void bank_free(Bank *b)
     b->num_tones = 0;
 }
 
+// Files read before the lock is taken (music_preload): reading 100-400 KB
+// from the card under it held the music thread - the main piece stood still
+// while a room's sub loaded, and came back late.
+typedef struct {
+    char path[40];
+    uint8_t *data;
+    uint32_t size;
+} Preload;
+static Preload preloads[2];
+
+static void preload_file(const char *path)
+{
+    for (int i = 0; i < 2; i++)
+        if (!preloads[i].data) {
+            snprintf(preloads[i].path, sizeof(preloads[i].path), "%s", path);
+            preloads[i].data = asset_load(path, &preloads[i].size);
+            if (preloads[i].data)
+                DC_FlushRange(preloads[i].data, preloads[i].size); // the ARM7 reads the samples from RAM
+            return;
+        }
+}
+
+static void preload_drop(void)
+{
+    for (int i = 0; i < 2; i++) {
+        asset_free(preloads[i].data);
+        preloads[i].data = NULL;
+    }
+}
+
 // music/<name>.bin (tools/bgm2ds.py): RMU1 / RMU2 header, then the tones
 static int bank_load(Bank *b, const char *path, uint32_t magic, uint32_t head)
 {
@@ -338,14 +381,24 @@ static int bank_load(Bank *b, const char *path, uint32_t magic, uint32_t head)
     b->pan = 64;
     memset(b->prog_vol, 127, sizeof(b->prog_vol));
     memset(b->prog_pan, 64, sizeof(b->prog_pan));
-    uint32_t size;
-    b->data = asset_load(path, &size);
+    uint32_t size = 0;
+    b->data = NULL;
+    for (int i = 0; i < 2 && !b->data; i++)
+        if (preloads[i].data && !strcmp(preloads[i].path, path)) {
+            b->data = preloads[i].data;
+            size = preloads[i].size;
+            preloads[i].data = NULL;
+        }
+    if (!b->data) {
+        b->data = asset_load(path, &size);
+        if (b->data)
+            DC_FlushRange(b->data, size); // the ARM7 reads the samples from RAM
+    }
     if (!b->data || size < head || *(uint32_t *)b->data != magic) {
         asset_free(b->data);
         b->data = NULL;
         return 0;
     }
-    DC_FlushRange(b->data, size); // the ARM7 reads the samples from RAM
     b->num_tones = ((uint16_t *)b->data)[6];
     b->format = ((uint16_t *)b->data)[7] == 1 ? SoundFormat_8Bit : SoundFormat_16Bit;
     b->bytes = b->format == SoundFormat_8Bit ? 1 : 2;
@@ -363,6 +416,15 @@ static void sub_unload(void)
 {
     bank_free(&sub_bank);
     current_sub = -1;
+}
+
+// the banks music_preload is about to replace
+static void music_unload_unlocked(int main, int sub)
+{
+    if (sub)
+        sub_unload();
+    if (main)
+        main_unload();
 }
 
 static void music_stop_unlocked(void)
@@ -414,16 +476,35 @@ static Voice *voice_to_give(const Voice *except)
     return v;
 }
 
+// Starts the tone on the voice's own channel. The DS plays the loop point
+// plus the length (SOUNDxPNT + SOUNDxLEN) and repeats from the loop point:
+// soundPlaySample took the whole sample as the length, so every pass of a
+// loop ran on into the next tone's data (426 of the 683 music tones loop).
+static int voice_start(Voice *v, const Bank *b, const MusicTone *t, uint32_t rate, int volume, int pan)
+{
+    unsigned size = t->size & ~3u;
+    int looped = t->loop != 0xFFFFFFFF && t->loop / 4 * 4 < size;
+    unsigned pnt = looped ? t->loop / 4 : 0, len = size / 4 - pnt;
+    if (!len)
+        return -1;
+    int ch = (int)(v - voices);
+    soundPreparePcm((unsigned)ch | SOUND_START, (unsigned)volume, (unsigned)pan, soundTimerFromHz(rate ? rate : 1),
+                    looped ? SoundMode_Repeat : SoundMode_OneShot, (SoundFmt)b->format, b->data + t->offset, pnt, len);
+    return ch;
+}
+
 static void play_tone(const Player *p, const Bank *b, const MusicTone *t, int midi, int note, int velocity)
 {
     if (!t->size)
         return;
     Voice *v = NULL;
     for (int i = 0; i < MAX_VOICES && !v; i++)
-        if (voices[i].ch < 0)
+        if (voices[i].ch < 0 && !lent[i])
             v = &voices[i];
     if (!v)
         v = voice_to_give(NULL);
+    if (!v)
+        return; // all lent out or none sounds to give way
     if (v->ch >= 0) {
         if (v->phase == ENV_RELEASE)
             music_steals_fading++;
@@ -447,18 +528,7 @@ static void play_tone(const Player *p, const Bank *b, const MusicTone *t, int mi
     v->sent = voice_volume(v);
     uint32_t rate = note_rate(t, note, p->ch_bend[midi]);
     int looped = t->loop != 0xFFFFFFFF;
-    v->ch = soundPlaySample(b->data + t->offset, b->format, t->size & ~3, rate, v->sent >> 4, pan,
-                            looped, looped ? t->loop / 4 : 0);
-    if (v->ch < 0) { // the effects hold the other channels: the quietest note gives way
-        Voice *o = voice_to_give(v);
-        if (o) {
-            voice_stop(o);
-            v->ch = soundPlaySample(b->data + t->offset, b->format, t->size & ~3, rate, v->sent >> 4, pan,
-                                    looped, looped ? t->loop / 4 : 0);
-        }
-    }
-    if (v->ch >= 0)
-        soundChSetVolume(v->ch, v->sent); // the start takes 0..127 only
+    v->ch = voice_start(v, b, t, rate, v->sent, pan);
     v->rate = rate ? rate : 1;
     v->frames = looped ? 0 : (uint16_t)(t->size / b->bytes * 60 / v->rate);
     if (!looped && !v->frames)
@@ -599,6 +669,9 @@ static void player_frame(Player *p)
 // One 60 Hz step of the voices and sequences.
 static void music_step(void)
 {
+    for (int i = 0; i < MAX_VOICES; i++)
+        if (lent[i])
+            lent[i]--;
     for (int i = 0; i < MAX_VOICES; i++) {
         Voice *v = &voices[i];
         if (v->ch < 0)
@@ -618,7 +691,14 @@ static void music_step(void)
         if (voices[i].ch >= 0)
             total += voices[i].volume * voices[i].level / ENV_MAX;
     int want = total > MIX_LIMIT ? MIX_LIMIT * 256 / total : 256;
-    mix_gain = want < mix_gain + 2 ? want : mix_gain + 2;
+    if (want < mix_gain) {
+        mix_gain = want;
+        gain_hold = GAIN_HOLD;
+    } else if (gain_hold) {
+        gain_hold--;
+    } else if (mix_gain < want) {
+        mix_gain++;
+    }
     for (int i = 0; i < MAX_VOICES; i++)
         if (voices[i].ch >= 0)
             voice_send(&voices[i]);
@@ -638,15 +718,32 @@ static RMutex music_mutex;
 #define MUSIC_UNLOCK() rmutexUnlock(&music_mutex)
 static Thread music_thread;
 static u8 music_stack[8192] __attribute__((aligned(8)));
+static TickTask clock_task;
+static volatile uint32_t clock_frames;
+static uint32_t frames_done;
+static void clock_tick(TickTask *t)
+{
+    (void)t;
+    clock_frames++;
+}
+// A wake-up of threadTimerWait that comes while the thread is not waiting
+// (it waits for the lock, or a sound command) is lost: one step each wake
+// fell behind for good. A clock half a frame ahead counts the frames due.
 static int music_thread_main(void *arg)
 {
     (void)arg;
     static TickTask timer;
+    frames_done = clock_frames;
     threadTimerStart(&timer, 60);
     for (;;) {
         threadTimerWait(&timer);
         MUSIC_LOCK();
-        music_step();
+        uint32_t due = clock_frames - frames_done;
+        frames_done += due;
+        if (due > CATCH_UP)
+            due = CATCH_UP;
+        while (due--)
+            music_step();
         MUSIC_UNLOCK();
     }
     return 0;
@@ -654,7 +751,6 @@ static int music_thread_main(void *arg)
 #else
 #define MUSIC_LOCK() ((void)0)
 #define MUSIC_UNLOCK() ((void)0)
-#endif
 static TickTask clock_task;
 static volatile uint32_t clock_frames;
 static uint32_t frames_done;
@@ -664,17 +760,22 @@ static void clock_tick(TickTask *t)
     (void)t;
     clock_frames++;
 }
+#endif
 
-// An effect or a voice clip found no free DS channel: the music's quietest
-// note gives way. 1 if one did.
-static int music_yield_unlocked(void)
+// The effects have channels of their own now (sound.c): no note gives way.
+static int music_yield_unlocked(void) { return 0; }
+
+// An effect that finds its own channels busy borrows one the music is not
+// using for so many frames; -1 if every music channel sounds or is lent.
+static int music_lend_unlocked(int frames)
 {
     voices_init();
-    Voice *v = voice_to_give(NULL);
-    if (!v || v->ch < 0)
-        return 0;
-    voice_stop(v);
-    return 1;
+    for (int i = 0; i < MAX_VOICES; i++)
+        if (voices[i].ch < 0 && !lent[i]) {
+            lent[i] = (uint16_t)(frames < 1 ? 1 : frames > 60000 ? 60000 : frames);
+            return i;
+        }
+    return -1;
 }
 
 void music_frame(void)
@@ -684,6 +785,7 @@ void music_frame(void)
 #ifdef ARM9
     if (!started) {
         started = 1;
+        tickTaskStart(&clock_task, clock_tick, ticksFromHz(120), ticksFromHz(60)); // half a frame ahead
         threadPrepare(&music_thread, music_thread_main, NULL, &music_stack[sizeof(music_stack)], MAIN_THREAD_PRIO - 4);
         threadStart(&music_thread);
     }
@@ -726,6 +828,7 @@ static uint8_t *table_pairs(int *bytes)
 
 void music_table_reset(void)
 {
+    scale = 100; // a new game: full volume
     asset_free(table);
     table = NULL;
     table_load();
@@ -771,18 +874,58 @@ void music_table_set(int stage, int room, int main, int sub)
 // others start at once, FUN_8005631c); a new main reloads it as well.
 static void music_entry(int entry, int sub_entry);
 
-static void music_room_unlocked(int stage, int room)
+// the room's main and sub bytes from the table; 0 if it has none
+static int room_entry(int stage, int room, int *entry, int *sub_entry)
 {
     if (!table_load())
-        return;
+        return 0;
     int stages = table[0];
     if (stage < 1 || stage > stages)
-        return;
+        return 0;
     int rooms = table[1 + stages] | table[2 + stages] << 8;
     int index = table[stage] + room; // first room of the stage + room
     if (index >= rooms)
-        return;
-    music_entry(table[3 + stages + 2 * index], table[4 + stages + 2 * index]);
+        return 0;
+    *entry = table[3 + stages + 2 * index];
+    *sub_entry = table[4 + stages + 2 * index];
+    return 1;
+}
+
+static void music_room_unlocked(int stage, int room)
+{
+    int entry, sub_entry;
+    if (room_entry(stage, room, &entry, &sub_entry))
+        music_entry(entry, sub_entry);
+}
+
+// The files music_entry will load, read now without the lock (the game's
+// thread is the only one that changes current_main / current_sub). The banks
+// they replace go first (under the lock, quickly), as music_entry frees them
+// anyway: read beside them, the new ones split the heap, and a room's big
+// enemy sound bank (207's: 260 KB) found no room left - its zombies were mute.
+static void music_unload_unlocked(int main, int sub);
+static void music_preload(int entry, int sub_entry)
+{
+    char path[40];
+    int reloaded = entry == 0xFF && current_main >= 0;
+    int load_main = entry != 0xFF && ((entry & 0x3F) != current_main || !main_bank.data);
+    if (load_main)
+        reloaded = 1;
+    int sub = sub_entry == 0xFF ? -1 : sub_entry & 0x3F;
+    int load_sub = sub >= 0 && (sub != current_sub || reloaded);
+    if (load_main || load_sub || reloaded) {
+        MUSIC_LOCK();
+        music_unload_unlocked(load_main || entry == 0xFF, 1);
+        MUSIC_UNLOCK();
+    }
+    if (load_main) {
+        snprintf(path, sizeof(path), "nitro:/music/main%02x.bin", entry & 0x3F);
+        preload_file(path);
+    }
+    if (load_sub) {
+        snprintf(path, sizeof(path), "nitro:/music/sub_%02x.bin", sub);
+        preload_file(path);
+    }
 }
 
 // A pair the way the room table gives it, without a room (the ending's
@@ -879,10 +1022,37 @@ static void music_control_unlocked(int id, int op, int type, int volume, int pan
 
 // the game's entry points, apart from the music thread
 void music_duck(int on) { MUSIC_LOCK(); music_duck_unlocked(on); MUSIC_UNLOCK(); }
+void music_scale(int percent)
+{
+    MUSIC_LOCK();
+    int s = percent < 0 ? 0 : percent > 100 ? 100 : percent;
+    if (s != scale) {
+        scale = s;
+        voices_update(NULL, -1);
+    }
+    MUSIC_UNLOCK();
+}
 void music_stop(void) { MUSIC_LOCK(); music_stop_unlocked(); MUSIC_UNLOCK(); }
 int music_yield(void) { MUSIC_LOCK(); int r = music_yield_unlocked(); MUSIC_UNLOCK(); return r; }
-void music_room(int stage, int room) { MUSIC_LOCK(); music_room_unlocked(stage, room); MUSIC_UNLOCK(); }
-void music_pair(int main, int sub) { MUSIC_LOCK(); music_pair_unlocked(main, sub); MUSIC_UNLOCK(); }
+int music_lend(int frames) { MUSIC_LOCK(); int r = music_lend_unlocked(frames); MUSIC_UNLOCK(); return r; }
+void music_room(int stage, int room)
+{
+    int entry, sub_entry;
+    if (room_entry(stage, room, &entry, &sub_entry))
+        music_preload(entry, sub_entry);
+    MUSIC_LOCK();
+    music_room_unlocked(stage, room);
+    MUSIC_UNLOCK();
+    preload_drop(); // what was not taken
+}
+void music_pair(int main, int sub)
+{
+    music_preload(main, sub);
+    MUSIC_LOCK();
+    music_pair_unlocked(main, sub);
+    MUSIC_UNLOCK();
+    preload_drop();
+}
 void music_control(int id, int op, int type, int volume, int pan)
 {
     MUSIC_LOCK();

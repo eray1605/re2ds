@@ -25,7 +25,7 @@ static const uint8_t run_rot[32] = { 30, 72, 30, 72, 72, 64, 72, 72, 60, 72, 30,
 #define TURN_TO_SLACK 0x80    // mode 0x15 (FUN_80062524)
 #define ARRIVED 100           // distance that counts as there (FUN_800623cc)
 
-enum { OP_PLC_MOTION = 0x3F, OP_PLC_DEST = 0x40, OP_PLC_RET = 0x42, OP_PLC_ROT = 0x58,
+enum { OP_PLC_MOTION = 0x3F, OP_PLC_DEST = 0x40, OP_PLC_RET = 0x42, OP_PLC_FLG = 0x43, OP_PLC_ROT = 0x58,
        OP_PLC_CNT = 0x5B, OP_PLC_STOP = 0x66 };
 
 static int16_t rd16(const uint8_t *p) { return (int16_t)(p[0] | p[1] << 8); }
@@ -116,6 +116,19 @@ void plc_command(Plc *p, PlcBody *b, const uint8_t *ins)
     case OP_PLC_RET: // scd_op_42: back to the character's own control
         p->active = 0;
         break;
+    case OP_PLC_FLG: { // scd_op_43 (0x800533b4): 0 ors, 1 sets, 2 xors the u16 into obj+0x1cc,
+        // the flags plc_motion's byte 3 writes (1 / 2 a foot planted: enemy.c
+        // plc_step; 4 loop, 8 twice as fast, 0x10 half speed, 0x40 no blend, 0x80
+        // backward, 0x100 root motion counted from the first keyframe shown).
+        uint16_t v = (uint16_t)(ins[2] | ins[3] << 8);
+        if (ins[1] == 0)
+            p->flags |= v;
+        else if (ins[1] == 1)
+            p->flags = v;
+        else if (ins[1] == 2)
+            p->flags ^= v;
+        break;
+    }
     case OP_PLC_ROT: // scd_op_58: 0 = per tick, 1 = once at the end of the animation
         if (ins[1] == 0)
             p->rot = rd16(ins + 2);
@@ -138,22 +151,62 @@ void plc_command(Plc *p, PlcBody *b, const uint8_t *ins)
     }
 }
 
-// modes 0 / 1 (FUN_800621b0): play the animation once (looping with flag 4),
+static const int16_t *key_root(const Model *set, const ModelAnim *a, int key)
+{
+    return model_frame(set, ANIM_FRAME(set->anim_pool[a->first + key]))->speed;
+}
+
+// The animation moves the character itself (0x8001581c, then 0x80014cf0, every
+// tick of modes 0x0a-0x0d, FUN_800625ec; modes 0-3, FUN_800621b0, do not): a
+// keyframe's root motion is its displacement since the first keyframe; the body moves by the difference to the one shown before,
+// turned by its facing. Keyframe 0 starts the count anew (backward: from the
+// last keyframe's); flag 0x100 takes the keyframe the mode starts on as the
+// start (after plc_cnt; else the count goes on from the one shown before).
+static void root_move(Plc *p, PlcBody *b, const Model *set, const ModelAnim *a, int counter)
+{
+    int backward = (p->flags & 0x80) != 0;
+    if (counter == 0) {
+        static const int16_t zero[3];
+        const int16_t *from = backward ? key_root(set, a, a->count - 1) : zero;
+        for (int k = 0; k < 3; k++)
+            p->root[k] = from[k];
+    }
+    const int16_t *now = key_root(set, a, b->key);
+    int32_t dx = now[0] - p->root[0], dz = now[2] - p->root[2];
+    for (int k = 0; k < 3; k++)
+        p->root[k] = now[k];
+    int32_t c = cosLerp(b->dir), s = sinLerp(b->dir);
+    b->x += (dx * c + dz * s) >> 12;
+    b->z += (-dx * s + dz * c) >> 12;
+}
+
+// modes 0-3 (FUN_800621b0): play the animation once (looping with flag 4),
 // twice as fast with flag 8, backward with flag 0x80; turn rot per tick and
-// rot_end at the end; afterwards hold the last pose
-static void play(Plc *p, PlcBody *b, const Model *set, int anim)
+// rot_end at the end; afterwards hold the last pose. Modes 0x0a-0x0d
+// (FUN_800625ec, move = 1) the same with the animation's root motion.
+static void play(Plc *p, PlcBody *b, const Model *set, int anim, int move)
 {
     if (p->step == 0) {
         p->step = 1;
         start_anim(b, set, anim);
         b->no_blend = (p->flags & 0x40) != 0;
+        if (move && (p->flags & 0x100) && set && b->set == set && set->anims[b->anim].count) {
+            const ModelAnim *a = &set->anims[b->anim];
+            const int16_t *r = key_root(set, a, (p->flags & 0x80) ? a->count - 1 - (p->key % a->count) : p->key % a->count);
+            for (int k = 0; k < 3; k++)
+                p->root[k] = r[k];
+        }
     }
     if (p->step != 1 || !set || b->set != set)
         return;
     const ModelAnim *a = &set->anims[b->anim];
+    if (!a->count)
+        return;
     for (int pass = 0; pass < ((p->flags & 8) ? 2 : 1) && p->step == 1; pass++) {
         int k = p->key < a->count ? p->key : a->count - 1;
         b->key = (p->flags & 0x80) ? a->count - 1 - k : k;
+        if (move)
+            root_move(p, b, set, a, k);
         if (set->anim_pool[a->first + b->key] & ANIM_FLAG_STEP)
             b->footstep = 1;
         if (++p->key >= a->count) {
@@ -196,16 +249,20 @@ void plc_tick(Plc *p, PlcBody *b)
     int t = table(b);
     switch (p->mode) {
     case PLC_ANIM_ROOM:
-        play(p, b, b->room_set, p->anim);
+    case PLC_MOVE_ROOM:
+        play(p, b, b->room_set, p->anim, p->mode == PLC_MOVE_ROOM);
         break;
     case PLC_ANIM_OWN:
-        play(p, b, b->own_set, b->own_first + p->anim);
+    case PLC_MOVE_OWN:
+        play(p, b, b->own_set, b->own_first + p->anim, p->mode == PLC_MOVE_OWN);
         break;
     case PLC_ANIM_SET2:
-        play(p, b, b->own_set, b->own_first2 + p->anim);
+    case PLC_MOVE_SET2:
+        play(p, b, b->own_set, b->own_first2 + p->anim, p->mode == PLC_MOVE_SET2);
         break;
     case PLC_ANIM_SET3:
-        play(p, b, b->own_set, b->own_first3 + p->anim);
+    case PLC_MOVE_SET3:
+        play(p, b, b->own_set, b->own_first3 + p->anim, p->mode == PLC_MOVE_SET3);
         break;
     case PLC_STAND: // FUN_80061938
         if (p->step == 0) {

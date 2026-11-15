@@ -22,6 +22,7 @@
 
 #include "menu.h"
 #include "movie.h"
+#include "sound.h"
 #include "subs.h"
 
 #define MOVIE_MAGIC 0x31564D52  // "RMV1": 16-bit sound
@@ -132,8 +133,10 @@ int movie_play(const char *name)
                 break;
         }
         if (channel < 0) {
-            channel = soundPlaySample(ring, bps == 1 ? SoundFormat_8Bit : SoundFormat_16Bit, RING * bps, h.rate,
-                                      127, 64, true, 0);
+            // the effects' channel 15 (sound.c): soundPlaySample could take a music channel
+            channel = sound_channel(1);
+            soundPreparePcm((unsigned)channel | SOUND_START, 127 << 4, 64, soundTimerFromHz(h.rate), SoundMode_Repeat,
+                            bps == 1 ? SoundFmt_Pcm8 : SoundFmt_Pcm16, ring, 0, RING * bps / 4);
             clock_start();
         }
 

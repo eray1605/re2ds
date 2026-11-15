@@ -232,6 +232,7 @@ typedef struct {
     uint8_t hidden;             // not drawn nor hit (obj flag 2: the arms inside the wall)
     uint16_t hide_bones;        // parts not drawn (the arms: the other arm of the model)
     uint32_t dark_parts;        // parts the room script turned black (parts_set field 2 / 3): not drawn
+    Neck neck;                  // plc_neck: the head turned in a scene
     uint8_t hit_lock;           // ticks the shots pass it by after a hit (obj+0x1d3)
     int16_t fall_v;             // torn apart: the upper body's fall (obj+0x15a)
     uint8_t bounces;            // ... and its bounces left (obj+0x16a)
@@ -269,6 +270,18 @@ typedef struct {
     int16_t wall_head;          // on a wall: the head's turn from down, RE2 units (obj+0x226)
     int32_t top_y;              // on a wall: as high as it climbs (obj+0x22c)
     uint8_t climb_wait;         // ticks before it goes onto a wall again (obj+0x232)
+    // the G adult (type 0x28)
+    uint8_t body_step;          // a dead zombie's routine 7 (obj+5), 0 none
+    uint8_t body_wait;          // its pause (obj+0x16b)
+    uint8_t body_count;         // twitches left (obj+0x158)
+    uint8_t ga_fight;           // set with a flag: it fights (the flag goes when it dies)
+    int8_t ga_meter;            // hits before it staggers (obj+0x220)
+    uint8_t ga_busy;            // attacking: hits do not stop it (obj+0x222)
+    uint8_t ga_lock;            // no swipe for so many frames (obj+0x21d)
+    uint8_t ga_hit;             // this swipe has hit (obj+0x158)
+    int16_t ga_behind;          // frames Leon was behind it (obj+0x21a)
+    int16_t ga_lay_cd;          // frames before it lays embryos again (obj+0x218)
+    int16_t ga_count;           // the state's own count (obj+0x158)
 } Enemy;
 
 // The grab: one zombie at a time (PS1 flag 0x80 in 0x800c79c7). Zombie and
@@ -314,6 +327,18 @@ typedef struct {
 } Legs;
 static Legs legs[MAX_ENEMIES];
 
+// A part the room script makes drop off (sce_parts_down): the bones in mask,
+// in the pose they had, fall from where they were to the floor and lie there.
+typedef struct {
+    uint8_t on, landed;
+    uint16_t mask;
+    int32_t x, y, z, drop, fall_v;
+    int16_t dir;
+    int16_t rot[POSE_BONES][3];
+    int16_t ofs[3];
+} Piece;
+static Piece pieces[MAX_ENEMIES];
+
 // Shadows (obj+0x16c, FUN_80016254): a flat quad on the floor under the body,
 // turned with it, that the PS1 draws subtracting a colour from the picture.
 // The room scripts set them (kage_set, scd_op_60): colour, size along /
@@ -344,6 +369,9 @@ static int is_licker(const Enemy *e);
 static void licker_spawn(Enemy *e);
 static int off_floor(const Enemy *e);
 static int is_zombie(const Enemy *e);
+static void body_tick(Enemy *e);   // a dead zombie twitching (routine 7)
+#define BODY_STILL 7
+static void enemy_neck_tick(Enemy *e);
 static void update_pose(Enemy *e);
 static int is_crawler(const Enemy *e);
 static void blood_burst(const Enemy *e, int16_t dir, int32_t up);
@@ -408,6 +436,7 @@ static void free_type(EnemyType *t)
 
 void enemy_room_reset(void)
 {
+    memset(pieces, 0, sizeof(pieces));
     for (int i = 0; i < MAX_TYPES; i++)
         if (types[i].type)
             free_type(&types[i]);
@@ -429,7 +458,7 @@ void enemy_room_reset(void)
 }
 
 // Vertices and polygons in all display lists of a model (packed GX lists from
-// tools/model2ds.py: BEGIN triangles or quads, TEXCOORD, VTX_16, END).
+// tools/model2ds.py: BEGIN triangles or quads, TEXCOORD, NORMAL, VTX_16, END).
 void model_gx_cost(const Model *m, int *vertices, int *polygons)
 {
     int verts = 0, polys4 = 0, lists = m->header->num_bones * m->header->num_pages;
@@ -450,7 +479,7 @@ void model_gx_cost(const Model *m, int *vertices, int *polygons)
                 } else if (cmd == 0x40) {
                     per_poly = w[k] == 1 ? 4 : 3;
                     k += 1;
-                } else if (cmd == 0x20 || cmd == 0x22) {
+                } else if (cmd == 0x20 || cmd == 0x21 || cmd == 0x22) {
                     k += 1;
                 }
             }
@@ -603,6 +632,7 @@ void enemy_spawn(int slot, int type, int flags, int voice, int32_t x, int32_t y,
     Enemy *e = &enemies[slot];
     memset(e, 0, sizeof(*e));
     legs[slot].on = 0;
+    pieces[slot].on = 0;
     e->active = 1;
     e->type = t;
     e->x = x;
@@ -4361,25 +4391,28 @@ static void arm_bone(const Enemy *e, int bone, int32_t *x, int32_t *y, int32_t *
     bone_point(e, bone, NULL, x, y, z);
 }
 
-// ... or a point in the part's own frame (local, as the PS1's part matrices)
-static void bone_point(const Enemy *e, int bone, const int32_t *local, int32_t *x, int32_t *y, int32_t *z)
+// The joint of bone (or a point in its own frame) relative to the character's
+// place, unturned: the skeleton of m in the pose rot (bone b's turn at
+// rot[3 b], bones beyond max use bone 0's) with the root at ofs.
+static void chain_point(const Model *m, const int16_t *rot_all, int max, const int16_t *ofs, int bone,
+                        const int32_t *local, int32_t t[3])
 {
     // fixed point (4096 = 1): the ARM9 has no FPU
-    const Model *m = &types[e->type].model;
     int chain[16], n = 0;
     for (int b = bone; b >= 0 && n < 16; b = m->bones[b].parent)
         chain[n++] = b;
-    int32_t r[3][3] = { { 4096, 0, 0 }, { 0, 4096, 0 }, { 0, 0, 4096 } }, t[3] = { 0, 0, 0 };
+    int32_t r[3][3] = { { 4096, 0, 0 }, { 0, 4096, 0 }, { 0, 0, 4096 } };
+    t[0] = t[1] = t[2] = 0;
     for (int c = n - 1; c >= 0; c--) {
         int b = chain[c];
         int32_t p[3];
         for (int j = 0; j < 3; j++)
-            p[j] = m->bones[b].parent < 0 ? e->pose_ofs[j] : m->bones[b].pos[j];
+            p[j] = m->bones[b].parent < 0 ? ofs[j] : m->bones[b].pos[j];
         for (int j = 0; j < 3; j++)
             t[j] += (r[j][0] * p[0] + r[j][1] * p[1] + r[j][2] * p[2]) >> 12;
         if (c == 0 && !local)
             break; // the joint itself: its own turn does not move it
-        const int16_t *rot = e->pose_rot[b < POSE_BONES ? b : 0];
+        const int16_t *rot = rot_all + 3 * (b < max ? b : 0);
         int32_t cx = cosLerp(rot[0]), sx = sinLerp(rot[0]), cy = cosLerp(rot[1]), sy = sinLerp(rot[1]);
         int32_t cz = cosLerp(rot[2]), sz = sinLerp(rot[2]);
         // Rx * Ry * Rz
@@ -4397,6 +4430,13 @@ static void bone_point(const Enemy *e, int bone, const int32_t *local, int32_t *
             for (int j = 0; j < 3; j++)
                 t[j] += (r[j][0] * local[0] + r[j][1] * local[1] + r[j][2] * local[2]) >> 12;
     }
+}
+
+// ... or a point in the part's own frame (local, as the PS1's part matrices)
+static void bone_point(const Enemy *e, int bone, const int32_t *local, int32_t *x, int32_t *y, int32_t *z)
+{
+    int32_t t[3];
+    chain_point(&types[e->type].model, &e->pose_rot[0][0], POSE_BONES, e->pose_ofs, bone, local, t);
     int32_t cd = cosLerp(e->dir), sd = sinLerp(e->dir);
     *x = e->x + ((cd * t[0] + sd * t[2]) >> 12);
     *y = e->y + t[1];
@@ -6097,23 +6137,28 @@ static void roach_shot(Enemy *e)
 #define ACT_FLINCH 13
 #define ACT_STAND 14            // an actor of a scene
 
+#define TYPE_G_ADULT 0x28
+#define TYPE_G_EMBRYO 0x27
+
 static const struct ActorType {
     uint8_t type;
-    int16_t hp;                 // from the overlay's init (sh 0x156)
+    int16_t hp, hp_easy;        // from the overlay's init (sh 0x156; EASY: 0x800c77b4 & 0x20)
     int8_t idle, walk, run;     // animations of set 0; run -1: none
     int8_t attack[2];
     uint8_t damage[2];
     int16_t range[2];
     int8_t flinch, death;       // -1: none
 } actor_types[] = {
-    { 0x27, 1, 0, 6, -1, { 13, 13 }, { 10, 10 }, { 700, 700 }, -1, 11 },        // G embryo
-    { 0x28, 450, 0, 1, -1, { 2, 7 }, { 25, 35 }, { 1800, 1800 }, 5, 13 },        // G adult
-    { 0x2b, 10000, 5, 3, 1, { 2, 8 }, { 40, 60 }, { 1500, 3500 }, 6, 10 },       // the second tyrant
-    { 0x2c, 1, 0, -1, -1, { -1, -1 }, { 0, 0 }, { 0, 0 }, -1, -1 },
-    { 0x30, 400, 0, 1, -1, { 5, 6 }, { 30, 30 }, { 1800, 1800 }, 9, 18 },        // G1
-    { 0x33, 750, 0, 1, -1, { 7, 9 }, { 30, 30 }, { 1800, 2500 }, 4, 5 },         // G2 (B)
-    { 0x36, 400, 0, -1, -1, { -1, -1 }, { 0, 0 }, { 0, 0 }, -1, 11 },
-    { 0x37, -1, 7, -1, -1, { -1, -1 }, { 0, 0 }, { 0, 0 }, -1, -1 },
+    // the G adult 600 / EASY 450 (0x80100520), G1 500 / 400 (0x801004ac), G2 900 / 750
+    // (0x801002f8): the DS had taken the EASY numbers for all
+    { 0x27, 1, 1, 0, 6, -1, { 13, 13 }, { 10, 10 }, { 700, 700 }, -1, 11 },        // G embryo
+    { 0x28, 600, 450, 0, 1, -1, { 2, 7 }, { 25, 35 }, { 1800, 1800 }, 5, 13 },     // G adult
+    { 0x2b, 10000, 10000, 5, 3, 1, { 2, 8 }, { 40, 60 }, { 1500, 3500 }, 6, 10 },  // the second tyrant
+    { 0x2c, 1, 1, 0, -1, -1, { -1, -1 }, { 0, 0 }, { 0, 0 }, -1, -1 },
+    { 0x30, 500, 400, 0, 1, -1, { 5, 6 }, { 30, 30 }, { 1800, 1800 }, 9, 18 },     // G1
+    { 0x33, 900, 750, 0, 1, -1, { 7, 9 }, { 30, 30 }, { 1800, 2500 }, 4, 5 },      // G2 (B)
+    { 0x36, 400, 400, 0, -1, -1, { -1, -1 }, { 0, 0 }, { 0, 0 }, -1, 11 },
+    { 0x37, -1, -1, 7, -1, -1, { -1, -1 }, { 0, 0 }, { 0, 0 }, -1, -1 },
 };
 
 static const struct ActorType *actor_of(const Enemy *e)
@@ -6127,7 +6172,7 @@ static const struct ActorType *actor_of(const Enemy *e)
 static int is_actor(const Enemy *e) { return actor_of(e) != NULL; }
 
 // The second tyrant of 702 (type 0x2b; overlay 0x911, init 0x80101b20,
-// main 0x8010187c): 20000 + 250 HP (EASY 200, 0x80104b40). Every frame
+// main 0x8010187c): 20000 + 200 HP (EASY 250, 0x80104b40 / 0x80104b42). Every frame
 // member 0x1a = Leon farther than 2800 (0x80101d80), 0x19 = 1 once under
 // 20000 (0x80101ac4), and the HP never go under 10000 (0x80101adc): only
 // the rocket kills him - the overlay marks him (obj+0x1d3 | 0x80) while
@@ -6250,19 +6295,346 @@ static void super_tyrant_rocket(Enemy *e)
 static void actor_spawn(Enemy *e)
 {
     const struct ActorType *a = actor_of(e);
-    e->hp = a->hp < 0 ? 32767 : a->hp;
-    if (types[e->type].type == TYPE_SUPER_TYRANT)
-        e->hp = 20000 + (easy() ? 200 : 250);
+    int hp = easy() ? a->hp_easy : a->hp;
+    e->hp = hp < 0 ? 32767 : hp;
+    e->hp_bonus = 0;            // the zombies' +15 is theirs
+    e->ga_fight = types[e->type].type == TYPE_G_ADULT && e->kill_flag;
+    e->ga_meter = 6;            // the G adult's (0x80100504)
+    e->ga_lay_cd = 10;
+    if (types[e->type].type == TYPE_SUPER_TYRANT) // 0x80101b84: EASY 0x80104b40 (250), else 0x80104b42 (200)
+        e->hp = 20000 + (easy() ? 250 : 200);
     e->floor_y = e->y;
     set_anim(e, SET_GAIT, a->idle, rnd() & 7);
-    if (!e->kill_flag || a->walk < 0)
+    // the embryos a G adult lays (variant 2) fight like those of the room's script
+    int laid = types[e->type].type == TYPE_G_EMBRYO && (e->flags & EF_VARIANT) == 2;
+    if ((!e->kill_flag && !laid) || a->walk < 0)
         e->state = ACT_STAND; // a part of a scene: never acts on its own
     else
         dog_enter(e, ACT_IDLE);
 }
 
+// ---------------------------------------------------------------- G adult
+// The G adult of room 303 (type 0x28, CDEMD0.EMS sector 0x7c3 at 0x80100000;
+// init 0x80100504, routine 1 0x80100b0c: mode obj+0x10e - 0 its fight, 1 the
+// scenes' -, states obj+5 by decisions 0x8010635c and actions 0x80106384).
+// HP 600 (EASY 450). Its state 1 (0x80100d5c / 0x80100f7c) walks the zone path
+// to Leon in its move 1, turning 16 (8 when slow) a frame, and decides:
+//  - Leon outside +-1224 of its facing for more than 60 frames (counted while
+//    outside +-1024) within 6000: state 2, its move 8, a turn about;
+//  - the way 2000 ahead free, fewer than five embryos and no pause: state 6;
+//  - Leon within +-824: under 3500 (no swipe pause, Leon free) state 3, under
+//    2000 state 9.
+// State 3 (0x80101200), move 4: turns to Leon at 8 on keys 6-29 (more than
+// 4500 away or outside +-1224: back to 1, 15 frames without a swipe), keeps
+// its facing + 512 on him (4 a frame, 32 on keys 54-75) and hits on keys 54-75
+// when part 12 is within 800 of him or part 10 within 1000: 30 (x1.5) and a
+// hurt reaction, sound 6, blood at part 12. At the end it faces 1024 further.
+// State 6 (0x80101770), move 5 for 120 frames: lays an embryo (0x8001a8b0 type
+// 0x27, variant 2) at part 4 at once, at frame 100 another and at 90 one more
+// half the time; then 300 + rand frames without laying (half as long with
+// fewer than four out), and Leon within 4000: state 3.
+// State 9 (0x801030dc): backs off (move 1 backward, 10 a frame) for 130-161
+// frames; then state 3 as from state 1, 2 when Leon is behind it, or 1 beyond
+// 3500. States 2, 3, 6 cannot be stopped by a hit (obj+0x222).
+// Hits (routine 2, 0x80103d34): the weapon's points (table 0x80106634) come
+// off a count of 6 (never under 1); at 1 with Leon within +-450 of its facing
+// - 574 it is 0 and it reels (0x80104220): move 2, then move 9 for 180 frames
+// stumbling about. Dying in its turn (state 2) it lives on at 0 HP; dead:
+// moves 7, 14 and 16 (0x801052a8).
+#define GA_WALK 15
+#define GA_TURN 16
+#define GA_SWIPE 17
+#define GA_LAY 18
+#define GA_BACK 19
+#define GA_REEL 13
+static const uint8_t ga_weapon_points[19] = { 0, 2, 2, 2, 2, 10, 15, 4, 6, 16, 16, 20, 6, 2, 16, 1, 4, 20, 2 };
+static int ga_weapon;           // the weapon of the hit actor_shot is told of
+static int32_t ga_leon_x, ga_leon_z; // Leon at the last tick (a hit comes between ticks)
+
+static int is_g_adult(const Enemy *e) { return types[e->type].type == TYPE_G_ADULT && e->ga_fight; }
+
+static int embryos_out(void)
+{
+    int n = 0;
+    for (int k = 0; k < MAX_ENEMIES; k++)
+        if (enemies[k].active && types[enemies[k].type].type == TYPE_G_EMBRYO && enemies[k].state < ST_DYING &&
+            !enemies[k].hidden)
+            n++;
+    return n;
+}
+
+static void ga_lay_one(const Enemy *e, int16_t dir_re2)
+{
+    for (int k = 0; k < PARTNER_SLOT; k++)
+        if (!enemies[k].active) {
+            int32_t x, y, z;
+            bone_point(e, 4, NULL, &x, &y, &z);
+            enemy_spawn(k, TYPE_G_EMBRYO, 2, 0, x, e->y, z, dir_re2);
+            return;
+        }
+}
+
+static void ga_enter(Enemy *e, int state, int anim)
+{
+    dog_enter(e, state);
+    set_anim(e, SET_GAIT, anim, 0);
+}
+
+// turns its facing + off (RE2 units) toward Leon by up to rate
+static void ga_aim(Enemy *e, const EnemyTarget *p, int off, int rate)
+{
+    Enemy v = *e;
+    v.dir = (e->dir + off * 8) & 32767;
+    e->dir = (e->dir + turn_delta(&v, p->x, p->z, rate)) & 32767;
+}
+
+static int ga_part_near(const Enemy *e, const EnemyTarget *p, int part, int range)
+{
+    int32_t x, y, z;
+    bone_point(e, part, NULL, &x, &y, &z);
+    int64_t dx = p->x - x, dz = p->z - z;
+    return dx * dx + dz * dz < (int64_t)range * range;
+}
+
+static void ga_decide(Enemy *e, const EnemyTarget *p, uint32_t d, int from_back)
+{
+    int front = in_cone(e, p->x, p->z, 824);
+    if (!in_cone(e, p->x, p->z, 1024))
+        e->ga_behind += from_back ? 2 : 1;
+    if (!in_cone(e, p->x, p->z, from_back ? 1524 : 1224) && d < (from_back ? 5000u : 6000u) &&
+        e->ga_behind > (from_back ? 90 : 60)) {
+        ga_enter(e, GA_TURN, 8);
+        return;
+    }
+    if (!from_back && !e->ga_lay_cd && embryos_out() < 5) {
+        int32_t ax = e->x + ((2000 * cosLerp(e->dir)) >> 12), az = e->z - ((2000 * sinLerp(e->dir)) >> 12);
+        if (!game_blocked(e->x, e->z, ax, az, e->floor_y)) {
+            ga_enter(e, GA_LAY, 5);
+            return;
+        }
+    }
+    if (!front) {
+        if (from_back && d > 3500)
+            ga_enter(e, GA_WALK, 1);
+        return;
+    }
+    if (d < 3500 && p->can_grab && !e->ga_lock && (!from_back || e->ga_count < 30)) {
+        ga_enter(e, GA_SWIPE, 4);
+        return;
+    }
+    if (from_back && d > 3500)
+        ga_enter(e, GA_WALK, 1);
+    else if (!from_back && d < 2000)
+        ga_enter(e, GA_BACK, 1);
+}
+
+static void g_adult_tick(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
+{
+    int32_t fwd = 0;
+    ga_leon_x = p->x;
+    ga_leon_z = p->z;
+    if (e->ga_lay_cd)
+        e->ga_lay_cd--;
+    if (e->ga_lock)
+        e->ga_lock--;
+    if (e->ga_busy)
+        e->ga_busy--;
+    switch (e->state) {
+    case GA_WALK: {
+        anim_step(e, &fwd);
+        int rate = fwd >= 16 ? 16 : fwd >= 11 ? 8 : 0;
+        if (rate)
+            e->dir = (e->dir + turn_delta(e, e->has_goal ? e->goal_x : p->x, e->has_goal ? e->goal_z : p->z, rate)) &
+                     32767;
+        if (fwd > 0)
+            move_dir(e, i, e->dir, fwd);
+        if (!p->dead)
+            ga_decide(e, p, d, 0);
+        break;
+    }
+    case GA_TURN: // turns away from Leon, then about
+        e->ga_busy = 2;
+        if (e->sub == 0) {
+            e->sub = 1;
+            e->ga_behind = 0;
+        }
+        e->dir = (e->dir + turn_delta(e, p->x, p->z, -32)) & 32767;
+        if (anim_step(e, &fwd)) {
+            e->dir = (e->dir + 2048 * 8) & 32767;
+            ga_enter(e, GA_WALK, 1);
+        } else if (fwd > 0) {
+            move_dir(e, i, e->dir, fwd);
+        }
+        break;
+    case GA_SWIPE: {
+        e->ga_busy = 2;
+        e->ga_lock = 15;
+        if (e->sub == 0) {
+            e->sub = 1;
+            e->ga_hit = 0;
+            sound_at(e, 3);
+        }
+        int done = anim_step(e, &fwd);
+        if (fwd > 0)
+            move_dir(e, i, e->dir, fwd);
+        if (done) {
+            e->dir = (e->dir + 1024 * 8) & 32767;
+            e->dir = (e->dir + turn_delta(e, p->x, p->z, 16)) & 32767;
+            ga_enter(e, GA_WALK, 1);
+            break;
+        }
+        if (e->key >= 6 && e->key < 30) {
+            e->dir = (e->dir + turn_delta(e, p->x, p->z, 8)) & 32767;
+            if (d > 4500 || !in_cone(e, p->x, p->z, 1224)) {
+                ga_enter(e, GA_WALK, 1);
+                e->ga_lock = 15;
+                break;
+            }
+        }
+        int window = e->key >= 54 && e->key < 76;
+        ga_aim(e, p, 512, window ? 32 : 4);
+        if (window && !e->ga_hit && p->can_grab && (ga_part_near(e, p, 12, 800) || ga_part_near(e, p, 10, 1000))) {
+            int32_t hx, hy, hz;
+            bone_point(e, 12, NULL, &hx, &hy, &hz);
+            game_blood(0, hx, hy, hz, e->dir, 20, p->y);
+            e->ga_hit = 1;
+            g2_hit_leon(e, p, 30, 6);
+        }
+        break;
+    }
+    case GA_LAY: {
+        e->ga_busy = 2;
+        if (e->sub == 0) {
+            e->sub = 1;
+            e->ga_count = 120;
+            ga_lay_one(e, (int16_t)(e->dir / 8 - ((int)rnd() - 128)));
+        }
+        anim_step(e, NULL);
+        if (embryos_out() < 5) {
+            if (e->ga_count == 100)
+                ga_lay_one(e, (int16_t)(e->dir / 8 - (int)rnd() + 2176));
+            else if (e->ga_count == 90 && (rnd() & 1))
+                ga_lay_one(e, (int16_t)(e->dir / 8 - (int)rnd() + 1152));
+        }
+        if (e->ga_count-- <= 0) {
+            int cd = (int)rnd() + 300;
+            e->ga_lay_cd = embryos_out() < 4 ? cd / 2 : cd;
+            if (d < 4000 && p->can_grab)
+                ga_enter(e, GA_SWIPE, 4);
+            else
+                ga_enter(e, GA_WALK, 1);
+        }
+        break;
+    }
+    case GA_BACK: { // its walk backward, 10 a frame
+        if (e->sub == 0) {
+            e->sub = 1;
+            e->ga_count = 130 + (rnd() & 31);
+        }
+        const ModelAnim *a = &anim_model(e)->anims[e->anim];
+        if (a->count)
+            e->key = (e->key + a->count - 1) % a->count;
+        move_dir(e, i, (e->dir + 16384) & 32767, 10);
+        if (e->ga_count-- <= 0) {
+            ga_enter(e, GA_WALK, 1);
+            break;
+        }
+        if (!p->dead)
+            ga_decide(e, p, d, 1);
+        break;
+    }
+    case GA_REEL:
+        if (e->sub == 0) { // its move 2, then 9 for 180 frames
+            e->sub = 1;
+            e->ga_busy = 82;
+        }
+        if (e->sub == 1) {
+            if (anim_step(e, NULL)) {
+                set_anim(e, SET_GAIT, 9, 0);
+                e->sub = 2;
+                e->ga_count = 180;
+            }
+            break;
+        }
+        anim_step(e, NULL);
+        if (!(e->ga_count & 1)) { // stumbling about
+            e->dir = (e->dir + (32 - (int)(rnd() & 63)) * 8) & 32767;
+            move_dir(e, i, (int16_t)(rnd() << 7), 16 - (int)(rnd() & 31) > 0 ? 16 - (int)(rnd() & 31) : 0);
+        }
+        if (e->ga_count-- <= 0) {
+            e->ga_meter = 6;
+            ga_enter(e, GA_WALK, 1);
+        }
+        break;
+    case ST_DYING: // moves 7, 14 and 16 (0x801052a8)
+        if (e->sub == 0) {
+            set_anim(e, SET_GAIT, 7, 0);
+            sound_at(e, 2);
+            e->sub = 1;
+        }
+        if (anim_step(e, NULL)) {
+            if (e->sub == 1) {
+                set_anim(e, SET_GAIT, 14, 0);
+                e->sub = 2;
+            } else if (e->sub == 2) {
+                set_anim(e, SET_GAIT, 16, 0);
+                e->sub = 3;
+            } else {
+                e->state = ST_DEAD;
+            }
+        }
+        break;
+    default:
+        anim_step(e, NULL);
+        break;
+    }
+}
+
+static void g_adult_shot(Enemy *e)
+{
+    if (e->hp < 0) {
+        if (e->state == GA_TURN) { // 0x8010525c: not while it turns about
+            e->hp = 0;
+            return;
+        }
+        dog_enter(e, ST_DYING);
+        return;
+    }
+    sound_at(e, 5);
+    if (e->state == ACT_IDLE) {
+        ga_enter(e, GA_WALK, 1);
+        return;
+    }
+    if (e->state == GA_REEL)
+        return;
+    int w = ga_weapon > 0 && ga_weapon < 19 ? ga_weapon : 2;
+    if (e->ga_meter) {
+        e->ga_meter -= ga_weapon_points[w];
+        if (e->ga_meter <= 0)
+            e->ga_meter = 1;
+        Enemy v = *e;
+        v.dir = (e->dir - 574 * 8) & 32767;
+        if (e->ga_meter == 1 && in_cone(&v, ga_leon_x, ga_leon_z, 450))
+            e->ga_meter = 0;
+    }
+    if (!e->ga_busy && e->ga_meter == 0)
+        ga_enter(e, GA_REEL, 2);
+}
+
 static void actor_tick(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
 {
+    if (is_g_adult(e)) {
+        if (e->state == ACT_IDLE) {
+            anim_step(e, NULL);
+            if (!flag_get(2, 7) && !e->plc.active && d < 8000 && !p->dead)
+                ga_enter(e, GA_WALK, 1);
+            return;
+        }
+        if ((flag_get(2, 7) || e->plc.active) && e->state != ST_DYING)
+            return; // a scene has him
+        g_adult_tick(e, i, p, d);
+        return;
+    }
     const struct ActorType *a = actor_of(e);
     int32_t fwd;
     if (is_super_tyrant(e) || (types[e->type].type == TYPE_SUPER_TYRANT && e->answer[0])) {
@@ -6375,6 +6747,10 @@ static void actor_tick(Enemy *e, int i, const EnemyTarget *p, uint32_t d)
 
 static void actor_shot(Enemy *e)
 {
+    if (is_g_adult(e)) {
+        g_adult_shot(e);
+        return;
+    }
     const struct ActorType *a = actor_of(e);
     if (e->hp < 0) {
         dog_enter(e, ST_DYING);
@@ -6479,11 +6855,52 @@ int enemy_plc(int slot, const uint8_t *ins)
     return 1;
 }
 
+// Where bone stands in the keyframe the character shows (anim / key of its
+// set, not eased), relative to its place, turned by its facing: x and z.
+static void key_bone_point(const Enemy *e, int bone, int32_t out[2])
+{
+    const Model *fm = anim_model(e);
+    const Model *m = &types[e->type].model;
+    out[0] = out[1] = 0;
+    if (e->anim >= fm->header->num_anims || bone >= m->header->num_bones)
+        return;
+    const ModelAnim *a = &fm->anims[e->anim];
+    if (!a->count)
+        return;
+    int key = e->key < a->count ? e->key : a->count - 1;
+    int frame = ANIM_FRAME(fm->anim_pool[a->first + key]);
+    int32_t t[3];
+    chain_point(m, model_frame_rot(fm, frame), fm->header->num_bones, model_frame(fm, frame)->offset, bone, NULL, t);
+    int32_t cd = cosLerp(e->dir), sd = sinLerp(e->dir);
+    out[0] = (cd * t[0] + sd * t[2]) >> 12;
+    out[1] = (-sd * t[0] + cd * t[2]) >> 12;
+}
+
+// plc flags 1 / 2 (0x80015ba0, after each tick of routine 4): a foot (PS1
+// part 4, or part 7 for 2: the end of the bone chains 0-1-2-3-4 and
+// 0-1-5-6-7) stays where it stood, the body moves by its slide instead; room
+// 114's zombie steps forward so, setting the foot it stands on by turns.
+#define PLC_FOOT_A 4
+#define PLC_FOOT_B 7
+
 static void plc_step(Enemy *e, int slot)
 {
+    int lock = e->plc.active ? e->plc.flags & 3 : 0;
+    int32_t before[2][2], bx = e->x, bz = e->z;
+    for (int k = 0; k < 2; k++)
+        if (lock >> k & 1)
+            key_bone_point(e, k ? PLC_FOOT_B : PLC_FOOT_A, before[k]);
     PlcBody b = enemy_body(e, slot);
     plc_tick(&e->plc, &b);
     enemy_body_back(e, &b);
+    for (int k = 0; k < 2; k++)
+        if (lock >> k & 1) {
+            int32_t after[2];
+            key_bone_point(e, k ? PLC_FOOT_B : PLC_FOOT_A, after);
+            // the foot where it stood before the tick (bx, bz: the body then)
+            e->x = bx + before[k][0] - after[0];
+            e->z = bz + before[k][1] - after[1];
+        }
 }
 
 // ---------------------------------------------------------------- path zones
@@ -7145,8 +7562,104 @@ void enemy_set_motion(int slot, int motion, int ctr)
     }
 }
 
+// sce_parts_bomb (scd_op_7a, 0x80054c58): pad, part, RGB, s16 x 5 - sets bits
+// 0x4a of the work object's part (172 bytes at obj+0x198), its colour (+112)
+// and the burst's numbers (+152 .. +164): the part bursts. sce_parts_down
+// (scd_op_7b, 0x80054d10): part, s16 x 3, u8, s16 x 3 - bits 0x1062, the
+// fall's numbers (+56 .. +66, +121): the part comes off and drops. Room 101's
+// zombie loses its arm to Kendo's shotgun so (part 12 bursts, 13 falls), 500
+// another part. Here: the burst part is left out with a spray of blood, the
+// dropped one and its children fall in their pose to the floor (the PS1's
+// numbers for the flight are not used).
+void enemy_part_bomb(int slot, int part)
+{
+    if (slot == 0xFF)
+        slot = PARTNER_SLOT;
+    if (slot < 0 || slot >= MAX_ENEMIES || !present(&enemies[slot]) || part < 0 || part >= 16)
+        return;
+    Enemy *e = &enemies[slot];
+    if (part >= types[e->type].model.header->num_bones)
+        return;
+    if (!e->pose_valid)
+        update_pose(e);
+    int32_t x, y, z;
+    bone_point(e, part, NULL, &x, &y, &z);
+    e->hide_bones |= 1u << part;
+    game_blood(0, x, y, z, e->dir, 30, e->floor_y);
+}
+
+void enemy_part_down(int slot, int part)
+{
+    if (slot == 0xFF)
+        slot = PARTNER_SLOT;
+    if (slot < 0 || slot >= MAX_ENEMIES || !present(&enemies[slot]) || part < 0 || part >= 16)
+        return;
+    Enemy *e = &enemies[slot];
+    const EnemyType *t = &types[e->type];
+    if (part >= t->model.header->num_bones)
+        return;
+    uint16_t mask = 0;
+    for (int b = 0; b < t->model.header->num_bones && b < 16; b++) // part and all below it
+        for (int a = b; a >= 0; a = t->model.bones[a].parent)
+            if (a == part) {
+                mask |= 1u << b;
+                break;
+            }
+    if (!e->pose_valid)
+        update_pose(e);
+    Piece *pc = &pieces[slot];
+    pc->on = 1;
+    pc->landed = 0;
+    pc->mask = mask;
+    pc->x = e->x;
+    pc->y = e->y;
+    pc->z = e->z;
+    pc->dir = e->dir;
+    pc->drop = 0;
+    pc->fall_v = 0;
+    memcpy(pc->rot, e->pose_rot, sizeof(pc->rot));
+    memcpy(pc->ofs, e->pose_ofs, sizeof(pc->ofs));
+    e->hide_bones |= mask;
+}
+
+// a dropped part falls until its lowest joint is near the floor
+static void pieces_tick(void)
+{
+    for (int i = 0; i < MAX_ENEMIES; i++) {
+        Piece *pc = &pieces[i];
+        if (!pc->on || pc->landed)
+            continue;
+        const Enemy *e = &enemies[i];
+        if (!e->active) {
+            pc->on = 0;
+            continue;
+        }
+        const Model *m = &types[e->type].model;
+        int32_t low = INT32_MIN;
+        for (int b = 0; b < m->header->num_bones && b < 16; b++)
+            if (pc->mask >> b & 1) {
+                int32_t t3[3];
+                chain_point(m, &pc->rot[0][0], POSE_BONES, pc->ofs, b, NULL, t3);
+                if (pc->y + t3[1] > low)
+                    low = pc->y + t3[1];
+            }
+        if (low == INT32_MIN) {
+            pc->landed = 1;
+            continue;
+        }
+        pc->fall_v += 30;
+        pc->drop += pc->fall_v;
+        int32_t rest = e->floor_y - 80; // a joint lies about this high
+        if (low + pc->drop >= rest) {
+            pc->drop = rest - low;
+            pc->landed = 1;
+        }
+    }
+}
+
 void enemy_tick(const EnemyTarget *p)
 {
+    pieces_tick();
     if (arm_cooldown)
         arm_cooldown--;
     if (arm_sound_pause)
@@ -7197,8 +7710,12 @@ void enemy_tick(const EnemyTarget *p)
                            10 + (rnd() & 15), e->y);
             e->bleed--;
         }
-        if (e->state == ST_DEAD)
+        enemy_neck_tick(e);
+        if (e->state == ST_DEAD) {
+            if (e->body_step && e->body_step != BODY_STILL && is_zombie(e))
+                body_tick(e);
             continue;
+        }
         if (e->plc.active) {
             plc_step(e, i);
             continue;
@@ -7808,6 +8325,25 @@ static void shadow_quad(int32_t x, int32_t y, int32_t z, int16_t dir, int w, int
     glColor3b(255, 255, 255);
 }
 
+// a dropped part: its bones alone, in the pose it fell in, lower by its drop
+static void draw_piece(const EnemyType *t, const Enemy *e, const Piece *pc)
+{
+    Enemy g = *e;
+    memcpy(g.pose_rot, pc->rot, sizeof(pc->rot));
+    memcpy(g.pose_ofs, pc->ofs, sizeof(pc->ofs));
+    g.hide_bones = (uint16_t)~pc->mask;
+    g.dark_parts = 0;
+    g.flinch = 0;
+    memset(&g.neck, 0, sizeof(g.neck));
+    glPushMatrix();
+    glTranslatef32(pc->x, pc->y + pc->drop, pc->z);
+    glRotateYi(pc->dir);
+    for (int b = 0; b < t->model.header->num_bones; b++)
+        if (t->model.bones[b].parent < 0)
+            draw_bone(t, &g, b);
+    glPopMatrix(1);
+}
+
 // The legs left standing: the zombie's model in their pose from key 20,
 // all but parts 1-7 left out.
 static void draw_legs(const EnemyType *t, const Enemy *e, const Legs *l)
@@ -7894,6 +8430,7 @@ int enemy_hit(int32_t x, int32_t y, int32_t z, int16_t dir, int range, int weapo
         if (e->hp < 32767)
             e->hp -= damage[box];
         game_blood(0, e->x, e->y - 1200, e->z, dir, 20, e->floor_y);
+        ga_weapon = weapon;
         actor_shot(e);
         return best;
     }
@@ -8083,6 +8620,50 @@ int enemy_hit(int32_t x, int32_t y, int32_t z, int16_t dir, int range, int weapo
     return best;
 }
 
+// A zombie that fell dead goes to routine 7 (0x8010a380, states 0x8010019c):
+// it lies in pose 0x17 (0x16 fallen backward) and one in three twitches -
+// the pose's ten keys again, 40 times after 1-16 frames, then 30 times after
+// 60-123 frames, then it lies still (the others lie still at once).
+static void body_start(Enemy *e)
+{
+    set_anim(e, SET_MAIN, e->fall_back ? A_LIE - 1 : A_LIE, 0);
+    e->body_count = 40;
+    e->body_step = rnd() % 3 == 0 ? 1 : BODY_STILL;
+}
+
+static void body_tick(Enemy *e)
+{
+    switch (e->body_step) {
+    case 1: // the twitch
+    case 5:
+        if (anim_step(e, NULL))
+            e->body_step++;
+        break;
+    case 2: // 0x8010a54c
+        e->body_wait = (rnd() & 15) + 1;
+        e->body_step = 3;
+        if (e->body_count-- == 0) {
+            e->body_step = 4;
+            e->body_count = 30;
+        }
+        break;
+    case 3:
+        if (e->body_wait-- == 0)
+            e->body_step = 1;
+        break;
+    case 4:
+        if (e->body_wait-- == 0)
+            e->body_step = 5;
+        break;
+    case 6: // 0x8010a5fc
+        e->body_wait = (rnd() & 63) + 60;
+        e->body_step = 4;
+        if (e->body_count-- == 0)
+            e->body_step = BODY_STILL;
+        break;
+    }
+}
+
 // falling (dead or knocked down), lying, getting up
 static void fallen(Enemy *e, int i)
 {
@@ -8094,6 +8675,7 @@ static void fallen(Enemy *e, int i)
             if (e->state == ST_DYING) {
                 e->state = ST_DEAD;
                 start_pool(e, i);
+                body_start(e);
                 return;
             }
             e->sub = 2;
@@ -8127,8 +8709,13 @@ static void draw_bone(const EnemyType *t, const Enemy *e, int bone)
     if (bone == 1 && bend)
         glRotateZi(bend * 8);
     glRotateXi(rot[0]);
-    glRotateYi(rot[1]);
-    glRotateZi(rot[2]);
+    if (bone == BONE_HEAD && (e->neck.turn[0] || e->neck.turn[1]) && is_person(e)) {
+        glRotateYi((rot[1] + e->neck.turn[0] * 8) & 32767);
+        glRotateZi((rot[2] + e->neck.turn[1] * 8) & 32767);
+    } else {
+        glRotateYi(rot[1]);
+        glRotateZi(rot[2]);
+    }
     if (bone == 0 && bend)
         glRotateZi(-bend * 8);
     for (int p = 0; p < t->pages && !(bone < 16 && (e->hide_bones >> bone & 1)) && !(bone < 32 && (e->dark_parts >> bone & 1));
@@ -8149,7 +8736,7 @@ static void draw_bone(const EnemyType *t, const Enemy *e, int bone)
 }
 
 // parts_set (scd_op_6e, 0x80051d4c): pad, part, field, u16 value into the
-// part's record (124 bytes each from obj+0x198). Fields 2 / 3 are its colour
+// part's record (172 bytes each from obj+0x198). Fields 2 / 3 are its colour
 // (+112 red | green << 8, +114 blue: the GPU code of its polygons, 0x8002c9ac):
 // room 201 turns the licker passing outside the window black part by part,
 // so it vanishes in the dark. A part near black is left out here (the DS
@@ -8166,6 +8753,128 @@ void enemy_part_set(int slot, int part, int field, int value)
         int dark = (value & 0xFF) < 8 && (value >> 8 & 0xFF) < 8;
         e->dark_parts = dark ? e->dark_parts | 1u << part : e->dark_parts & ~(1u << part);
     }
+}
+
+// ---------------------------------------------------------------- plc_neck
+// Modes (table 0x800111e0) as obj+0x1c0 bits, always with 0x80: 0 -> 0x12
+// (the head as the animation has it), 1 -> 0x04 (looks at a point, or with
+// p[1] = 0x8000 at character p[0]), 2 -> 0x08 (p[1] / p[2]: a fixed turn from
+// the facing and up / down), 3 -> 0x2a (nods p[0] times), 4 -> 0x58 (shakes
+// its head p[0] times), 5 -> 0x04 at a character (p[0] 1 Leon, 2 the partner,
+// else enemy p[1]), 6 -> 0 (looks about on its own again). Bit 1: no turn at
+// all. Speeds: bytes 8 / 9 (else 0x60 a frame); clamps 0x200 / 0x138.
+#define NECK_CLAMP_Y 0x200
+#define NECK_CLAMP_Z 0x138
+#define NECK_DEFAULT_SPEED 0x60
+#define NECK_AT_CHARACTER (-32768)
+
+void neck_set(Neck *n, const uint8_t *ins)
+{
+    static const uint8_t bits[7] = { 0x12, 0x04, 0x08, 0x2a, 0x58, 0x04, 0x00 };
+    int mode = ins[1] < 7 ? ins[1] : 6;
+    n->mode = mode == 6 ? 0 : 0x80 | bits[mode];
+    for (int k = 0; k < 3; k++)
+        n->p[k] = (int16_t)(ins[2 + 2 * k] | ins[3 + 2 * k] << 8);
+    if (mode == 5) { // 0x800532a8: the character's number
+        n->p[0] = n->p[0] == 1 ? 0 : n->p[0] == 2 ? 1 : n->p[1] + 2;
+        n->p[1] = NECK_AT_CHARACTER;
+    }
+    n->speed[0] = ins[8];
+    n->speed[1] = ins[9];
+}
+
+static int neck_angle(int a) { return ((a + 2048) & 4095) - 2048; }
+static int neck_clamp(int v, int m) { return v > m ? m : v < -m ? -m : v; }
+
+int game_character_head(int k, int32_t out[3]); // main.c: 0 Leon, 1 the partner, 2 + slot an enemy
+
+void neck_step(Neck *n, const int32_t head[3], int body, const int anim[2])
+{
+    if (!(n->mode & 0x80) || (n->mode & 1))
+        return;
+    int rel[2] = { 0, 0 }; // the head's turn from the facing / up-down wanted
+    int32_t t[3];
+    if ((n->mode & 4) && (n->p[1] != NECK_AT_CHARACTER || game_character_head(n->p[0], t))) {
+        if (n->p[1] != NECK_AT_CHARACTER) {
+            t[0] = n->p[0];
+            t[1] = n->p[1];
+            t[2] = n->p[2];
+        }
+        float dx = (float)(t[0] - head[0]), dz = (float)(t[2] - head[2]);
+        int yaw = (int)(atan2f(-dz, dx) * 4096.0f / 6.2831853f);
+        int up = (int)(atan2f((float)(head[1] - t[1]), sqrtf(dx * dx + dz * dz)) * 4096.0f / 6.2831853f);
+        rel[0] = neck_angle(yaw - body);
+        rel[1] = -up;
+    }
+    if (n->mode & 8) {
+        rel[0] = n->p[1];
+        rel[1] = n->p[2];
+    }
+    if (n->mode & 0x40) { // shaking: p[1] goes from one side to the other
+        if (!n->p[2]) {
+            n->p[2] = 1;
+            n->p[1] = NECK_CLAMP_Y - 128;
+        }
+        rel[0] = n->p[1];
+    }
+    if (n->mode & 0x20) { // nodding: p[1] between down and level
+        if (!n->p[2]) {
+            n->p[2] = 1;
+            n->p[1] = NECK_CLAMP_Z;
+        }
+        rel[1] = n->p[1];
+    }
+    int want[2];
+    want[0] = (n->mode & 2) ? 0 : neck_angle(neck_clamp(neck_angle(rel[0]), NECK_CLAMP_Y) - anim[0]);
+    want[1] = (n->mode & 0x10) ? 0 : neck_angle(neck_clamp(neck_angle(rel[1]), NECK_CLAMP_Z) - anim[1]);
+    for (int k = 0; k < 2; k++) {
+        int speed = n->speed[k] ? n->speed[k] : NECK_DEFAULT_SPEED;
+        int d = neck_angle(want[k] - n->turn[k]);
+        n->turn[k] += neck_clamp(d, speed);
+        int there = abs(d) <= speed;
+        if (there && k == 0 && (n->mode & 0x40)) {
+            n->p[1] = -n->p[1];
+            if (--n->p[0] <= 0)
+                n->mode = 0x92;
+        }
+        if (there && k == 1 && (n->mode & 0x20)) {
+            n->p[1] = n->p[1] ? 0 : NECK_CLAMP_Z;
+            if (--n->p[0] <= 0)
+                n->mode = 0x92;
+        }
+    }
+}
+
+void enemy_neck_set(int slot, const uint8_t *ins)
+{
+    if (slot == 0xFF)
+        slot = PARTNER_SLOT;
+    if (slot >= 0 && slot < MAX_ENEMIES && enemies[slot].active)
+        neck_set(&enemies[slot].neck, ins);
+}
+
+// the head part's place of a character (a scene looks at it)
+int enemy_head_point(int slot, int32_t out[3])
+{
+    return enemy_look_point(slot == 0xFF ? PARTNER_SLOT : slot, &out[0], &out[1], &out[2]);
+}
+
+// a person's head turned as the scene wants it (people only: their part 8 is the head)
+static void enemy_neck_tick(Enemy *e)
+{
+    if (!(e->neck.mode & 0x80)) {
+        for (int k = 0; k < 2; k++) // back to the animation's head
+            e->neck.turn[k] -= neck_clamp(e->neck.turn[k], NECK_DEFAULT_SPEED);
+        return;
+    }
+    if (!is_person(e) || types[e->type].model.header->num_bones <= BONE_HEAD)
+        return;
+    if (!e->pose_valid)
+        update_pose(e);
+    int32_t head[3];
+    bone_point(e, BONE_HEAD, NULL, &head[0], &head[1], &head[2]);
+    int anim[2] = { e->pose_rot[BONE_HEAD][1] / 8, e->pose_rot[BONE_HEAD][2] / 8 };
+    neck_step(&e->neck, head, e->dir / 8 + e->pose_rot[0][1] / 8, anim);
 }
 
 // where a point of a part is in the room (main.c: a carried object let go, super_reset)
@@ -8189,6 +8898,7 @@ int camera_occluded(int32_t x, int32_t y, int32_t z);
 // main.c: (x, z) inside the view area of the shown camera
 int camera_view_area(int32_t x, int32_t z);
 extern int cull_models;  // main.c: POLY_CULL_* that drops faces turned away
+int game_light_character(int32_t x, int32_t y, int32_t z); // main.c: the room lights, POLY_FORMAT_LIGHTn bits
 
 void enemy_draw(int reserve_vertices, int reserve_polygons)
 {
@@ -8239,7 +8949,7 @@ void enemy_draw(int reserve_vertices, int reserve_polygons)
             continue; // a cheaper one further back may still fit
         if (!e->pose_valid)
             update_pose(e);
-        glPolyFmt(POLY_ALPHA(31) | cull_models | POLY_ID(3 + order[k]));
+        glPolyFmt(POLY_ALPHA(31) | cull_models | POLY_ID(3 + order[k]) | game_light_character(e->x, e->y, e->z));
         glPushMatrix();
         glTranslatef32(e->x, e->y, e->z);
         if (e->roll)
@@ -8254,6 +8964,8 @@ void enemy_draw(int reserve_vertices, int reserve_polygons)
         glPopMatrix(1);
         if (legs[order[k]].on)
             draw_legs(t, e, &legs[order[k]]);
+        if (pieces[order[k]].on)
+            draw_piece(t, e, &pieces[order[k]]);
         while (GFX_BUSY)
             ;
         e->cost_v = GFX_VERTEX_RAM_USAGE - v0;

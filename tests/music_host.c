@@ -27,6 +27,23 @@ static int soundPlaySample(const void *d, int fmt, uint32_t size, uint32_t rate,
     return -1;
 }
 static void soundKill(int ch) { if (ch >= 0 && ch < HOST_CHANNELS) ch_used[ch] = 0; kills++; }
+typedef int SoundFmt;
+typedef enum { SoundMode_Manual, SoundMode_Repeat, SoundMode_OneShot } SoundMode;
+#define SOUND_START 0x80u
+static unsigned soundTimerFromHz(unsigned hz) { return hz; }
+static int host_loop_bad; // a loop that would run past its sample (loop point + length > size)
+// the music's own channel ch: a sample played once frees it when it ends
+static void soundPreparePcm(unsigned ch, unsigned vol, unsigned pan, unsigned timer, SoundMode mode, SoundFmt fmt,
+                            const void *sad, unsigned pnt, unsigned len)
+{
+    (void)vol; (void)pan; (void)sad; (void)pnt;
+    ch &= 0x1F;
+    if (ch >= HOST_CHANNELS)
+        return;
+    ch_used[ch] = 1;
+    ch_end[ch] = mode == SoundMode_Repeat ? 0 : host_frame + (int)((pnt + len) * 4 / (fmt == SoundFormat_8Bit ? 1 : 2) * 60 / (timer ? timer : 1)) + 1;
+    plays++;
+}
 static void soundChSetVolume(unsigned ch, unsigned v) { (void)ch; (void)v; vol_msgs++; }
 static void soundSetPan(int ch, int p) { (void)ch; (void)p; vol_msgs++; }
 static void soundSetFreq(int ch, uint32_t f) { (void)ch; (void)f; vol_msgs++; }

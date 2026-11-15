@@ -185,7 +185,12 @@ after the state routine:
 
 **DS port:** `update_neck` in `main.c` (after the pose each tick) and `enemy_look_target` /
 `enemy_look_point` in `enemy.c`; the head is turned while drawing part 8. Not while hurt,
-held, dead or under a script (the turn then eases back); `plc_neck` stays ignored. The
+held, dead or under a script (the turn then eases back). `plc_neck` (`0x800531d8`, modes by the
+table `0x800111e0`: 0 `0x12` the animation's head, 1 `0x04` a point or (p[1] `0x8000`) a
+character, 2 `0x08` a fixed turn p[1] / up-down p[2], 3 `0x2a` nods p[0] times, 4 `0x58` shakes
+p[0] times, 5 `0x04` at a character - p[0] 1 Leon, 2 the partner, else enemy p[1] - 6 back to
+looking about; bytes 8 / 9 the speeds, `obj+0x1c0 |= 0x80`) is ported for Leon and the people
+of the scenes (`neck_set` / `neck_step` in `enemy.c`, `Enemy.neck`, `player_neck`). The
 target's head is part 8 of people, zombies and lickers, the root of other kinds.
 
 ---
