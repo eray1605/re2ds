@@ -561,7 +561,7 @@ Texts: a glyph table at `0x8011c914` (10 bytes: tpage, clut, u, v, w, h, screen 
 sits at VRAM x 512, its palettes from y 480), strings of glyph numbers at `0x8011ccc4` (0xFF
 ends one; A = 0 … Y = 22, digits 23-32, `:` 36, space 38). **DS port:** `ending.c` (steps 0-5
 and the end; no rewards, clear data or extra modes), `tools/ending2ds.py` (`ending/pic0..4.bin`,
-`ending/text.bin`), play time and sprays in the saves (version 5), the debug menu's X starts it.
+`ending/text.bin`), play time and sprays in the saves (version 5).
 
 ## 9. Item use, reloading, effects of a shot
 

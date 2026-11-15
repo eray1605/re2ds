@@ -170,9 +170,8 @@ The project had many sessions; the earlier ones are only summarised. All of it i
 - Extractor for the PS1 ISO (`extract_psx_iso.py`), 125 rooms converted (`rdt2json.py` ->
   `room2ds.py`), backgrounds (`bss2ppm`, `bg2ds.py`: 256x192, 255 colours, LZ77), masks
   (`bssmask.py`, `mask2ds.py`), doors with their animations (`do2ds.py`, `door.c`), floors,
-  stairs, slopes, collision, debug warp menu (SELECT; Leon arrives where a neighbouring room's
-  door into the room puts him, the converter's spawn point only in 11C, 11D, 40C, 40F, 500, 509
-  and 600).
+  stairs, slopes, collision (the debug warp menu on SELECT and its status screen are gone since
+  November 2026).
 
 ### 3.2 Phase 2: script system
 - `script.c` interprets the SCD opcodes with the sizes taken from the PS1 handlers. Threads,
@@ -858,7 +857,7 @@ Non-static and static function definitions, `file:line name`. Use as an index.
 2178  map_load                2201  map_draw              2232  map_live
 2269  open_files              2287  any_save              2298  pick_slot
 2320  use_typewriter          2379  load_game             2412  show_title
-2432  title_screen            2474  start_game            2493  warp_to
+2432  title_screen            2474  start_game          
 2506  use_door                2567  trigger               2625  game_aot_on
 2633  check_aots              2664  move_forward          2732  is_auto
 2738  weapon_in_hand          2751  apply_weapon_texture  2775  update_weapon_model
