@@ -79,7 +79,26 @@ int enemy_blocks_player(int32_t from_x, int32_t from_z, int32_t x, int32_t z);
 // main.c: draws the room objects part bone of character who carries (0 Leon, 1 the partner, 2 + slot)
 void game_draw_attached(int who, int bone);
 int enemy_part_point(int slot, int bone, const int32_t local[3], int32_t out[3]);
+void enemy_part_bomb(int slot, int part);   // sce_parts_bomb: the part bursts
+void enemy_part_down(int slot, int part);   // sce_parts_down: the part drops off
 void enemy_part_set(int slot, int part, int field, int value); // parts_set
+
+// plc_neck (scd_op_41, 0x800531d8) and the head turn it drives (FUN_80017160):
+// mode = obj+0x1c0 (0x80 | the bits of the scene's mode; 0 = looking about on
+// its own), p = obj+0x170/2/4, speed = the neck part's +0xa4/+0xa5, turn = its
+// +0x98/+0x9a (RE2 units, added to the head's y / z turn).
+typedef struct {
+    uint8_t mode;
+    uint8_t speed[2];
+    int16_t p[3];
+    int16_t turn[2];
+} Neck;
+void neck_set(Neck *n, const uint8_t *ins);
+// one tick of a scene's head turn: head = the head part's place, body = the
+// facing (RE2 units) incl. the root's turn, anim = the head's own y / z turn
+void neck_step(Neck *n, const int32_t head[3], int body, const int anim[2]);
+void enemy_neck_set(int slot, const uint8_t *ins);
+int enemy_head_point(int slot, int32_t out[3]);
 // an enemy stands in the box (middle, half sizes): a pushed room object stops
 int enemy_in_box(int32_t cx, int32_t cy, int32_t cz, int32_t hx, int32_t hy, int32_t hz);
 extern int enemy_spawn_calls, enemy_last_error;

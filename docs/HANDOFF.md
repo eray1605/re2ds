@@ -290,7 +290,8 @@ In order of work:
 
 Common:
 - `MAX_ENEMIES 33`: script slots 0-31 like the PS1 (room 40B uses 24) plus `PARTNER_SLOT 32` (sce_em_set slot 0xff); room animation sets only for slots < `RBJ_SLOTS` 16. `MAX_TYPES 4`
-  models loaded at once (texture memory). Models `model/emXX.bin`, `_tex.bin`, `_sets.bin`
+  models loaded at once (texture memory; `load_room` resets all texture memory with
+  `textures_rebuild` so every room starts unfragmented). Models `model/emXX.bin`, `_tex.bin`, `_sets.bin`
   (animation sets: set 0 = first EMD EDD/EMR pair, set 1 = second, set 2 = third).
 - `enemy_spawn` (sce_em_set): flags = variant (byte 4) | status (byte 5) << 8. Status bits:
   0x4000 hold, 0x8000 off (not processed/drawn), 0x2000 on ground, 0x1000 direct target.
@@ -505,6 +506,7 @@ tools/build_assets.sh <extracted disc dir> [ROOM1000 ROOM1010 ...]
 | Leon model | `pld2json.py` + `model2ds.py` | PL0/PLD/PL00.PLD (+ W00) | `model/leon.bin`, `_tex.bin` |
 | Leon per weapon | `plw2ds.py` | PL00Wnn.PLW | `model/leon_wNN.bin` |
 | enemies/characters | `em2ds.py` | SLES_009.72 + CDEMD0.EMS | `model/emXX.bin`, `_tex`, `_sets` |
+| room lights | `lit2ds.py` | PL0/RDT/*.RDT (section 9) | `room/<rdt>_lit.bin` |
 | doors | `vab2ds.py`, `do2ds.py` | COMMON/DOOR/DOORnn.DO2 | `sound/doorNN.bin`, `door/doorNN_*` |
 | enemy sounds | `enemse2ds.py` | COMMON/SOUND/ENEMSE.VBS | `sound/enemseNN.bin` |
 | core sounds/voice | `vab2ds.py --vb` | CORE00.EDH/VB | `sound/core00.bin` |
@@ -695,7 +697,8 @@ Specific risks:
    ported.
 7. Alligator (0x23, room 40A0): ported (course, cylinder, explosion -> flag 5:0x1e); its camera
    cuts and the exact bite are not.
-8. G (Birkin 0x30-0x36), cockroaches (0x29): placeholder AI; Ivy's vines and damage values are approximations.
+8. G (Birkin 0x30-0x36), cockroaches (0x29): placeholder AI (the G adult 0x28 of 303 has its
+   own now, `docs/enemy-others.md` section 16); Ivy's vines and damage values are approximations.
    Moth spores, moth modes 2/6/7/9/12 and the larva spawners (room 614) are not ported.
 9. Lickers and spiders on walls and ceilings are ported (`docs/enemy-others.md` sections 4
    and 5) but not tested on the DS yet; the spiders' poison hits at once instead of flying.
@@ -706,6 +709,14 @@ Specific risks:
 12. Ada model looks odd — confirmed identical to disc data; no change needed.
 
 ---
+
+13. **Main RAM is tight** (about 3 MB of heap). In room 207 (four zombies, two models, the
+    260 KB enemy sound set 56, MAIN07) a full set left no room: the zombies went silent or
+    unseen, the first licker could be missing on coming back. Since November 2026 the item
+    pictures (`menu/pictures.bin`, 787 KB) and the map pages (`menu/maps.bin`, 167 KB) are read
+    one at a time, and a room's new music banks are read after the old ones are freed
+    (`music_preload`). Keep large files out of RAM (read what is shown), and watch the heap
+    when adding resident data.
 
 ## 10. Next steps (suggested order)
 
@@ -718,8 +729,9 @@ in scenes. What is left:
 2. Release: PR develop -> main, then delete develop (remote + local) and recreate from main.
 3. Leon B through (NEW GAME choice): Mr X's scripted appearances; play it through on the DS.
 4. Ending rest: rewards (special weapons with endless rounds), clear data, extra modes.
-5. Partner AI rest: states 6-10, spiders, her real weapon (`obj[0] >> 29`) and shot sound.
-6. Polish: gore variants (torn upper body, lost arm; the head burst is in: shotgun aimed up from
+5. Partner AI rest: states 6-10, spiders, her shot sound (`obj[0] >> 29` is her aim, not a weapon).
+6. Polish: gore variants (torn upper body, a lost arm in play; the scripts' bursting and dropping
+   parts are in; the head burst is in: shotgun aimed up from
    near, the magnums' killing hit), SPU reverb, the G forms'
    and moths' real AIs, an options menu (volumes, controls); the opcodes still skipped
    (engine-notes section 1, "More opcodes": `plc_neck`, `parts_set`, the lights ...).

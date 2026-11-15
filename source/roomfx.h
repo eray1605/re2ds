@@ -32,6 +32,7 @@ void game_casing_sound(int sound);
 // room collision (main.c): a casing turns round at a wall
 int game_blocked(int32_t from_x, int32_t from_z, int32_t x, int32_t z, int32_t y);
 void roomfx_kill(int id, int type);      // sce_espr_kill
+void roomfx_kill_owner(int kind, int index); // sce_espr_task: an owner's effects (kind 6: all)
 void roomfx_tick(void);                  // once per game tick
 int roomfx_count(void);                  // sprites alive (one quad each)
 void roomfx_draw(const int32_t cam_from[3], const int32_t cam_to[3]);

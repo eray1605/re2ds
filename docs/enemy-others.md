@@ -637,8 +637,33 @@ an answer from them (no `member_cmp 17`), so the scenes run through.
 - **With one** (303's G adult `0x62` and embryos `0x63`/`0x81`/`0x82`, 702's tyrant `0x28`,
   509's `0x33` `0x17`): a plain fight with their own animations, chosen by root motion and
   length (table `actor_types` in `enemy.c`), not while a scene has Leon (flag 2:07).
-  HP from their inits (`sh 0x156`): embryo 1, G adult 450, tyrant 10000, G1 400, `0x33` 750,
+  HP from their inits (`sh 0x156`; EASY when `0x800c77b4 & 0x20`): embryo 1, G adult 600 / EASY
+  450 (`0x80100520`), tyrant 10000, G1 500 / 400 (`0x801004ac`), `0x33` 900 / 750 (`0x801002f8`),
   `0x36` 400, `0x37` −1 (cannot be hurt). Damage values are guesses.
+
+**The G adult of 303** (type `0x28`, CDEMD0.EMS `0x3e1800`, size `0x6660`, at `0x80100000`;
+routines `0x801062e8`: init `0x80100504`, 1 `0x80100b0c`, hit `0x80103d34`, death `0x8010525c`).
+Routine 1 picks the mode by `obj+0x10e & 0x3f` (`0x80106354`): 0 its fight, 1 the scenes'
+(`0x80104d90`); mode 0 runs a decision and an action by state `obj+5` (`0x8010635c` /
+`0x80106384`). Init: HP 600 (EASY 450), a hit count `obj+0x220` = 6, no laying for 10 frames.
+
+| State | Action | What |
+|-------|--------|------|
+| 1 walk | `0x80100d5c` / `0x80100f7c` | move 1 along the zone path to Leon (`FUN_80046fb0`), turning 16 a frame (8 when slow). Leon outside ±1224 for more than 60 frames (counted while outside ±1024) within 6000: 2. The way 2000 ahead free, fewer than five embryos, no pause (`obj+0x218`): 6. Leon within ±824: under 3500 with no swipe pause (`obj+0x21d`) and Leon free: 3, under 2000: 9 |
+| 2 turn | `0x801010a4` | move 8 turning away from Leon (-32), then 2048 about; it cannot die meanwhile (`0x8010525c`: HP 0) |
+| 3 swipe | `0x80101200` | move 4; keys 6–29 turn to Leon at 8 (over 4500 or outside ±1224: back to 1, 15 frames' pause); its facing + 512 kept on him (4, 32 on keys 54–75); keys 54–75 hit when part 12 is within 800 of him or part 10 within 1000: `FUN_8003cf38(30)`, a hurt reaction, sound 6, blood at part 12; at the end it faces 1024 further |
+| 4 / 5 | `0x801015e8` / `0x801016ac` | moves 2 and 3 (not reached from its own code) |
+| 6 lay | `0x80101770` | move 5 for 120 frames: an embryo (`0x8001a8b0` type `0x27`, variant 2) at part 4 at once, one at 100, one more at 90 half the time (while `0x800c77ef` < 5); smoke every 16 frames under 60; then 300 + rand frames without laying (half with fewer than four), within 4000: 3 |
+| 7 | `0x80101b3c` | move 10, a pause (not reached) |
+| 9 back | `0x80102f98` / `0x801030dc` | move 1 backward, 10 a frame, 130–161 frames; decides as 1 (behind ±1524 within 5000 after 90 frames: 2; over 3500: 1) |
+
+States 2, 3, 6 keep it from being stopped (`obj+0x222`). **Hits** (routine 2): the weapon's
+points (`0x80106634`, first byte per weapon 1–18: 2 2 2 2 10 15 4 6 16 16 20 6 2 16 1 4 20 2)
+come off the count, never under 1; at 1 with Leon within ±450 of its facing − 574 it is 0 and
+it reels (`0x80104220`): move 2, then move 9 for 180 frames stumbling about. **Death**
+(`0x801052a8`): moves 7, 14, 16. **DS:** `enemy.c` `g_adult_tick` / `g_adult_shot` (the
+embryos it lays fight with the stand-in of the other actors; the smoke and the per-weapon
+light reactions are not ported).
 
 **The second tyrant of 702** (type `0x2b`, CDEMD0.EMS sector `0x911`; main table
 `0x80104b44`: init `0x80101b20`, routine 1 `0x80101c64`, hit `0x80103230`, death
@@ -721,7 +746,7 @@ aim straight / down, 10 / 14 fire (`0x800115ec`, `0x800115f8`; 13 / 12 up for `0
 |------|--------|------|
 | 0 up | `0x8005debc` | 9 forward, turning to the target at 0xd8; sets "armed" (`obj+0x21c & 0x4000`) and a delay of 7 (`obj+0x14e`) |
 | 1 aim | `0x8005e0c4` / `0x8005e154` | not armed: 3. Straight, or down once the delay is over (`0x8005dfdc`): the target hit-locked (`+0x1d3`) or dead: 3; standing: fire; crawling: fire in the odd modes, else 3. The aim animation up to 30 frames, then 3 |
-| 2 fire | `0x8005e228` | the shot (`FUN_8003dd58` / `FUN_8003dd8c` with `obj[0] >> 29` as the weapon), fire and flash at her hand (`0x030a0e00`, `0x01000e00` at 138 / 615 / 8, part 11); armed again only when it hit; at the end 1 |
+| 2 fire | `0x8005e228` | the shot (`FUN_8003dd58` / `FUN_8003dd8c` with `obj[0] >> 29`: not a weapon but the aim - `0x8003f8b4` copies bits 13-15 of `obj+0x154`, up / straight / down, into bits 29-31 of `obj[0]`), fire and flash at her hand (`0x030a0e00`, `0x01000e00` at 138 / 615 / 8, part 11); armed again only when it hit; at the end 1 |
 | 3 down | `0x8005e44c` | 9 backwards from key 1 (`FUN_800289d4` flags `0x10000`), then state 0 and 30 frames (`obj+0x22a`) before she raises it again |
 
 So she fires every 16 frames at a standing zombie while her shots hit, and stops when it goes

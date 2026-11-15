@@ -72,7 +72,7 @@ def load_texture(path, npages):
 
 def decode_gx(words):
     """Packed GX FIFO -> list of polygons [(x,y,z,s,t), ...]."""
-    nparams = {0x00: 0, 0x20: 1, 0x22: 1, 0x23: 2, 0x40: 1, 0x41: 0}
+    nparams = {0x00: 0, 0x20: 1, 0x21: 1, 0x22: 1, 0x23: 2, 0x40: 1, 0x41: 0}
     polys, cur, mode, tex = [], [], 0, (0, 0)
     i = 0
     while i < len(words):

@@ -11,6 +11,8 @@ void sound_bank_free(void *bank);
 int sound_play(const void *bank, int note, int volume, int pan);
 // Length in DS frames (60 Hz) of the sample for note, 0 if none.
 int sound_frames(const void *bank, int note);
+// a DS channel of the effects' (13-15; voice: 15, for a voice clip or a movie)
+int sound_channel(int voice);
 
 // Voice clips of cutscenes (xa_on; tools/xa2ds.py: voice/s<stage>_<nn>.bin).
 // One at a time; a new one stops the old.
@@ -18,5 +20,8 @@ void voice_play(int stage, int clip);  // stage 0: the common clips (xa_on 1, n)
 int voice_playing(void);     // the clip has not finished yet
 void voice_frame(void);      // once per DS frame: counts down, frees the clip
 void voice_stop(void);
+// xa_vol (scd_op_5f, 0x80053d70): the clips' volume 0-127 (0x800cd6a0); each
+// room starts at 120 (FUN_8004f484), the DS's full volume.
+void voice_volume(int v);
 const char *voice_key(void); // the playing clip's name ("s2_13"), NULL if none
 uint32_t voice_ms(void);     // how far into it

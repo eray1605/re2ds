@@ -74,6 +74,16 @@ void game_espr_on2(const uint8_t *ins, int d) { (void)ins; (void)d; }
 void game_espr_kill2(int h) { (void)h; }
 void game_enemy_part_set(int s, int p, int f, int v) { enemy_part_set(s, p, f, v); }
 int game_free_object_textures(void) { return 0; }
+void game_neck_set(int w, int i, const uint8_t *ins) { if (w == 2) enemy_neck_set(0xFF, ins); else if (w == 3) enemy_neck_set(i, ins); }
+int game_character_head(int k, int32_t out[3]) { if (k >= 1) return enemy_head_point(k == 1 ? 0xFF : k - 2, out); out[0] = out[1] = out[2] = 0; return 1; }
+int game_light_character(int32_t x, int32_t y, int32_t z) { (void)x; (void)y; (void)z; return 0; }
+uint8_t *game_light_record(int cam) { (void)cam; return NULL; }
+void game_super_on(int work, int index, const uint8_t *ins) { (void)work; (void)index; (void)ins; }
+void game_voice_volume(int v) { (void)v; }
+void game_enemy_part_fx(int s, int p, int d) { printf("  part %d of %d %s\n", p, s, d ? "drops" : "bursts"); if (d) enemy_part_down(s, p); else enemy_part_bomb(s, p); }
+void game_music_scale(int p) { (void)p; }
+void game_espr_task(int k, int i) { (void)k; (void)i; }
+void game_mirror_set(const uint8_t *ins) { (void)ins; }
 int game_keys(int pressed) { (void)pressed; return 0; }
 void game_fade_set(int n, int k, int s) { (void)n; (void)k; (void)s; }
 void game_fade_adjust(int n, int l) { (void)n; (void)l; }

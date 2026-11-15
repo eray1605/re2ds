@@ -151,6 +151,11 @@ static int mask_tex = -1;
 static int bg_id;
 static void *room_bank;             // the room's sound bank (footsteps, room effects)
 static int cur_cam = -1;
+static struct {           // mirror_set (game_mirror_set)
+    uint8_t on, axis;
+    int16_t plane, low, high;
+} mirror;
+extern int cull_models;
 static int8_t first_child[64], next_sibling[64];
 
 static const RoomRef *room_index;
@@ -315,6 +320,24 @@ static void fatal(const char *msg)
     printf("\x1b[1;1HERROR:\n%s\n", msg);
     while (1)
         swiWaitForVBlank();
+}
+
+static void upload_leon_textures(void);
+
+// Texture memory anew for every room, once the old room's textures are
+// gone: the long-lived ones (Leon, the camera masks, the effects, the
+// shadows) first, as at boot. After many rooms the free texture memory had
+// fallen apart into pieces too small for a 4-page enemy: room 207's zombies
+// in shirts (type 0x1f, 128 KB) stayed invisible now and then on coming back
+// from the darkroom, although they fit with room to spare on a fresh start.
+static void textures_rebuild(void)
+{
+    glResetTextures();
+    mask_tex = -1;
+    upload_leon_textures();
+    reserve_mask_texture();
+    effect_load();
+    enemy_shadow_init();
 }
 
 static void upload_leon_textures(void)
@@ -528,8 +551,16 @@ void game_espr_on(const uint8_t *ins) { roomfx_on(ins); }
 void game_espr3d_on(const uint8_t *ins) { roomfx_3d_on(ins); }
 void game_espr_kill(int id, int type) { roomfx_kill(id, type); }
 void game_enemy_part_set(int slot, int part, int field, int value) { enemy_part_set(slot, part, field, value); }
+void game_enemy_part_fx(int slot, int part, int drop)
+{
+    if (drop)
+        enemy_part_down(slot, part);
+    else
+        enemy_part_bomb(slot, part);
+}
 void game_espr_on2(const uint8_t *ins, int is_3d) { roomfx_on2(ins, is_3d); }
 void game_espr_kill2(int handle) { roomfx_kill2(handle); }
+void game_espr_task(int kind, int index) { roomfx_kill_owner(kind, index); }
 
 void game_floor_sound_set(int n, int on)
 {
@@ -716,6 +747,9 @@ static void draw_objects(void)
 // The objects a character's part carries (super_set with a part: what
 // someone holds in a scene), drawn while that part's matrix is set.
 // who: 0 Leon, 1 the partner, 2 + slot an enemy.
+static void model_colour(void);
+static void load_lights(int stage, int id);
+
 void game_draw_attached(int who, int bone)
 {
     if (!obj_data)
@@ -735,6 +769,7 @@ void game_draw_attached(int who, int bone)
         glPushMatrix();
         object_local_matrix(n);
         glBindTexture(0, obj_tex[tex]);
+        model_colour(); // no normals: not the last colour the character's lights left
         glCallList((const u32 *)(obj_data + list));
         glPopMatrix(1);
     }
@@ -796,6 +831,8 @@ static int load_room(int stage, int id)
             asset_free(rbj_enemy[i].data), rbj_enemy[i].data = NULL;
     }
     voice_stop();
+    voice_volume(120); // the room start's (FUN_8004f484)
+    memset(&mirror, 0, sizeof(mirror));
     // path zones for the enemies (tools/blk2ds.py)
     enemy_set_zones(NULL);
     if (room_zones)
@@ -805,6 +842,8 @@ static int load_room(int stage, int id)
     enemy_set_zones(room_zones);
     load_objects(stage, id);
     roomfx_load(stage, id);
+    load_lights(stage, id);
+    textures_rebuild(); // the old room's textures are all freed now
     if (old_bank)
         sound_bank_free(old_bank);
     near_aot = NULL;
@@ -1006,12 +1045,44 @@ static int clamp_abs(int v, int m) { return v > m ? m : v < -m ? -m : v; }
 
 static void leon_point(int bone, const int32_t local[3], int32_t out[3]);
 
+static Neck player_neck;            // plc_neck on Leon (a scene turns his head)
+
+// a character's head for a scene to look at (enemy.c neck_step): 0 Leon, 1 the partner, 2 + slot
+int game_character_head(int k, int32_t out[3])
+{
+    static const int32_t at[3];
+    if (k == 0) {
+        leon_point(NECK_BONE, at, out);
+        return 1;
+    }
+    return enemy_head_point(k == 1 ? 0xFF : k - 2, out);
+}
+
+void game_neck_set(int work, int index, const uint8_t *ins)
+{
+    if (work == 1)
+        neck_set(&player_neck, ins);
+    else if (work == 2)
+        enemy_neck_set(0xFF, ins);
+    else if (work == 3)
+        enemy_neck_set(index, ins);
+}
+
 static void update_neck(void)
 {
     static const int32_t at[3];
     int32_t head[3], t[3];
     int want[2] = { 0, 0 };
     leon_point(NECK_BONE, at, head);
+    if (player_neck.mode & 0x80) { // a scene has his head (FUN_80017160 with obj+0x1c0)
+        const int anim[2] = { pose_rot[NECK_BONE][1] / 8, pose_rot[NECK_BONE][2] / 8 };
+        player_neck.turn[0] = neck_turn[0];
+        player_neck.turn[1] = neck_turn[1];
+        neck_step(&player_neck, head, player.dir / 8 + pose_rot[0][1] / 8, anim);
+        neck_turn[0] = player_neck.turn[0];
+        neck_turn[1] = player_neck.turn[1];
+        return;
+    }
     if (player.state >= ST_HURT) {
         neck_target = -1;
         neck_scan = 0;
@@ -1061,6 +1132,59 @@ static void draw_bone(int bone)
     game_draw_attached(0, bone);
     for (int c = first_child[bone]; c >= 0; c = next_sibling[c])
         draw_bone(c);
+    glPopMatrix(1);
+}
+
+// mirror_set (scd_op_73, 0x80054bd8; room 20E): axis, s16 plane, s16 low,
+// s16 high (0x800c77b9..; 0x800c77d4 | 0x10000 turns it on). The PS1 draws
+// the characters a second time from the camera mirrored at the plane
+// (0x8002dc2c; axis 0 mirrors z, 1 x, 2 y) when the line from the camera to
+// the character's reflection crosses the plane between low and high on the
+// other axis (0x8002dee4; axis 2 always). Here Leon only, mirrored in place.
+void game_mirror_set(const uint8_t *ins)
+{
+    mirror.on = 1;
+    mirror.axis = ins[1];
+    mirror.plane = (int16_t)(ins[2] | ins[3] << 8);
+    mirror.low = (int16_t)(ins[4] | ins[5] << 8);
+    mirror.high = (int16_t)(ins[6] | ins[7] << 8);
+}
+
+static void draw_player(void);
+int game_light_character(int32_t x, int32_t y, int32_t z);
+
+static void draw_player_mirrored(void)
+{
+    if (!mirror.on || mirror.axis > 2 || die.step >= DIE_ORBIT)
+        return;
+    const RoomCamera *c = &room.cameras[cur_cam];
+    if (mirror.axis == 0) { // the plane z = plane, the mirror between low and high on x
+        int32_t t0 = player.z - mirror.plane, a3 = c->from[2] - mirror.plane;
+        if ((t0 ^ a3) < 0 || t0 + a3 == 0)
+            return; // the camera and Leon on different sides of the plane
+        int32_t x = (int32_t)((int64_t)(player.x - c->from[0]) * a3 / (t0 + a3)) + c->from[0];
+        if (x < mirror.low || x >= mirror.high)
+            return;
+    } else if (mirror.axis == 1) { // the plane x = plane, the mirror on z (as axis 0, untested)
+        int32_t t0 = player.x - mirror.plane, a3 = c->from[0] - mirror.plane;
+        if ((t0 ^ a3) < 0 || t0 + a3 == 0)
+            return;
+        int32_t z = (int32_t)((int64_t)(player.z - c->from[2]) * a3 / (t0 + a3)) + c->from[2];
+        if (z < mirror.low || z >= mirror.high)
+            return;
+    }
+    // reflected: the winding turns over, so the other side is culled
+    int cull = cull_models == POLY_CULL_BACK ? POLY_CULL_FRONT : cull_models == POLY_CULL_FRONT ? POLY_CULL_BACK
+                                                                                                 : cull_models;
+    glPolyFmt(POLY_ALPHA(31) | cull | POLY_ID(1) | game_light_character(player.x, player.y, player.z));
+    glPushMatrix();
+    int k = mirror.axis == 0 ? 2 : mirror.axis == 1 ? 0 : 1;
+    int32_t t[3] = { 0, 0, 0 }, s[3] = { inttof32(1), inttof32(1), inttof32(1) };
+    t[k] = 2 * mirror.plane;
+    s[k] = -inttof32(1);
+    glTranslatef32(t[0], t[1], t[2]);
+    glScalef32(s[0], s[1], s[2]);
+    draw_player();
     glPopMatrix(1);
 }
 
@@ -1374,6 +1498,114 @@ static void die_tick(void)
     }
 }
 
+// ---------------------------------------------------------------- room lights
+// The PS1 lights every character (FUN_80026598 -> FUN_80072454) with the
+// shown camera's record of the room's light table (RDT LIT, tools/lit2ds.py,
+// 40 bytes): per light i < 3 a type (byte 1 + i), RGB (4 + 3i), place (s16 at
+// 16 + 6i) and range (u16 at 34 + 2i); the ambient RGB at 13, a gain at 0.
+// A point light (type 0) shines from its place with colour * (r - d) / r,
+// r = range / 16, d = the distance on the floor plane / 16 (its height not
+// counted); a type 1 light is a direction (the place as vector). The light
+// matrix row is -gain * the unit vector light -> character, the colour
+// matrix the colours * 16 and the back colour the ambient: a channel comes
+// out as ambient / 256 + sum colour / 256 * gain * falloff * (N . L) times
+// the texture, 1.0 = the texture as it is. The DS does the same with its
+// hardware lights from the vertex normals of the models (tools/model2ds.py),
+// the ambient as the emission; it cannot brighten past the texture (the PS1
+// can, up to twice).
+#define LIT_RECORD 40
+#define MAX_LIT_CAMERAS 32
+static uint8_t room_lit[MAX_LIT_CAMERAS][LIT_RECORD];
+static int lit_cameras;
+
+static void load_lights(int stage, int id)
+{
+    char path[48];
+    uint32_t size = 0;
+    snprintf(path, sizeof(path), "nitro:/room/room%d%02x0_lit.bin", stage, id);
+    uint8_t *d = asset_load(path, &size);
+    lit_cameras = d ? (int)(size / LIT_RECORD) : 0;
+    if (lit_cameras > MAX_LIT_CAMERAS)
+        lit_cameras = MAX_LIT_CAMERAS;
+    if (d)
+        memcpy(room_lit, d, (size_t)lit_cameras * LIT_RECORD);
+    asset_free(d);
+}
+
+// the record the scripts' light commands change (script.c), NULL if none
+uint8_t *game_light_record(int cam)
+{
+    if (cam < 0)
+        cam = cur_cam;
+    return cam >= 0 && cam < lit_cameras ? room_lit[cam] : NULL;
+}
+
+static int channel5(int c, float k)
+{
+    int v = (int)(c * k + 0.5f);
+    return v > 31 ? 31 : v < 0 ? 0 : v;
+}
+
+static void model_colour(void);
+
+// The DS lights and material for a character standing at (x, y, z); returns
+// the POLY_FORMAT_LIGHTn bits for its glPolyFmt. Called with the camera's
+// matrix current (the light vectors go through it).
+int game_light_character(int32_t x, int32_t y, int32_t z)
+{
+    glMaterialf(GL_AMBIENT, RGB15(0, 0, 0));
+    glMaterialf(GL_SPECULAR, RGB15(0, 0, 0));
+    glMaterialf(GL_DIFFUSE, RGB15(31, 31, 31));
+    const uint8_t *L = die.step >= DIE_PICTURE ? NULL : game_light_record(-1);
+    if (!L) { // the death's own light, or no table: the vertex colour as before
+        int c[3] = { 255, 255, 255 };
+        if (die.step >= DIE_PICTURE)
+            for (int k = 0; k < 3; k++) {
+                c[k] = die.ambient + die.light[k];
+                if (c[k] > 255)
+                    c[k] = 255;
+            }
+        glMaterialf(GL_EMISSION, RGB15(c[0] >> 3, c[1] >> 3, c[2] >> 3));
+        return 0;
+    }
+    int bits = 0;
+    for (int i = 0; i < 3; i++) {
+        const uint8_t *col = L + 4 + 3 * i;
+        const uint8_t *pp = L + 16 + 6 * i;
+        float p[3], d[3], falloff = 1.0f;
+        for (int k = 0; k < 3; k++)
+            p[k] = (float)(int16_t)(pp[2 * k] | pp[2 * k + 1] << 8);
+        if (L[1 + i]) { // a direction
+            for (int k = 0; k < 3; k++)
+                d[k] = p[k];
+        } else {
+            int range = (L[34 + 2 * i] | L[35 + 2 * i] << 8) >> 4;
+            if (!range)
+                continue;
+            d[0] = (float)((x - (int32_t)p[0]) >> 4);
+            d[1] = (float)((y - (int32_t)p[1]) >> 4);
+            d[2] = (float)((z - (int32_t)p[2]) >> 4);
+            float dist = sqrtf(d[0] * d[0] + d[2] * d[2]);
+            if (dist >= (float)range)
+                continue;
+            falloff = ((float)range - dist) / (float)range;
+        }
+        float len = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        if (len <= 0.0f)
+            continue;
+        float k = (float)L[0] * falloff * 31.0f / 256.0f;
+        int r = channel5(col[0], k), g = channel5(col[1], k), b = channel5(col[2], k);
+        if (!(r | g | b))
+            continue;
+        glLight(i, RGB15(r, g, b), floattov10(d[0] / len * 0.998f), floattov10(d[1] / len * 0.998f),
+                floattov10(d[2] / len * 0.998f));
+        bits |= POLY_FORMAT_LIGHT0 << i;
+    }
+    glMaterialf(GL_EMISSION, RGB15(channel5(L[13], 31.0f / 256.0f), channel5(L[14], 31.0f / 256.0f),
+                                   channel5(L[15], 31.0f / 256.0f)));
+    return bits;
+}
+
 // the vertex colour models are lit with (textures are modulated by it)
 static void model_colour(void)
 {
@@ -1402,11 +1634,15 @@ static void render_frame(void)
         glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(2));
         draw_masks();
     }
-    glPolyFmt(POLY_ALPHA(31) | cull_models | POLY_ID(1));
+    glPolyFmt(POLY_ALPHA(31) | cull_models | POLY_ID(1) | game_light_character(player.x, player.y, player.z));
     draw_player();
+    draw_player_mirrored();
+    glPolyFmt(POLY_ALPHA(31) | cull_models | POLY_ID(1));
+    model_colour(); // the objects have no normals: the vertex colour as it was
     draw_objects();
     int fx = effect_count() + roomfx_count();
     enemy_draw(4 * fx, fx);
+    model_colour();
     // his shadow, translucent after the bodies like the enemies' (obj+0x16c)
     if (die.step < DIE_ORBIT && player.state != ST_FALL && player.state != ST_JUMP &&
         in_view_area(cur_cam, player.x, player.z))
@@ -1758,6 +1994,7 @@ static void place_player(int32_t x, int32_t y, int32_t z, int16_t dir, int cam)
     neck_target = -1;
     neck_scan = 0;
     neck_turn[0] = neck_turn[1] = 0;
+    memset(&player_neck, 0, sizeof(player_neck));
     cam = cut_replace(cam);
     set_camera(cam < room.header->num_cameras ? cam : 0);
 }
@@ -2255,6 +2492,9 @@ void game_set_player_pos(int32_t x, int32_t y, int32_t z)
 }
 
 void game_set_player_dir(int16_t dir_re2) { player.dir = dir_re2 * 8; }
+
+void game_voice_volume(int v) { voice_volume(v); }
+void game_music_scale(int percent) { music_scale(percent); }
 
 void game_voice(int kind, int n)
 {
@@ -3128,9 +3368,11 @@ static void show_file(int k)
         }
         scanKeys();
         uint32_t down = keysDown();
-        if (down & (KEY_A | KEY_RIGHT | KEY_TOUCH)) {
-            if (page + 1 >= pages)
-                break;
+        // right only turns the page; on the last one A (or B / START) closes it -
+        // turning past the end used to close it as well
+        if ((down & (KEY_A | KEY_TOUCH)) && page + 1 >= pages) {
+            break;
+        } else if ((down & (KEY_A | KEY_RIGHT | KEY_TOUCH)) && page + 1 < pages) {
             page++;
             game_menu_sound(4);
         } else if ((down & (KEY_LEFT | KEY_L)) && page > 0) {
@@ -3347,21 +3589,35 @@ static int map_load(int page)
         mapv.img = malloc(256 * 256);
     if (!mapv.screen)
         mapv.screen = malloc(256 * 192);
-    uint8_t *file = asset_load("nitro:/menu/maps.bin", NULL);
-    if (!mapv.img || !mapv.screen || !file || *(const uint32_t *)file != MAP_MAGIC) {
-        asset_free(file);
+    // only the page table, the page's pieces and its picture: the whole file
+    // (167 KB) was read on every page change, also while a room loads
+    static uint8_t head[8 + MAP_PAGES * sizeof(MapPage)];
+    FILE *f = fopen("nitro:/menu/maps.bin", "rb");
+    if (!mapv.img || !mapv.screen || !f || fread(head, 1, sizeof(head), f) != sizeof(head) ||
+        *(const uint32_t *)head != MAP_MAGIC) {
+        if (f)
+            fclose(f);
         return 0;
     }
-    const MapPage *pg = (const MapPage *)(file + 8) + page;
+    const MapPage *pages = (const MapPage *)(head + 8), *pg = pages + page;
     for (int p = 0; p < MAP_PAGES; p++)
-        mapv.found_bits[p] = ((const MapPage *)(file + 8))[p].found;
+        mapv.found_bits[p] = pages[p].found;
     mapv.found_known = 1;
-    const MapPiece *pieces = (const MapPiece *)(file + 8 + MAP_PAGES * sizeof(MapPage));
-    decompress(file + pg->offset, mapv.img, LZ77);
-    mapv.count = pg->count < 32 ? pg->count : 32;
+    int count = pg->count < 32 ? pg->count : 32;
+    uint8_t *lz = malloc(pg->size);
+    int ok = lz && fseek(f, (long)(sizeof(head) + pg->first * sizeof(MapPiece)), SEEK_SET) == 0 &&
+             fread(mapv.pieces, sizeof(MapPiece), (size_t)count, f) == (size_t)count &&
+             fseek(f, (long)pg->offset, SEEK_SET) == 0 && fread(lz, 1, pg->size, f) == pg->size;
+    fclose(f);
+    if (!ok) {
+        free(lz);
+        return 0;
+    }
+    DC_FlushRange(lz, pg->size);
+    decompress(lz, mapv.img, LZ77);
+    free(lz);
+    mapv.count = count;
     mapv.found = pg->found;
-    memcpy(mapv.pieces, pieces + pg->first, mapv.count * sizeof(MapPiece));
-    asset_free(file);
     mapv.page = page;
     return 1;
 }
@@ -4502,6 +4758,67 @@ void game_object_super_reset(int n, const int16_t dir[3])
     }
 }
 
+// super_on (scd_op_72, 0x800519fc): the work object is put once at a point in
+// the frame of the room (parent 0), Leon (0x40; the PS1's obj+36 matrix at
+// 0x800c7818), a character (0x80 | k) or a room object (0xc0 | n) - with
+// part & 0x80 in that part's frame (Leon's parts from 0x800c798c, his
+// obj+0x198) - and turned to face as the parent does plus the turn given.
+// Room 409 puts the thing Leon throws into his hand (part 11); 505, 601, 607,
+// 700 and 703 keep the partner at his side every frame. The PS1 turns it by
+// the whole matrix (0x800438c8); here only by the parent's facing.
+void game_super_on(int work, int index, const uint8_t *ins)
+{
+    int parent = ins[2], part = ins[3], kind = parent & 0xC0, k = parent & 0x3F;
+    int32_t local[3], out[3], base[3] = { 0, 0, 0 };
+    int16_t rot[3];
+    for (int j = 0; j < 3; j++) {
+        local[j] = (int16_t)(ins[4 + 2 * j] | ins[5 + 2 * j] << 8);
+        rot[j] = (int16_t)(ins[10 + 2 * j] | ins[11 + 2 * j] << 8);
+    }
+    int dir = 0, who = kind == 0x40 ? 0 : k;
+    memcpy(out, local, sizeof(out));
+    if ((kind == 0x40 || kind == 0x80) && (part & 0x80)) {
+        if (!character_place(who, base, &dir))
+            return;
+        if (who == 0)
+            leon_point(part & 0x7F, local, out);
+        else if (!enemy_part_point(who == 1 ? PARTNER_SLOT : who - 2, part & 0x7F, local, out))
+            return;
+    } else {
+        if (kind == 0xC0) {
+            if (k >= MAX_OBJECTS || !objects[k].placed)
+                return;
+            object_world(k, base, 0);
+            dir = (objects[k].dir[1] * 8) & 32767;
+        } else if (kind != 0 && !character_place(who, base, &dir)) {
+            return;
+        }
+        int32_t c = cosLerp(dir), s = sinLerp(dir);
+        out[0] = base[0] + ((c * local[0] + s * local[2]) >> 12);
+        out[1] = base[1] + local[1];
+        out[2] = base[2] + ((-s * local[0] + c * local[2]) >> 12);
+    }
+    int yaw = (dir + rot[1] * 8) & 32767; // DS units
+    if (work == 4 && index < MAX_OBJECTS) {
+        objects[index].parent = objects[index].part = 0;
+        for (int j = 0; j < 3; j++)
+            objects[index].pos[j] = (int16_t)out[j];
+        objects[index].dir[0] = rot[0];
+        objects[index].dir[1] = (int16_t)(yaw / 8);
+        objects[index].dir[2] = rot[2];
+    } else if (work == 1) {
+        player.x = out[0];
+        player.y = out[1];
+        player.z = out[2];
+        player.dir = yaw;
+    } else if (work == 2 || work == 3) {
+        int slot = work == 2 ? PARTNER_SLOT : index;
+        for (int j = 0; j < 3; j++)
+            game_enemy_member_set(slot, 0x0B + j, out[j]);
+        game_enemy_member_set(slot, 0x0F, yaw / 8);
+    }
+}
+
 // FUN_80035a2c / FUN_800358c8: a crate before Leon that he can climb
 static int object_to_climb(void)
 {
@@ -5275,6 +5592,7 @@ static void special_move_tick(void)
         break;
     case ST_PUSH:
         push_tick();
+        check_camera_switch(); // he walks along with the statue or crate: the cuts go on
         break;
     case ST_PICKUP: // pl_move_06
         if (crouch_phase == 0) {

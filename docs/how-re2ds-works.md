@@ -134,6 +134,8 @@ must be drawn in front of Leon so he disappears behind the table.
 | Rooms | `rdt2json.py` → `room2ds.py` | cameras, walls, floors, camera zones, doors, texts and **scripts** into one DS room file |
 | Backgrounds | `bss2ppm`, `bg2ds.py` | as above |
 | Masks | `bssmask.py`, `mask2ds.py` | foreground parts as flat 3D quads at the right depth |
+| Room lights | `lit2ds.py` | the rooms' light tables (RDT "LIT", per camera) that light Leon and the enemies (`game_light_character`) |
+| Message font | `font2ds.py` | the PS1's message font (`COMMON/DATA/TEX.TIM`) for the texts on the upper screen (`msgtop.c`) |
 | Leon | `pld2json.py`, `model2ds.py`, `plw2ds.py` | 3D model, bones, animations; one model per weapon |
 | Enemies | `em2ds.py` | zombies etc.; where they lie on the disc comes from a table in the PS1 program |
 | Room objects | `obj2ds.py`, `rbj2ds.py` | items, typewriter, item box, the room's animations |

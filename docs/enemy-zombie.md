@@ -141,6 +141,14 @@ the blood of Leon's death in that animation (spurts from key 41, the floor from 
 
 ---
 
+
+**The body** (routine 7, `0x8010a380`, states by table `0x8010019c`): a zombie that fell dead
+lies in pose `0x17` (`0x16` when it fell backward, `obj+0x21a & 4`), HP −1, its blood pool
+growing; one in three (rand % 3 == 0) twitches - the pose's ten keys played again 40 times
+after 1–16 frames (`0x8010a54c`), then 30 times after 60–123 frames (`0x8010a5fc`), then it
+lies still (state 7, its parts frozen with `0x8000`); the others lie still at once (state 8:
+the pool only). **DS:** `body_start` / `body_tick` in `enemy.c`.
+
 ## 4. Perception (observed)
 
 `FUN_80014fb4(obj, x, z, half_angle)` returns **0** if the target is inside the cone

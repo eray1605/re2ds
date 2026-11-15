@@ -47,16 +47,49 @@ enum {
     OP_MEMBER_SET = 52, OP_MEMBER_SET2 = 53, OP_SE_ON = 54, OP_SCA_ID_SET = 55, OP_DIR_CK = 57, OP_SCE_EM_SET = 68, OP_DOOR_AOT_SET = 59, OP_CUT_AUTO = 60, OP_MEMBER_COPY = 61, OP_MEMBER_CMP = 62,
     OP_AOT_RESET = 70, OP_AOT_ON = 71, OP_CUT_REPLACE = 75, OP_ITEM_AOT_SET = 78,
     OP_SCE_TRG_CK = 80, OP_SCE_BGM_CONTROL = 81, OP_KEEP_ITEM_CK = 94, OP_SCE_ITEM_LOST = 98, OP_SCE_ITEM_GET = 118, OP_AOT_SET_4P = 103, OP_DOOR_AOT_SET_4P = 104,
-    OP_ITEM_AOT_SET_4P = 105, OP_PLC_MOTION = 63, OP_PLC_DEST = 64, OP_PLC_RET = 66, OP_PLC_ROT = 88,
-    OP_PLC_CNT = 91, OP_PLC_STOP = 102, OP_XA_ON = 89, OP_MOVIE_ON = 111, OP_SCE_BGMTBL_SET = 87,
+    OP_ITEM_AOT_SET_4P = 105, OP_PLC_MOTION = 63, OP_PLC_DEST = 64, OP_PLC_RET = 66, OP_PLC_FLG = 67, OP_PLC_ROT = 88,
+    OP_PLC_CNT = 91, OP_PLC_STOP = 102, OP_XA_ON = 89, OP_XA_VOL = 95, OP_BGM_SCALE = 128,
+    OP_SPLC_RET = 112, OP_SPLC_SCE = 113, OP_MIRROR_SET = 115, OP_MOVIE_ON = 111, OP_SCE_BGMTBL_SET = 87,
     OP_KAGE_SET = 96, OP_CUT_BE_SET = 97, OP_SCE_ESPR3D_ON = 84,
-    OP_SUPER_SET = 72, OP_SUPER_RESET = 73, OP_SCE_SHAKE_ON = 92, OP_SCE_EM_POS_CK = 133, OP_PARTS_SET = 110,
-    OP_SCE_ESPR_ON2 = 100, OP_SCE_ESPR_KILL2 = 101, OP_SCE_ESPR3D_ON2 = 117,
+    OP_PLC_NECK = 65, OP_SUPER_SET = 72, OP_SUPER_RESET = 73, OP_SUPER_ON = 114, OP_SCE_SHAKE_ON = 92, OP_SCE_EM_POS_CK = 133, OP_PARTS_SET = 110,
+    OP_SCE_ESPR_ON2 = 100, OP_SCE_ESPR_KILL2 = 101, OP_SCE_ESPR3D_ON2 = 117, OP_SCE_ESPR_TASK = 130,
     OP_SCE_KEY_CK = 79, OP_SCE_FADE_SET = 83, OP_WEAPON_CHG = 90, OP_SCE_FADE_ADJUST = 116,
+    OP_LIGHT_POS_SET = 106, OP_LIGHT_KIDO_SET = 107, OP_LIGHT_COLOR_SET = 124, OP_LIGHT_POS_CAM_SET = 125,
+    OP_LIGHT_KIDO_CAM_SET = 126, OP_LIGHT_COLOR_CAM_SET = 127, OP_SCE_PARTS_BOMB = 122,
+    OP_SCE_PARTS_DOWN = 123,
     OP_SCE_AMMO_CMP = 129, OP_PLC_HEAL = 131, OP_POISON_CK = 134, OP_POISON_CLR = 135, OP_SCE_ITEM_LOST2 = 136,
 };
 
 enum { B_IF, B_FOR, B_WHILE, B_DO, B_DOCOND, B_SWITCH };
+
+// The light commands (handlers 0x800546b4 - 0x8005492c) change the room's
+// light table in place (40 bytes a camera, tools/lit2ds.py); the next room
+// loads it anew. Axis 11 / 12 / 13 picks x / y / z of a light's place.
+static void light_place(int cam, int light, int axis, uint16_t v)
+{
+    uint8_t *L = game_light_record(cam);
+    if (!L || light > 2 || axis < 11 || axis > 13)
+        return;
+    uint8_t *p = L + 16 + 6 * light + 2 * (axis - 11);
+    p[0] = v & 0xFF;
+    p[1] = v >> 8;
+}
+
+static void light_range(int cam, int light, uint16_t v)
+{
+    uint8_t *L = game_light_record(cam);
+    if (!L || light > 2)
+        return;
+    L[34 + 2 * light] = v & 0xFF;
+    L[35 + 2 * light] = v >> 8;
+}
+
+static void light_colour(int cam, int light, const uint8_t *rgb)
+{
+    uint8_t *L = game_light_record(cam);
+    if (L && light <= 2)
+        memcpy(L + 4 + 3 * light, rgb, 3);
+}
 
 typedef struct {
     uint8_t type;
@@ -514,6 +547,23 @@ static void run_thread(Thread *t)
         case OP_XA_ON: // scd_op_59: kind, u16 clip
             game_voice(ins[1], ru16(ins + 2));
             break;
+        case OP_XA_VOL: // scd_op_5f: volume 0-127 of the voice clips
+            game_voice_volume(ins[1]);
+            break;
+        case OP_MIRROR_SET: // scd_op_73: axis, s16 plane, s16 low, s16 high
+            game_mirror_set(ins);
+            break;
+        case OP_SPLC_RET: // scd_op_70 (0x80054a8c): the partner back to following Leon
+            // (routine 1, aimed at him, 0x800c77d4 | 0x10000000 = flag 1:3)
+            flag_set(1, 3, 1);
+            break;
+        case OP_SPLC_SCE: // scd_op_71 (0x80054b28): the partner to the scene (routine
+            // 0x0604: stands; no target; HP -1), the follow bit cleared
+            flag_set(1, 3, 0);
+            break;
+        case OP_BGM_SCALE: // scd_op_80: the music at ins[1] percent of its volume
+            game_music_scale(ins[1]);
+            break;
         case OP_FOR:
             if (ru16(ins + 4) == 0) {
                 next += ru16(ins + 2);
@@ -793,6 +843,9 @@ static void run_thread(Thread *t)
             if (!ins[4])
                 game_espr_on2(ins, 1);
             break;
+        case OP_SCE_ESPR_TASK: // scd_op_82: owner kind, index (6: every effect)
+            game_espr_task(ins[1], ins[2]);
+            break;
         case OP_SCE_ESPR_KILL2: // scd_op_65: the number
             game_espr_kill2(ins[1]);
             break;
@@ -848,6 +901,7 @@ static void run_thread(Thread *t)
                 flag_set(5, ins[3], 1);
             break;
         case OP_PLC_MOTION:
+        case OP_PLC_FLG:
         case OP_PLC_RET:
         case OP_PLC_ROT:
         case OP_PLC_CNT:
@@ -922,6 +976,35 @@ static void run_thread(Thread *t)
             else if (t->work_type == 2)
                 game_enemy_part_set(0xFF, ins[2], ins[3], ru16(ins + 4));
             break;
+        case OP_LIGHT_POS_SET: // scd_op_6a: pad, light, axis, u16 (the shown camera's light)
+            light_place(-1, ins[2], ins[3], ru16(ins + 4));
+            break;
+        case OP_LIGHT_KIDO_SET: // scd_op_6b: light, u16 range
+            light_range(-1, ins[1], ru16(ins + 2));
+            break;
+        case OP_LIGHT_COLOR_SET: // scd_op_7c: light, r, g, b
+            light_colour(-1, ins[1], ins + 2);
+            break;
+        case OP_LIGHT_POS_CAM_SET: // scd_op_7d: camera, light, axis, u16
+            light_place(ins[1], ins[2], ins[3], ru16(ins + 4));
+            break;
+        case OP_LIGHT_KIDO_CAM_SET: // scd_op_7e: pad, camera, light, u16 range
+            light_range(ins[2], ins[3], ru16(ins + 4));
+            break;
+        case OP_LIGHT_COLOR_CAM_SET: // scd_op_7f: camera, light, r, g, b
+            light_colour(ins[1], ins[2], ins + 3);
+            break;
+        case OP_SCE_PARTS_BOMB: // scd_op_7a: pad, part, RGB, s16 x 5 (the work object's part bursts)
+            if (t->work_type == 3 || t->work_type == 2)
+                game_enemy_part_fx(t->work_type == 2 ? 0xFF : t->work_index, ins[2], 0);
+            break;
+        case OP_SCE_PARTS_DOWN: // scd_op_7b: part, s16 x 3, u8, s16 x 3 (... drops off)
+            if (t->work_type == 3 || t->work_type == 2)
+                game_enemy_part_fx(t->work_type == 2 ? 0xFF : t->work_index, ins[1], 1);
+            break;
+        case OP_PLC_NECK: // scd_op_41: mode, s16 x y z, speed y, speed z (the work object's head)
+            game_neck_set(t->work_type, t->work_index, ins);
+            break;
         case OP_SCE_SHAKE_ON: // scd_op_5c: s8 x, s8 y - the picture's offset
             game_shake((int8_t)ins[1], (int8_t)ins[2]);
             break;
@@ -934,6 +1017,9 @@ static void run_thread(Thread *t)
                 }
                 game_object_super(t->work_index, ins[2], ins[3], pos, dir);
             }
+            break;
+        case OP_SUPER_ON: // scd_op_72: pad, parent, part, s16 place x y z, s16 turn x y z (once)
+            game_super_on(t->work_type, t->work_index, ins);
             break;
         case OP_SUPER_RESET: // pad, s16 turn x y z
             if (t->work_type == 4) {

@@ -29,6 +29,14 @@ void game_espr_on2(const uint8_t *ins, int d) { (void)ins; (void)d; }
 void game_espr_kill2(int h) { (void)h; }
 int game_sight_blocked(int32_t a, int32_t b, int32_t c, int32_t d, int32_t e, int32_t f) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; return 0; }
 void game_enemy_part_set(int s, int p, int f, int v) { (void)s; (void)p; (void)f; (void)v; }
+void game_neck_set(int w, int i, const uint8_t *ins) { (void)w; (void)i; (void)ins; }
+uint8_t *game_light_record(int cam) { (void)cam; return NULL; }
+void game_super_on(int work, int index, const uint8_t *ins) { (void)work; (void)index; (void)ins; }
+void game_voice_volume(int v) { (void)v; }
+void game_enemy_part_fx(int s, int p, int d) { (void)s; (void)p; (void)d; }
+void game_music_scale(int p) { (void)p; }
+void game_espr_task(int k, int i) { (void)k; (void)i; }
+void game_mirror_set(const uint8_t *ins) { (void)ins; }
 int game_keys(int pressed) { (void)pressed; return 0; }
 void game_fade_set(int n, int k, int s) { (void)n; (void)k; (void)s; }
 void game_fade_adjust(int n, int l) { (void)n; (void)l; }
