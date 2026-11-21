@@ -10,6 +10,8 @@
 //   camera = lookAt(from, to, up = -Y), models face +X, facing = (cos a, 0, -sin a).
 #include <nds.h>
 #include <filesystem.h>
+#include <dirent.h>
+#include <strings.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -3113,7 +3115,8 @@ void game_set_box_flag(int box, int flag)
 // argv[0] names (flashcart menus pass it) or, without argv, the cartridge. With
 // a Slot-1 DLDI driver the ARM7 owns the card bus, so the ARM9 cannot read the
 // cartridge: melonDS with DLDI passes no argv and fails both ways. Then look for
-// the ROM on the SD card itself (start.command copies it there for melonDS).
+// the ROM on the SD card itself (start.command copies it there for melonDS):
+// re2ds.nds in the root, else any .nds of this build up to two folders down.
 static NitroRom sd_rom;
 static int nitro_step; // how far nitro_init got, for the error screen
 
@@ -3172,42 +3175,83 @@ static void sd_rom_close(void *user)
 
 static const NitroRomIface sd_rom_iface = { sd_rom_read, sd_rom_close };
 
+// Opens path as this very ROM and mounts its NitroFS from it. path must stay
+// valid: the reader reopens it for its other handles.
+static bool nitro_try(const char *path, bool named)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return false;
+    // only this very build: another one's files lie elsewhere in the ROM
+    static uint8_t header[0x160];
+    if (fread(header, 1, sizeof(header), f) != sizeof(header) ||
+        memcmp(header, g_envAppNdsHeader, sizeof(header)) != 0) {
+        fclose(f);
+        if (named) // a re2ds.nds of another build, for the error screen
+            nitro_step = 4;
+        return false;
+    }
+    setvbuf(f, NULL, _IOFBF, SD_BUFFER);
+    sd_files[0].f = f;
+    sd_files[0].pos = sizeof(header);
+    sd_rom_path = path;
+    nitro_step = 2;
+    NitroRomParams params = {
+        .fat_offset = g_envAppNdsHeader->fat_rom_offset,
+        .fat_sz = g_envAppNdsHeader->fat_size,
+        .fnt_offset = g_envAppNdsHeader->fnt_rom_offset,
+        .fnt_sz = g_envAppNdsHeader->fnt_size,
+        .img_offset = 0,
+    };
+    if (nitroromOpen(&sd_rom, &params, &sd_rom_iface, NULL)) {
+        nitro_step = 3;
+        return nitroFSMount(&sd_rom);
+    }
+    sd_rom_close(NULL);
+    return false;
+}
+
+// Flashcart menus without argv and renamed or filed ROMs (roms/nds/...): look
+// at every .nds file in dir and the folders below it, depth levels deep.
+static char sd_found[256];
+
+static bool nitro_scan(const char *dir, int depth)
+{
+    DIR *d = opendir(dir);
+    if (!d)
+        return false;
+    bool ok = false;
+    struct dirent *e;
+    while (!ok && (e = readdir(d)) != NULL) {
+        if (e->d_name[0] == '.')
+            continue;
+        size_t n = strlen(e->d_name);
+        if (e->d_type == DT_DIR) {
+            char sub[256];
+            if (depth > 0 && snprintf(sub, sizeof(sub), "%s%s/", dir, e->d_name) < (int)sizeof(sub))
+                ok = nitro_scan(sub, depth - 1);
+        } else if (n > 4 && strcasecmp(e->d_name + n - 4, ".nds") == 0 &&
+                   snprintf(sd_found, sizeof(sd_found), "%s%s", dir, e->d_name) < (int)sizeof(sd_found)) {
+            ok = nitro_try(sd_found, strcasecmp(e->d_name, "re2ds.nds") == 0);
+        }
+    }
+    closedir(d);
+    return ok;
+}
+
 static bool nitro_init(void)
 {
     static const char *const paths[] = { "fat:/re2ds.nds", "sd:/re2ds.nds" };
+    static const char *const roots[] = { "fat:/", "sd:/" };
     nitro_step = 1;
     if (nitroFSInit(NULL)) // also mounts the SD card (fatInitDefault)
         return true;
-    for (unsigned i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
-        FILE *f = fopen(paths[i], "rb");
-        if (!f)
-            continue;
-        // only this very build: another one's files lie elsewhere in the ROM
-        static uint8_t header[0x160];
-        if (fread(header, 1, sizeof(header), f) != sizeof(header) ||
-            memcmp(header, g_envAppNdsHeader, sizeof(header)) != 0) {
-            fclose(f);
-            nitro_step = 4;
-            continue;
-        }
-        setvbuf(f, NULL, _IOFBF, SD_BUFFER);
-        sd_files[0].f = f;
-        sd_files[0].pos = sizeof(header);
-        sd_rom_path = paths[i];
-        nitro_step = 2;
-        NitroRomParams params = {
-            .fat_offset = g_envAppNdsHeader->fat_rom_offset,
-            .fat_sz = g_envAppNdsHeader->fat_size,
-            .fnt_offset = g_envAppNdsHeader->fnt_rom_offset,
-            .fnt_sz = g_envAppNdsHeader->fnt_size,
-            .img_offset = 0,
-        };
-        if (nitroromOpen(&sd_rom, &params, &sd_rom_iface, NULL)) {
-            nitro_step = 3;
-            return nitroFSMount(&sd_rom);
-        }
-        sd_rom_close(NULL);
-    }
+    for (unsigned i = 0; i < sizeof(paths) / sizeof(paths[0]); i++)
+        if (nitro_try(paths[i], true))
+            return true;
+    for (unsigned i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
+        if (nitro_scan(roots[i], 2))
+            return true;
     return false;
 }
 
@@ -5730,7 +5774,7 @@ int main(void)
     if (!nitro_init()) {
         consoleDemoInit();
         iprintf("\x1b[1;1HERROR:\nNitroFS init failed (step %d,\nboot %d)\n\n"
-                "With DLDI (melonDS) copy\nre2ds.nds to the SD card root\n(step 4: the copy there is\nanother build).\n",
+                "Copy this re2ds.nds to the\nSD card (with DLDI in melonDS:\nto its SD folder). Step 4:\nthe re2ds.nds there is\nanother build.\n",
                 nitro_step, g_envBootParam->boot_src);
         while (1)
             swiWaitForVBlank();

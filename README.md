@@ -144,14 +144,24 @@ make
 This makes `re2ds.nds`. If the script set up Docker: after restarting Windows run
 `sudo service docker start` once before `make`.
 
-**6. Play.** Copy the ROM to your Windows desktop and open it in melonDS for Windows
-(<https://melonds.kuribo64.net/>):
+**6. Play.** Open `re2ds.nds` in melonDS for Windows (<https://melonds.kuribo64.net/>).
+Windows can open the Ubuntu folder directly – this shows it in the Explorer, where you can
+drag `re2ds.nds` onto melonDS:
+
+```bash
+explorer.exe .
+```
+
+Or copy it to your desktop. Put your Windows user name instead of `YourName` (`ls /mnt/c/Users/`
+lists them); if there is no `Desktop` folder, your desktop lies in OneDrive
+(`/mnt/c/Users/YourName/OneDrive/Desktop/`):
 
 ```bash
 cp re2ds.nds /mnt/c/Users/YourName/Desktop/
 ```
 
-For saving see [Saving](#saving).
+For saving see [Saving](#saving); if the game does not start, see
+[If it does not start](#if-it-does-not-start).
 
 ### macOS and Linux
 
@@ -240,11 +250,27 @@ Saving needs an SD card: on a flashcart or a DSi it is the card the ROM runs fro
    `Documents/re2ds-sd`.
 2. Copy `re2ds.nds` into that folder after every build (melonDS closed). With DLDI on, the
    game reads its data from that copy. On macOS `start.command` does this by itself
-   (folder `~/Documents/re2ds-sd`, or set `RE2DS_SD`); on Windows:
-   `cp re2ds.nds /mnt/c/Users/YourName/Documents/re2ds-sd/`.
+   (folder `~/Documents/re2ds-sd`, or set `RE2DS_SD`); on Windows (your Windows user name
+   instead of `YourName`, see step 6): `cp re2ds.nds /mnt/c/Users/YourName/Documents/re2ds-sd/`.
 
 The save file `re2ds.sav` then appears in that folder. (A 512 MB image is too small: melonDS
 keeps the ROM there padded to 512 MB.)
+
+## If it does not start
+
+- **Emulator:** use melonDS. Other emulators (DeSmuME, NO$GBA, DraStic) are not tested; the
+  ROM is about 440 MB and reads its data from the cartridge while it plays.
+- **Real hardware:** a DSi or 3DS with TWiLight Menu++, or a DS flashcart, from an SD card with
+  room for the whole ROM (tested on a DSi XL). Start it from the menu like any other `.nds`.
+- **`ERROR: NitroFS init failed`** – the game cannot read its data. In melonDS with DLDI on
+  (see [Saving](#saving)) the game reads it from the copy in the SD folder, so copy the new
+  `re2ds.nds` there (melonDS closed). *Step 4* means the `re2ds.nds` there is from another
+  build. On a flashcart the game also finds a ROM in a folder up to two levels down.
+- **A white or black screen** after a code update: convert the data again
+  (`tools/build_assets.sh build/disc1`) and run `make`; an old `nitrofiles/` may not fit a newer
+  engine.
+
+When you open an issue, write which emulator or console you use and what the screens show.
 
 ## Tests
 
